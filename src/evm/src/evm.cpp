@@ -389,7 +389,7 @@ namespace dcn::evm
         std::filesystem::path code_path,
         std::filesystem::path out_dir,
         std::filesystem::path base_path,
-        std::vector<std::filesystem::path> include_paths) const noexcept
+        std::filesystem::path include_path) const noexcept
     {
         std::error_code exists_ec;
         if(!std::filesystem::exists(code_path, exists_ec))
@@ -398,12 +398,14 @@ namespace dcn::evm
             co_return false;
         }
 
-        if(!include_paths.empty() && base_path.empty())
+        if(!include_path.empty() && base_path.empty())
         {
             spdlog::error("Base path must be specified if includes are specified");
             co_return false;
         }
 
+        std::vector<std::filesystem::path> include_paths;
+        if(!include_path.empty()) include_paths.push_back(std::move(include_path));
         std::vector<std::string> args = _solcArguments(out_dir, base_path, include_paths);
         args.push_back(code_path.string());
 
@@ -703,7 +705,7 @@ namespace dcn::evm
                     contracts_dir / "registry" / "RegistryBase.sol",
                     out_dir / "registry", 
                     contracts_dir,
-                    {node_modules}) == false)
+                    node_modules) == false)
             {
                 spdlog::error("Failed to compile registry");
                 co_return false;
@@ -713,7 +715,7 @@ namespace dcn::evm
                     contracts_dir / "proxy" / "PTRegistryProxy.sol",
                     proxy_out_dir, 
                     contracts_dir,
-                    {node_modules}) == false)
+                    node_modules) == false)
             {
                 spdlog::error("Failed to compile registry proxy");
                 co_return false;
@@ -751,7 +753,7 @@ namespace dcn::evm
                     contracts_dir / "runner" /  "Runner.sol",
                     out_dir / "runner", 
                     contracts_dir,
-                    {node_modules}) == false)
+                    node_modules) == false)
             {
                 spdlog::error("Failed to compile runner");
                 co_return false;
@@ -761,7 +763,7 @@ namespace dcn::evm
                     contracts_dir / "proxy" / "PTContractProxy.sol",
                     proxy_out_dir, 
                     contracts_dir,
-                    {node_modules}) == false)
+                    node_modules) == false)
             {
                 spdlog::error("Failed to compile contract proxy");
                 co_return false;

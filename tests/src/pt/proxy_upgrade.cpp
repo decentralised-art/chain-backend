@@ -249,7 +249,7 @@ contract RunnerV2 is Runner {
                 source_path,
                 out_dir,
                 env.evm_instance.getPTPath() / "contracts",
-                {env.evm_instance.getPTPath() / "node_modules"}));
+                env.evm_instance.getPTPath() / "node_modules"));
 
         if(!compile_ok)
         {

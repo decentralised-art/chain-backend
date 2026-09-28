@@ -94,7 +94,7 @@ namespace dcn::evm
         asio::awaitable<bool> compile(std::filesystem::path code_path,
                 std::filesystem::path out_dir,
                 std::filesystem::path base_path = {},
-                std::vector<std::filesystem::path> include_paths = {}) const noexcept;
+                std::filesystem::path include_path = {}) const noexcept;
 
         // Compiles `source` as the source unit `unit_name` against the PT sources and returns
         // `contract_name`'s code. The unit sits on an include path, so its name carries no

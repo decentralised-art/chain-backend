@@ -4,6 +4,7 @@
 #include "registry_projector.hpp"
 #include "artifact_runtime.hpp"
 #include "rpc.hpp"
+#include <array>
 #include <charconv>
 #include <exception>
 #include <string_view>
@@ -398,13 +399,16 @@ static asio::awaitable<std::expected<dcn::publish::DeploymentManifest, std::stri
         co_return std::unexpected(std::format("cannot create '{}': {}", pt_out.string(), dir_ec.message()));
     }
 
-    for(const auto & source : {
+    // A named array rather than a braced range: GCC cannot compile an initializer_list
+    // that lives across a co_await.
+    const std::array<std::filesystem::path, 4> sources{
         std::filesystem::path("registry") / "RegistryBase.sol",
         std::filesystem::path("proxy") / "PTRegistryProxy.sol",
         std::filesystem::path("runner") / "Runner.sol",
-        std::filesystem::path("proxy") / "PTContractProxy.sol"})
+        std::filesystem::path("proxy") / "PTContractProxy.sol"};
+    for(const auto & source : sources)
     {
-        if(!co_await evm.compile(contracts / source, pt_out, contracts, {pt_path / "node_modules"}))
+        if(!co_await evm.compile(contracts / source, pt_out, contracts, pt_path / "node_modules"))
         {
             co_return std::unexpected(std::format("cannot compile '{}' for deployment", source.string()));
         }

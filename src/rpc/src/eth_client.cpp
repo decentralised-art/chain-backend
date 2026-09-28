@@ -121,7 +121,10 @@ namespace dcn::rpc
             const std::shared_ptr<JsonRpcClient> & client,
             std::string block_parameter)
         {
-            auto result = co_await client->call("eth_getBlockByNumber", json::array({std::move(block_parameter), false}));
+            // Params are built before the co_await, here and in every call below: GCC cannot
+            // compile an initializer_list that lives across one.
+            json params = json::array({std::move(block_parameter), false});
+            auto result = co_await client->call("eth_getBlockByNumber", std::move(params));
             if(!result) co_return std::unexpected(result.error());
 
             if(result->is_null())
@@ -229,8 +232,8 @@ namespace dcn::rpc
         const std::string_view address,
         const std::string_view tag) const
     {
-        auto result = co_await _client->call(
-            "eth_getCode", json::array({std::string(address), std::string(tag)}));
+        json params = json::array({std::string(address), std::string(tag)});
+        auto result = co_await _client->call("eth_getCode", std::move(params));
         if(!result) co_return std::unexpected(result.error());
 
         co_return _dataString(*result, "eth_getCode");
@@ -238,22 +241,23 @@ namespace dcn::rpc
 
     asio::awaitable<std::expected<std::vector<json>, RpcError>> EthClient::getLogs(const LogFilter & filter) const
     {
-        json params{
+        json filter_object{
             {"fromBlock", chain::toHexQuantity(filter.from_block)},
             {"toBlock", chain::toHexQuantity(filter.to_block)}
         };
 
         if(!filter.address.empty())
         {
-            params["address"] = filter.address;
+            filter_object["address"] = filter.address;
         }
 
         if(!filter.topic0.empty())
         {
-            params["topics"] = json::array({filter.topic0});
+            filter_object["topics"] = json::array({filter.topic0});
         }
 
-        auto result = co_await _client->call("eth_getLogs", json::array({std::move(params)}), false);
+        json params = json::array({std::move(filter_object)});
+        auto result = co_await _client->call("eth_getLogs", std::move(params), false);
         if(!result) co_return std::unexpected(result.error());
 
         if(!result->is_array())
@@ -294,8 +298,8 @@ namespace dcn::rpc
             call_object["gas"] = _quantityHex(*gas);
         }
 
-        auto result = co_await _client->call(
-            "eth_call", json::array({std::move(call_object), std::string(tag)}));
+        json params = json::array({std::move(call_object), std::string(tag)});
+        auto result = co_await _client->call("eth_call", std::move(params));
         if(!result) co_return std::unexpected(result.error());
 
         co_return _dataString(*result, "eth_call");
@@ -316,11 +320,10 @@ namespace dcn::rpc
             call_object["gas"] = _quantityHex(*gas);
         }
 
-        auto result = co_await _client->call(
-            "eth_call",
-            json::array({
-                std::move(call_object),
-                json{{"blockHash", std::string(block_hash)}, {"requireCanonical", true}}}));
+        json params = json::array({
+            std::move(call_object),
+            json{{"blockHash", std::string(block_hash)}, {"requireCanonical", true}}});
+        auto result = co_await _client->call("eth_call", std::move(params));
         if(!result) co_return std::unexpected(result.error());
 
         co_return _dataString(*result, "eth_call");
@@ -331,9 +334,8 @@ namespace dcn::rpc
         const std::string_view slot_hex,
         const std::string_view tag) const
     {
-        auto result = co_await _client->call(
-            "eth_getStorageAt",
-            json::array({std::string(address), std::string(slot_hex), std::string(tag)}));
+        json params = json::array({std::string(address), std::string(slot_hex), std::string(tag)});
+        auto result = co_await _client->call("eth_getStorageAt", std::move(params));
         if(!result) co_return std::unexpected(result.error());
 
         co_return _dataString(*result, "eth_getStorageAt");
@@ -343,8 +345,8 @@ namespace dcn::rpc
         const std::string_view address,
         const std::string_view tag) const
     {
-        auto result = co_await _client->call(
-            "eth_getTransactionCount", json::array({std::string(address), std::string(tag)}));
+        json params = json::array({std::string(address), std::string(tag)});
+        auto result = co_await _client->call("eth_getTransactionCount", std::move(params));
         if(!result) co_return std::unexpected(result.error());
 
         const auto value = _quantity(*result, "eth_getTransactionCount");
@@ -364,7 +366,8 @@ namespace dcn::rpc
         };
         if(to) call_object["to"] = std::string(*to);
 
-        auto result = co_await _client->call("eth_estimateGas", json::array({std::move(call_object)}));
+        json params = json::array({std::move(call_object)});
+        auto result = co_await _client->call("eth_estimateGas", std::move(params));
         if(!result) co_return std::unexpected(result.error());
 
         const auto value = _quantity(*result, "eth_estimateGas");
@@ -377,8 +380,8 @@ namespace dcn::rpc
     {
         // The shared header parser keeps only the fields ingestion needs, so the raw
         // block is read here for baseFeePerGas.
-        auto head_block = co_await _client->call(
-            "eth_getBlockByNumber", json::array({std::string(BLOCK_TAG_LATEST), false}));
+        json params = json::array({std::string(BLOCK_TAG_LATEST), false});
+        auto head_block = co_await _client->call("eth_getBlockByNumber", std::move(params));
         if(!head_block) co_return std::unexpected(head_block.error());
 
         if(!head_block->is_object() || !head_block->contains("baseFeePerGas"))
@@ -414,8 +417,8 @@ namespace dcn::rpc
     asio::awaitable<std::expected<std::string, RpcError>> EthClient::sendRawTransaction(
         const std::string_view raw_tx_hex) const
     {
-        auto result = co_await _client->call(
-            "eth_sendRawTransaction", json::array({std::string(raw_tx_hex)}));
+        json params = json::array({std::string(raw_tx_hex)});
+        auto result = co_await _client->call("eth_sendRawTransaction", std::move(params));
         if(!result) co_return std::unexpected(result.error());
 
         const auto hash = _dataString(*result, "eth_sendRawTransaction");
@@ -427,8 +430,8 @@ namespace dcn::rpc
     asio::awaitable<std::expected<std::optional<TransactionReceipt>, RpcError>> EthClient::transactionReceipt(
         const std::string_view tx_hash) const
     {
-        auto result = co_await _client->call(
-            "eth_getTransactionReceipt", json::array({std::string(tx_hash)}));
+        json params = json::array({std::string(tx_hash)});
+        auto result = co_await _client->call("eth_getTransactionReceipt", std::move(params));
         if(!result) co_return std::unexpected(result.error());
 
         if(result->is_null())

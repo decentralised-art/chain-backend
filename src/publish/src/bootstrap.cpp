@@ -275,8 +275,10 @@ namespace dcn::publish
         if(!registry_impl) co_return std::unexpected(registry_impl.error());
 
         spdlog::info("Deploying PT registry proxy...");
-        const auto registry_proxy_receipt =
-            co_await deployer.deploy(withAddressArgs(*registry_proxy_code, {*registry_impl}));
+        // Creation code is built before the co_await: GCC cannot compile an
+        // initializer_list that lives across one.
+        auto registry_proxy_creation = withAddressArgs(*registry_proxy_code, {*registry_impl});
+        const auto registry_proxy_receipt = co_await deployer.deploy(std::move(registry_proxy_creation));
         if(!registry_proxy_receipt) co_return std::unexpected(registry_proxy_receipt.error());
         const auto registry_proxy = deployedAddress(*registry_proxy_receipt);
         if(!registry_proxy) co_return std::unexpected(registry_proxy.error());
@@ -288,8 +290,8 @@ namespace dcn::publish
         if(!runner_impl) co_return std::unexpected(runner_impl.error());
 
         spdlog::info("Deploying PT runner proxy...");
-        const auto runner_proxy_receipt =
-            co_await deployer.deploy(withAddressArgs(*runner_proxy_code, {*runner_impl, *registry_proxy}));
+        auto runner_proxy_creation = withAddressArgs(*runner_proxy_code, {*runner_impl, *registry_proxy});
+        const auto runner_proxy_receipt = co_await deployer.deploy(std::move(runner_proxy_creation));
         if(!runner_proxy_receipt) co_return std::unexpected(runner_proxy_receipt.error());
         const auto runner_proxy = deployedAddress(*runner_proxy_receipt);
         if(!runner_proxy) co_return std::unexpected(runner_proxy.error());

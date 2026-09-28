@@ -183,8 +183,10 @@ namespace dcn::rpc
             co_return std::unexpected(_protocolError("publication owner is not an address"));
         }
 
-        auto result = co_await client.call(
-            registry_address, _calldata("publicationNonce(address)", {pt::abi::addressComponent(*owner)}));
+        // Calldata is built before the co_await: GCC cannot compile an initializer_list
+        // that lives across one.
+        const std::string calldata = _calldata("publicationNonce(address)", {pt::abi::addressComponent(*owner)});
+        auto result = co_await client.call(registry_address, calldata);
         if(!result) co_return std::unexpected(result.error());
 
         co_return uint64FromWord(*result, "publicationNonce(address)");
@@ -199,8 +201,8 @@ namespace dcn::rpc
     {
         const std::string signature = std::format("contains{}(string)", _kindSuffix(kind));
 
-        auto result = co_await client.call(
-            registry_address, _calldata(signature, {pt::abi::stringComponent(std::string(name))}), tag);
+        const std::string calldata = _calldata(signature, {pt::abi::stringComponent(std::string(name))});
+        auto result = co_await client.call(registry_address, calldata, tag);
         if(!result) co_return std::unexpected(result.error());
 
         const auto value = uint64FromWord(*result, signature);
@@ -252,8 +254,8 @@ namespace dcn::rpc
     {
         const std::string signature = std::format("get{}(string)", _kindSuffix(kind));
 
-        auto result = co_await client.call(
-            registry_address, _calldata(signature, {pt::abi::stringComponent(std::string(name))}));
+        const std::string calldata = _calldata(signature, {pt::abi::stringComponent(std::string(name))});
+        auto result = co_await client.call(registry_address, calldata);
         if(!result) co_return std::unexpected(result.error());
 
         co_return addressFromWord(*result, signature);
