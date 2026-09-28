@@ -31,6 +31,11 @@ namespace dcn::chain
         }
         return std::format("0x{:x}", static_cast<std::uint64_t>(value));
     }
+
+    std::string bytesToHex(const std::span<const std::uint8_t> bytes)
+    {
+        return std::string("0x") + evmc::hex(evmc::bytes_view(bytes.data(), bytes.size()));
+    }
 }
 
 namespace dcn::parse

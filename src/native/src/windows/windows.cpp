@@ -1,5 +1,10 @@
 #include "windows/windows.h"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <optional>
+#include <thread>
 #include <vector>
 
 #include <spdlog/spdlog.h>
@@ -48,7 +53,10 @@ namespace dcn::native{
         return success;
     }
 
-    std::pair<int, std::string> runProcess(const std::string& command, std::vector<std::string> args)
+    std::pair<int, std::string> runProcess(
+        const std::string& command,
+        std::vector<std::string> args,
+        std::optional<std::chrono::milliseconds> timeout)
     {
         std::ostringstream oss;
 
@@ -117,6 +125,24 @@ namespace dcn::native{
 
         CloseHandle(write_pipe);
 
+        // Terminates a child that outlives its deadline; reading the pipe then ends.
+        // ponytail: only the direct child is killed, which is all solc needs. A tool that
+        // starts subprocesses would keep the pipe open past the deadline; put the child in
+        // a job object if one ever does.
+        std::atomic<bool> timed_out{false};
+        std::thread watchdog;
+        if (timeout)
+        {
+            const DWORD timeout_ms = static_cast<DWORD>(std::clamp<long long>(timeout->count(), 0, 0xFFFFFFFELL));
+            watchdog = std::thread([process = pi.hProcess, timeout_ms, &timed_out]()
+            {
+                if (WaitForSingleObject(process, timeout_ms) == WAIT_TIMEOUT)
+                {
+                    timed_out = true;
+                    TerminateProcess(process, 1);
+                }
+            });
+        }
 
         // 6. Read output
         std::string output;
@@ -131,6 +157,10 @@ namespace dcn::native{
 
         // Wait until child process exits
         WaitForSingleObject(pi.hProcess, INFINITE);
+        if (watchdog.joinable())
+        {
+            watchdog.join();
+        }
 
         // Read the return code
         DWORD exit_code;
@@ -148,6 +178,12 @@ namespace dcn::native{
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
         CloseHandle(read_pipe);
+
+        if (timed_out)
+        {
+            output += "\n[process terminated: deadline exceeded]";
+            return {-1, output};
+        }
 
         return {static_cast<int>(exit_code), output};
     }

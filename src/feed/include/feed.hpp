@@ -22,8 +22,7 @@ namespace dcn::feed
                  std::filesystem::path feed_db_path,
                  std::filesystem::path archive_root,
                  std::int64_t outbox_retention_ms,
-                 int default_chain_id,
-                 std::string default_chain_namespace = "local");
+                 std::uint64_t default_chain_id);
 
             Feed(const Feed&) = delete;
             Feed& operator=(const Feed&) = delete;
@@ -31,7 +30,7 @@ namespace dcn::feed
             // write side (serialize on _strand)
             asio::awaitable<void> applyChange(events::ChangeRecord row, std::int64_t now_ms);
             asio::awaitable<void> maintainOutbox(std::int64_t now_ms);
-            asio::awaitable<bool> runArchiveCycle(int chain_id, std::size_t hot_window_days, std::int64_t now_ms);
+            asio::awaitable<bool> runArchiveCycle(std::uint64_t chain_id, std::size_t hot_window_days, std::int64_t now_ms);
 
             // query side (IFeedRepository; delegates to _store, callers own concurrency)
             FeedPage getFeedPage(const FeedQuery & query) const override;

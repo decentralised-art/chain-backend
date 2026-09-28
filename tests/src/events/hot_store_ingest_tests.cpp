@@ -23,13 +23,13 @@ TEST_F(UnitTest, Events_HotStore_IngestSingleEvent_WritesDurableRows)
     events_sql::expectRowCount(paths.hot_db, "raw_events_hot", 1);
     events_sql::expectRowCount(paths.hot_db, "normalized_events_hot", 1);
     events_sql::expectRowCount(paths.hot_db, "reorg_window", 1);
-    events_sql::expectRowCount(paths.hot_db, "ingest_resume_state", 1);
+    events_sql::expectRowCount(paths.hot_db, "source_resume", 1);
 
     const auto changes = store.readChangesSince(0, 10);
     EXPECT_EQ(changes.size(), 1u);
 
     SqliteReadonly db(paths.hot_db);
-    EXPECT_EQ(db.scalarInt64("SELECT next_from_block FROM ingest_resume_state WHERE chain_id=1;"), 12);
+    EXPECT_EQ(db.scalarInt64("SELECT next_cursor FROM source_resume WHERE source_id='local';"), 12);
     EXPECT_EQ(db.scalarText("SELECT state FROM raw_events_hot LIMIT 1;"), "observed");
     EXPECT_EQ(db.scalarText("SELECT state FROM normalized_events_hot LIMIT 1;"), "observed");
 }
@@ -62,7 +62,7 @@ TEST_F(UnitTest, Events_HotStore_UndecodableRawLog_IsDurableAndCursorAdvances)
     events_sql::expectRowCount(paths.hot_db, "decode_failures_hot", 1);
 
     SqliteReadonly db(paths.hot_db);
-    EXPECT_EQ(db.scalarInt64("SELECT next_from_block FROM ingest_resume_state WHERE chain_id=1;"), 22);
+    EXPECT_EQ(db.scalarInt64("SELECT next_cursor FROM source_resume WHERE source_id='local';"), 22);
     EXPECT_EQ(db.scalarInt64("SELECT attempts FROM decode_failures_hot WHERE chain_id=1;"), 1);
 
     events::DecodedEvent recovered = makeDecodedEvent(
@@ -108,9 +108,11 @@ TEST_F(UnitTest, Events_HotStore_DuplicateIngest_IsIdempotent)
     events_sql::expectRowCount(paths.hot_db, "normalized_events_hot", 1);
 }
 
-TEST_F(UnitTest, Events_HotStore_ResumeStateAndLocalSeq_PersistAcrossRestart)
+// One cursor row per source: the persisted cursor_kind decides how next_cursor is
+// read back, and a lookup under the other kind must miss.
+TEST_F(UnitTest, Events_HotStore_SourceCursor_PersistsAcrossRestart)
 {
-    const auto paths = makeTempEventsPaths("ingest_resume_local_seq");
+    const auto paths = makeTempEventsPaths("ingest_resume_source_cursor");
 
     {
         asio::io_context store_io_context;
@@ -118,23 +120,21 @@ TEST_F(UnitTest, Events_HotStore_ResumeStateAndLocalSeq_PersistAcrossRestart)
         const events::DecodedEvent event = makeDecodedEvent(41, 0, 1, 0xA4, 0xB4, events::EventType::CONDITION_ADDED, events::EventState::OBSERVED, 1'700'000'300);
         const events::ChainBlockInfo block_info = makeBlockInfo(41, event.raw.block_hash, hexBytes(0x96, 32), 1'700'000'300, 1'700'000'301'000);
         ASSERT_TRUE(awaitIngestBatch(store_io_context, store, CHAIN_ID, {event}, {block_info}, 42, 1'700'000'301'200));
-        ASSERT_TRUE(awaitSaveNextLocalSeq(store_io_context, store, CHAIN_ID, 555, 1'700'000'301'300));
     }
 
     {
         asio::io_context store_io_context;
         events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-        const auto next_block = awaitLoadNextFromBlock(store_io_context, store, CHAIN_ID);
+        const auto next_block = awaitLoadNextCursor(store_io_context, store, events::CursorKind::NEXT_BLOCK);
         ASSERT_TRUE(next_block.has_value());
-        EXPECT_EQ(*next_block, 42);
+        EXPECT_EQ(*next_block, 42u);
 
-        const auto next_seq = awaitLoadNextLocalSeq(store_io_context, store, CHAIN_ID);
-        ASSERT_TRUE(next_seq.has_value());
-        EXPECT_EQ(*next_seq, 555u);
+        EXPECT_FALSE(awaitLoadNextCursor(store_io_context, store, events::CursorKind::LOCAL_SEQUENCE).has_value());
+        EXPECT_FALSE(awaitLoadNextCursor(store_io_context, store, events::CursorKind::NEXT_BLOCK, "other").has_value());
     }
 }
 
-TEST_F(UnitTest, Events_HotStore_LocalResumeState_CommitsWithDurableIngest)
+TEST_F(UnitTest, Events_HotStore_LocalSequenceCursor_CommitsWithDurableIngest)
 {
     const auto paths = makeTempEventsPaths("ingest_local_seq_txn");
 
@@ -167,13 +167,11 @@ TEST_F(UnitTest, Events_HotStore_LocalResumeState_CommitsWithDurableIngest)
     {
         asio::io_context restarted_io_context;
         events::SQLiteHotStore restarted(paths.hot_db, CHAIN_ID);
-        const auto next_block = awaitLoadNextFromBlock(restarted_io_context, restarted, CHAIN_ID);
-        ASSERT_TRUE(next_block.has_value());
-        EXPECT_EQ(*next_block, 43);
-
-        const auto next_seq = awaitLoadNextLocalSeq(restarted_io_context, restarted, CHAIN_ID);
+        const auto next_seq = awaitLoadNextCursor(restarted_io_context, restarted, events::CursorKind::LOCAL_SEQUENCE);
         ASSERT_TRUE(next_seq.has_value());
         EXPECT_EQ(*next_seq, 777u);
+
+        EXPECT_FALSE(awaitLoadNextCursor(restarted_io_context, restarted, events::CursorKind::NEXT_BLOCK).has_value());
     }
 }
 

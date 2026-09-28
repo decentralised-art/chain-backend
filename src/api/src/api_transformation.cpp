@@ -123,7 +123,12 @@ namespace dcn
         }
 
         (*json_res)["owner"] = (*transformation_record_res)->owner();
-        (*json_res)["address"] = "0x0";
+        const auto location = co_await registry.getEntityLocation(
+            registry::EntityKind::TRANSFORMATION, transformation_name_result.value());
+        // A local simulation entity has no chain address; the response keeps the 0x0 sentinel.
+        (*json_res)["address"] = (location && location->address != chain::Address{})
+            ? chain::addressToHex(location->address)
+            : "0x0";
 
         response.setCode(http::Code::OK)
             .setBodyWithContentLength(json_res->dump());
@@ -132,7 +137,7 @@ namespace dcn
     }
 
     asio::awaitable<http::Response> POST_transformation(const http::Request & request, std::vector<server::RouteArg> args, server::QueryArgsList,
-        auth::AuthManager & auth_manager, registry::Registry & registry, evm::EVM & evm, const config::Config & config)
+        auth::AuthManager & auth_manager, registry::Registry & registry, evm::EVM & evm, const config::Config & config, const ChainAccess * chain)
     {
         http::Response response;
         response.setCode(http::Code::Unknown)
@@ -179,6 +184,11 @@ namespace dcn
         }
 
         const Transformation & transformation = *transformation_res;
+
+        if(auto refused = co_await admitLocalEntityName(registry, chain, pt::EntityKind::TRANSFORMATION, transformation.name()))
+        {
+            co_return std::move(*refused);
+        }
 
         TransformationRecord transformation_record;
         transformation_record.set_owner(chain::addressToHex(address));

@@ -690,10 +690,8 @@ namespace dcn::registry
             return lhs_bytes == rhs_bytes;
         }
 
-        // The registry mirrors only chain-derivable state. sol_src is a local-only deploy input that
-        // cannot be reconstructed from chain, so it never enters the registry: we record the
-        // chain-derivable args_count (computed from the source when present, otherwise left as set by
-        // chain ingestion) and drop sol_src before the record is stored, compared, or cached.
+        // The registry mirrors only chain-derivable state. Executable source remains in the
+        // content-addressed artifact, while args_count is stored for reads and validation.
         static void normalizeForRegistry(TransformationRecord & record)
         {
             auto * transformation = record.mutable_transformation();
@@ -848,6 +846,16 @@ namespace dcn::registry
     asio::awaitable<bool> Registry::addConnector(chain::Address address, ConnectorRecord record,
         std::optional<evmc::bytes32> expected_format_hash)
     {
+        co_return co_await addConnectorVersion(
+            EntitySource{}, chain::Address{}, std::move(record), expected_format_hash);
+    }
+
+    asio::awaitable<bool> Registry::addConnectorVersion(
+        EntitySource source,
+        chain::Address address,
+        ConnectorRecord record,
+        std::optional<evmc::bytes32> expected_format_hash)
+    {
         const Connector & connector = record.connector();
         const std::string connector_name = connector.name();
         if(connector_name.empty())
@@ -923,7 +931,7 @@ namespace dcn::registry
         }
 
         const auto existing_record_handle_opt = _store->getConnectorRecordHandle(connector_name);
-        if(existing_record_handle_opt.has_value() && *existing_record_handle_opt)
+        if(existing_record_handle_opt.has_value() && *existing_record_handle_opt && source.source_id == "local")
         {
             if(!recordsEqual(*(*existing_record_handle_opt), record))
             {
@@ -953,7 +961,7 @@ namespace dcn::registry
             co_return true;
         }
 
-        if(!_store->addConnector(address, record, format_hash, canonical_scalar_labels))
+        if(!_store->addConnectorVersion(source, address, record, format_hash, canonical_scalar_labels))
         {
             co_return false;
         }
@@ -1301,6 +1309,14 @@ namespace dcn::registry
 
     asio::awaitable<bool> Registry::addTransformation(chain::Address address, TransformationRecord record)
     {
+        co_return co_await addTransformationVersion(EntitySource{}, chain::Address{}, std::move(record));
+    }
+
+    asio::awaitable<bool> Registry::addTransformationVersion(
+        EntitySource source,
+        chain::Address address,
+        TransformationRecord record)
+    {
         const std::string transformation_name = record.transformation().name();
         if(transformation_name.empty())
         {
@@ -1313,7 +1329,7 @@ namespace dcn::registry
         normalizeForRegistry(record);
 
         const auto existing_record_handle_opt = _store->getTransformationRecordHandle(transformation_name);
-        if(existing_record_handle_opt.has_value() && *existing_record_handle_opt)
+        if(existing_record_handle_opt.has_value() && *existing_record_handle_opt && source.source_id == "local")
         {
             if(!recordsEqual(*(*existing_record_handle_opt), record))
             {
@@ -1330,7 +1346,7 @@ namespace dcn::registry
             co_return true;
         }
 
-        const bool inserted = _store->addTransformation(address, record);
+        const bool inserted = _store->addTransformationVersion(source, address, record);
         if(inserted)
         {
             putHotCacheEntry(
@@ -1501,6 +1517,14 @@ namespace dcn::registry
 
     asio::awaitable<bool> Registry::addCondition(chain::Address address, ConditionRecord record)
     {
+        co_return co_await addConditionVersion(EntitySource{}, chain::Address{}, std::move(record));
+    }
+
+    asio::awaitable<bool> Registry::addConditionVersion(
+        EntitySource source,
+        chain::Address address,
+        ConditionRecord record)
+    {
         const std::string condition_name = record.condition().name();
         if(condition_name.empty())
         {
@@ -1513,7 +1537,7 @@ namespace dcn::registry
         normalizeForRegistry(record);
 
         const auto existing_record_handle_opt = _store->getConditionRecordHandle(condition_name);
-        if(existing_record_handle_opt.has_value() && *existing_record_handle_opt)
+        if(existing_record_handle_opt.has_value() && *existing_record_handle_opt && source.source_id == "local")
         {
             if(!recordsEqual(*(*existing_record_handle_opt), record))
             {
@@ -1530,7 +1554,7 @@ namespace dcn::registry
             co_return true;
         }
 
-        const bool inserted = _store->addCondition(address, record);
+        const bool inserted = _store->addConditionVersion(source, address, record);
         if(inserted)
         {
             putHotCacheEntry(
@@ -1756,5 +1780,79 @@ namespace dcn::registry
     {
         co_await async::ensureOnStrand(_strand);
         co_return _store->setMaterializationCursor(seq);
+    }
+
+    asio::awaitable<std::optional<EntityLocation>> Registry::getEntityLocation(
+        const EntityKind kind,
+        const std::string & name) const
+    {
+        co_await async::ensureOnStrand(_strand);
+        co_return _store->getEntityLocation(kind, name);
+    }
+
+    asio::awaitable<bool> Registry::hasRemoteEntity(const EntityKind kind, const std::string & name) const
+    {
+        co_await async::ensureOnStrand(_strand);
+        co_return _store->hasRemoteEntity(kind, name);
+    }
+
+    asio::awaitable<bool> Registry::hasLocalEntity(const EntityKind kind, const std::string & name) const
+    {
+        co_await async::ensureOnStrand(_strand);
+        co_return _store->hasLocalEntity(kind, name);
+    }
+
+    asio::awaitable<bool> Registry::removeEntityVersion(
+        const EntityKind kind,
+        std::string source_id,
+        std::string name)
+    {
+        co_await async::ensureOnStrand(_strand);
+        const bool removed = _store->removeEntityVersion(kind, source_id, name);
+        if(removed)
+        {
+            _connector_record_cache.entries.erase(name);
+            _transformation_record_cache.entries.erase(name);
+            _condition_record_cache.entries.erase(name);
+            _format_hash_cache.entries.erase(name);
+        }
+        co_return removed;
+    }
+
+    asio::awaitable<bool> Registry::changeEntityOwner(
+        const EntityKind kind,
+        std::string source_id,
+        std::string name,
+        chain::Address old_owner,
+        chain::Address new_owner)
+    {
+        co_await async::ensureOnStrand(_strand);
+        const bool changed = _store->changeEntityOwner(kind, source_id, name, old_owner, new_owner);
+        if(changed)
+        {
+            _connector_record_cache.entries.erase(name);
+            _transformation_record_cache.entries.erase(name);
+            _condition_record_cache.entries.erase(name);
+        }
+        co_return changed;
+    }
+
+    asio::awaitable<std::vector<ArtifactReference>> Registry::getArtifactsDue(
+        const std::int64_t now_ms,
+        const std::size_t limit) const
+    {
+        co_await async::ensureOnStrand(_strand);
+        co_return _store->getArtifactsDue(now_ms, limit);
+    }
+
+    asio::awaitable<bool> Registry::setArtifactState(
+        const EntityKind kind,
+        std::string source_id,
+        std::string name,
+        const pt::ArtifactState state,
+        const std::int64_t retry_at_ms)
+    {
+        co_await async::ensureOnStrand(_strand);
+        co_return _store->setArtifactState(kind, source_id, name, state, retry_at_ms);
     }
 }

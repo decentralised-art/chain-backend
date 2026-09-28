@@ -14,15 +14,13 @@ namespace dcn::feed
         std::filesystem::path feed_db_path,
         std::filesystem::path archive_root,
         std::int64_t outbox_retention_ms,
-        int default_chain_id,
-        std::string default_chain_namespace)
+        std::uint64_t default_chain_id)
         : _strand(asio::make_strand(io_context))
         , _store(std::make_unique<SqliteFeedStore>(
             std::move(feed_db_path),
             std::move(archive_root),
             outbox_retention_ms,
-            default_chain_id,
-            std::move(default_chain_namespace)))
+            default_chain_id))
     {
     }
 
@@ -38,7 +36,7 @@ namespace dcn::feed
         _store->maintainOutbox(now_ms);
     }
 
-    asio::awaitable<bool> Feed::runArchiveCycle(int chain_id, std::size_t hot_window_days, std::int64_t now_ms)
+    asio::awaitable<bool> Feed::runArchiveCycle(std::uint64_t chain_id, std::size_t hot_window_days, std::int64_t now_ms)
     {
         co_await async::ensureOnStrand(_strand);
         co_return _store->runArchiveCycle(chain_id, hot_window_days, now_ms);

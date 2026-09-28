@@ -23,7 +23,8 @@
             saveInstanceEdit,
             removeInstanceEdit,
             closePopup,
-            execute
+            execute,
+            simulate
         } from './js/execute';
 
         import {
@@ -62,6 +63,14 @@
             copyTextFromElement
         } from './js/simple_form';
 
+        import {
+            preparePublication,
+            sendPublication,
+            confirmPublication,
+            resetPublication,
+            updatePublishActionAvailability
+        } from './js/publish';
+
         fetchVersionInfo();
 
         document.getElementById('login').addEventListener('click', loginWithMetaMask);
@@ -71,6 +80,7 @@
         document.getElementById('btn_removeInstanceEdit').addEventListener('click', removeInstanceEdit);
         document.getElementById('btn_closePopup').addEventListener('click', closePopup);
         document.getElementById('btn_execute').addEventListener('click', execute);
+        document.getElementById('btn_simulate').addEventListener('click', simulate);
         document.getElementById('executeName').addEventListener('input', updateExecuteActionAvailability);
         document.getElementById('executeN').addEventListener('input', updateExecuteActionAvailability);
         document.getElementById('btn_executeCopyResponse').addEventListener('click', () => copyTextFromElement('executeBody'));
@@ -99,6 +109,15 @@
         document.getElementById('btn_getConnector').addEventListener('click', getConnector);
         document.getElementById('btn_connectorCopyRequest').addEventListener('click', () => copyTextFromElement('POST_connectorRequestBody'));
         addConnectorDimension();
+
+        document.getElementById('btn_preparePublication').addEventListener('click', preparePublication);
+        document.getElementById('btn_sendPublication').addEventListener('click', sendPublication);
+        document.getElementById('btn_confirmPublication').addEventListener('click', confirmPublication);
+        document.getElementById('publishKind').addEventListener('change', resetPublication);
+        document.getElementById('publishName').addEventListener('input', resetPublication);
+        document.getElementById('publishTxHash').addEventListener('input', updatePublishActionAvailability);
+        document.getElementById('btn_publishCopyResponse').addEventListener('click', () => copyTextFromElement('publishResponseBody'));
+        updatePublishActionAvailability();
 
         document.getElementById('btn_fetchAccountData').addEventListener('click', fetchAccountResources);
         document.getElementById('btn_prevAccountPage').addEventListener('click', prevPage);
@@ -208,6 +227,7 @@
                 <button type="button" id="tab-btn-connectors" class="group-tab" role="tab" aria-selected="false" tabindex="-1" data-tab-target="connectors">Connectors</button>
                 <button type="button" id="tab-btn-transformations" class="group-tab" role="tab" aria-selected="false" tabindex="-1" data-tab-target="transformations">Transformations</button>
                 <button type="button" id="tab-btn-conditions" class="group-tab" role="tab" aria-selected="false" tabindex="-1" data-tab-target="conditions">Conditions</button>
+                <button type="button" id="tab-btn-publish" class="group-tab" role="tab" aria-selected="false" tabindex="-1" data-tab-target="publish">Publish</button>
                 <button type="button" id="tab-btn-account" class="group-tab" role="tab" aria-selected="false" tabindex="-1" data-tab-target="account">Explore</button>
             </div>
 
@@ -215,7 +235,7 @@
                 <section class="tab-panel is-active" data-tab-panel="execute" role="tabpanel" aria-labelledby="tab-btn-execute">
                     <div class="group-head">
                       <h2>Execute</h2>
-                      <p>Run a connector</p>
+                      <p>Run a connector on chain, or simulate one you created on this server</p>
                     </div>
                     <div class="tab-grid">
                         <div class="tab-column">
@@ -232,8 +252,14 @@
                                     <label>Particle count</label>
                                     <input id="executeN" type="number" placeholder="5">
                                 </div>
-                                <button id="btn_execute" class="action-button">🔒 Execute</button>
                             </div>
+
+                            <div class="button-row">
+                                <button id="btn_execute" class="action-button">🔒 Execute on chain</button>
+                                <button id="btn_simulate" class="action-button">🔒 Simulate locally</button>
+                            </div>
+
+                            <p class="tab-hint">Execute runs a connector registered on chain with the chain's runner. Simulate runs a connector you created on this server on its local EVM.</p>
 
                             <p class="tab-hint">Click any node in the dependency graph (including scalar dots) to edit running instance values.</p>
                             <p class="tab-hint">Only explicitly saved RI values are sent in execute request.</p>
@@ -408,6 +434,52 @@
                                 <div class="response-row">
                                     <div id="conditionResponseCode" class="response-code">-</div>
                                     <div id="conditionResponseBody" class="response-body">Waiting...</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="tab-panel" data-tab-panel="publish" role="tabpanel" aria-labelledby="tab-btn-publish">
+                    <div class="group-head">
+                      <h2>Publish</h2>
+                      <p>Register one of your entities on chain. Your wallet sends the transaction and pays for it.</p>
+                    </div>
+                    <div class="tab-grid">
+                        <div class="tab-column">
+                            <label for="publishKind">Kind</label>
+                            <select id="publishKind">
+                                <option value="transformation">Transformation</option>
+                                <option value="condition">Condition</option>
+                                <option value="connector">Connector</option>
+                            </select>
+
+                            <label for="publishName">Name</label>
+                            <input type="text" id="publishName" placeholder="add">
+
+                            <div class="button-row">
+                                <button id="btn_preparePublication" class="action-button">🔒 Prepare</button>
+                                <button id="btn_sendPublication" class="action-button">Send with wallet</button>
+                            </div>
+
+                            <label for="publishTxHash">Transaction hash</label>
+                            <input type="text" id="publishTxHash" placeholder="0x...">
+                            <div class="button-row">
+                                <button id="btn_confirmPublication" class="action-button">🔒 Confirm</button>
+                            </div>
+
+                            <p id="publishStatus" class="publish-status" role="status" aria-live="polite">Log in, then prepare the publication of an entity you created.</p>
+                            <p class="tab-hint">A connector's transformations, conditions and composites must be published first.</p>
+                            <p class="tab-hint">A transaction that was already sent can be confirmed after preparing again: paste its hash and press Confirm.</p>
+                        </div>
+
+                        <div class="tab-column">
+                            <label>Response</label>
+                            <div class="response-row">
+                                <div id="publishResponseCode" class="response-code">-</div>
+                                <div class="response-wrapper">
+                                    <button id="btn_publishCopyResponse" class="copy-button">📋</button>
+                                    <pre id="publishResponseBody" class="response-body">Waiting...</pre>
                                 </div>
                             </div>
                         </div>

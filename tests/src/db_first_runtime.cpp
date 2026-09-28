@@ -368,7 +368,7 @@ namespace
 
         http::Request request;
         request.setMethod(http::Method::POST)
-               .setPath(http::URL("/execute"))
+               .setPath(http::URL("/simulate"))
                .setVersion("HTTP/1.1")
                .setBody(request_json.dump())
                .setHeader(http::Header::Authorization, std::format("Bearer {}", access_token));
@@ -568,7 +568,7 @@ TEST_F(UnitTest, API_ReadEndpoints_ReturnFromDbWithoutEvmDeployment)
     }
 }
 
-TEST_F(UnitTest, API_Execute_MissingConnectorReturnsNotFound)
+TEST_F(UnitTest, API_Simulate_MissingConnectorReturnsNotFound)
 {
     ASSERT_TRUE(std::filesystem::exists(solcPath())) << std::format("Missing Solidity compiler at '{}'", solcPath().string());
     ASSERT_TRUE(std::filesystem::exists(ptPath() / "contracts")) << std::format("Missing PT contracts at '{}'", (ptPath() / "contracts").string());
@@ -596,7 +596,7 @@ TEST_F(UnitTest, API_Execute_MissingConnectorReturnsNotFound)
     auto request = makeExecuteRequest(access_token, "MissingConnector");
     const auto response = runAwaitable(
         io_context,
-        POST_execute(
+        POST_simulate(
             request,
             std::vector<server::RouteArg>{},
             server::QueryArgsList{},
@@ -1091,7 +1091,7 @@ TEST_F(UnitTest, API_PostCondition_DuplicateAfterRestartReturnsAlreadyRegistered
     }
 }
 
-TEST_F(UnitTest, API_Execute_LazilyDeploysConnectorClosureFromDb)
+TEST_F(UnitTest, API_Simulate_LazilyDeploysConnectorClosureFromDb)
 {
     ASSERT_TRUE(std::filesystem::exists(solcPath())) << std::format("Missing Solidity compiler at '{}'", solcPath().string());
     ASSERT_TRUE(std::filesystem::exists(ptPath() / "contracts")) << std::format("Missing PT contracts at '{}'", (ptPath() / "contracts").string());
@@ -1136,7 +1136,7 @@ TEST_F(UnitTest, API_Execute_LazilyDeploysConnectorClosureFromDb)
     auto request = makeExecuteRequest(access_token, "LazyConnector");
     const auto response = runAwaitable(
         io_context,
-        POST_execute(
+        POST_simulate(
             request,
             std::vector<server::RouteArg>{},
             server::QueryArgsList{},
@@ -1159,7 +1159,7 @@ TEST_F(UnitTest, API_Execute_LazilyDeploysConnectorClosureFromDb)
     EXPECT_TRUE(*contains_connector_after);
 }
 
-TEST_F(UnitTest, API_Execute_BrokenDbDependencyReturnsInvariantError)
+TEST_F(UnitTest, API_Simulate_BrokenDbDependencyReturnsInvariantError)
 {
     ASSERT_TRUE(std::filesystem::exists(solcPath())) << std::format("Missing Solidity compiler at '{}'", solcPath().string());
     ASSERT_TRUE(std::filesystem::exists(ptPath() / "contracts")) << std::format("Missing PT contracts at '{}'", (ptPath() / "contracts").string());
@@ -1197,7 +1197,7 @@ TEST_F(UnitTest, API_Execute_BrokenDbDependencyReturnsInvariantError)
     auto request = makeExecuteRequest(access_token, "BrokenConnector");
     const auto response = runAwaitable(
         io_context,
-        POST_execute(
+        POST_simulate(
             request,
             std::vector<server::RouteArg>{},
             server::QueryArgsList{},

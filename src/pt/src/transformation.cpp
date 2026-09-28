@@ -1,3 +1,4 @@
+#include <cstring>
 #include <format>
 
 #include "crypto.hpp"
@@ -53,7 +54,8 @@ namespace dcn
 
         contract Add is TransformationBase
         {
-            constructor(address registryAddr) TransformationBase(registryAddr, "Add", 1)
+            constructor(bytes32 contentHash_, bytes32 metadataHash_)
+                TransformationBase("Add", 1, contentHash_, metadataHash_)
             {}
 
             function run(uint32 x, uint32 [] calldata args) view external returns (uint32)
@@ -83,7 +85,8 @@ namespace dcn
                 "pragma solidity ^0.8.0;\n"
                 "import \"transformation/TransformationBase.sol\";\n"
                 "contract " + transformation.name() + " is TransformationBase{\n"
-                "constructor(address registryAddr) TransformationBase(registryAddr, \"" + transformation.name() + "\"," +  std::to_string(argc) +"){}\n"
+                "constructor(bytes32 contentHash_, bytes32 metadataHash_) TransformationBase(\""
+                + transformation.name() + "\"," + std::to_string(argc) + ", contentHash_, metadataHash_){}\n"
                 "function _runImpl(uint32 x, uint32 [] memory args) internal view virtual override returns (uint32){\n"
                 + transformation.sol_src() + "\n}"
                 "\n}";
@@ -98,13 +101,13 @@ namespace dcn::pt
         const evmc::bytes32 topics[],
         std::size_t num_topics)
     {
-        if(data == nullptr || topics == nullptr || num_topics < 1 || data_size < 32 * 5)
+        if(data == nullptr || topics == nullptr || num_topics < 1 || data_size < 32 * 8)
         {
             return std::nullopt;
         }
 
         const evmc::bytes32 expected_topic = chain::constructEventTopic(
-            "TransformationAdded(address,string,address,address,uint32)");
+            "TransformationAdded(address,string,address,address,uint32,bytes32,bytes32,bytes32)");
 
         if(topics[0] != expected_topic)
         {
@@ -121,6 +124,13 @@ namespace dcn::pt
             return std::nullopt;
         }
 
+        evmc::bytes32 content_hash{};
+        evmc::bytes32 metadata_hash{};
+        evmc::bytes32 runtime_code_hash{};
+        std::memcpy(content_hash.bytes, data + 160, 32);
+        std::memcpy(metadata_hash.bytes, data + 192, 32);
+        std::memcpy(runtime_code_hash.bytes, data + 224, 32);
+
         const auto name = chain::decodeAbiString(data, data_size, *name_offset);
         if(!name)
         {
@@ -132,7 +142,10 @@ namespace dcn::pt
             .name = *name,
             .transformation_address = *transformation_address,
             .owner = *owner,
-            .args_count = *args_count
+            .args_count = *args_count,
+            .content_hash = content_hash,
+            .metadata_hash = metadata_hash,
+            .runtime_code_hash = runtime_code_hash
         };
     }
 
@@ -184,7 +197,7 @@ namespace dcn::parse
         else return std::unexpected(ParseError{ParseError::Kind::INVALID_VALUE, "invalid name"});
         
 
-        // sol_src is a local-only deploy input; absent from served responses, so it is optional here.
+        // sol_src is an execution input hydrated from local storage or a verified artifact.
         if (json_obj.contains("sol_src")) {
             transformation.set_sol_src(json_obj["sol_src"].get<std::string>());
         }

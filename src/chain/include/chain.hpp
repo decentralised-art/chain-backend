@@ -1,7 +1,11 @@
 #pragma once
 
+#include <optional>
+#include <span>
+#include <string>
+#include <vector>
+
 #include "address.hpp"
-#include "chain_interface.hpp"
 #include "deploy.hpp"
 #include "execute.hpp"
 #include "format_hash.hpp"
@@ -18,13 +22,6 @@ namespace dcn::chain
 
     std::uint64_t readUint256(const std::vector<std::uint8_t> & bytes, std::size_t offset);
 
-    std::uint32_t readUint32Padded(const std::vector<uint8_t>& bytes, std::size_t offset);
-
-
-    std::uint32_t readUint32(const std::vector<std::uint8_t> & bytes, std::size_t offset);
-
-    std::uint64_t readOffset(const std::vector<std::uint8_t> & bytes, std::size_t offset);
-
     std::optional<std::size_t> readWordAsSizeT(const std::uint8_t* data, std::size_t data_size, std::size_t offset);
 
     std::optional<std::uint32_t> readUint32Word(const std::uint8_t* data, std::size_t data_size, std::size_t offset);
@@ -37,4 +34,7 @@ namespace dcn::chain
     std::optional<std::vector<std::uint32_t>> decodeAbiUint32Array(const std::uint8_t* data, std::size_t data_size, std::size_t array_offset);
 
     std::optional<std::vector<std::int32_t>> decodeAbiInt32Array(const std::uint8_t* data, std::size_t data_size, std::size_t array_offset);
+
+    /// The reason string of a Solidity `Error(string)` revert; nullopt for any other revert data.
+    std::optional<std::string> decodeRevertReason(std::span<const std::uint8_t> revert_data);
 }

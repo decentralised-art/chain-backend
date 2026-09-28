@@ -103,15 +103,30 @@ namespace
         return true;
     }
 
-    std::expected<chain::Address, std::string> fetchOwnerAddress(
+    // Published entities carry no owner of their own: the registry is the authority,
+    // so ownership is read back through getEntityOwner(kind, name).
+    std::expected<chain::Address, std::string> fetchEntityOwner(
         asio::io_context & io_context,
         evm::EVM & evm_instance,
-        const chain::Address & contract_address)
+        const pt::EntityKind kind,
+        const std::string & name)
     {
-        const auto owner_result = runAwaitable(io_context, evm::fetchOwner(evm_instance, contract_address));
+        std::vector<std::uint8_t> call = chain::constructSelector("getEntityOwner(uint8,string)");
+        const std::vector<pt::abi::Component> args{
+            pt::abi::uintComponent(static_cast<std::uint64_t>(kind)),
+            pt::abi::stringComponent(name)};
+        const std::vector<std::uint8_t> body = pt::abi::encodeTuple(args);
+        call.insert(call.end(), body.begin(), body.end());
+
+        const auto owner_result = runAwaitable(io_context, evm_instance.execute(
+            evm_instance.getRegistryAddress(),
+            evm_instance.getRegistryAddress(),
+            std::move(call),
+            evm::DEFAULT_GAS_LIMIT,
+            0));
         if(!owner_result)
         {
-            return std::unexpected(std::format("fetchOwner failed: {}", owner_result.error().kind));
+            return std::unexpected(std::format("getEntityOwner failed: {}", owner_result.error().kind));
         }
 
         const auto owner_address_res = chain::readAddressWord(owner_result.value());
@@ -278,7 +293,7 @@ namespace
                 return snapshot;
             }
 
-            const auto transformation_owner_res = fetchOwnerAddress(io_context, evm_instance, snapshot.transformation_address);
+            const auto transformation_owner_res = fetchEntityOwner(io_context, evm_instance, pt::EntityKind::TRANSFORMATION, "DeployTransformation");
             if(!transformation_owner_res)
             {
                 snapshot.error_message = std::format("Transformation owner lookup failed: {}", transformation_owner_res.error());
@@ -286,7 +301,7 @@ namespace
             }
             snapshot.transformation_owner = transformation_owner_res.value();
 
-            const auto condition_owner_res = fetchOwnerAddress(io_context, evm_instance, snapshot.condition_address);
+            const auto condition_owner_res = fetchEntityOwner(io_context, evm_instance, pt::EntityKind::CONDITION, "DeployCondition");
             if(!condition_owner_res)
             {
                 snapshot.error_message = std::format("Condition owner lookup failed: {}", condition_owner_res.error());
@@ -294,7 +309,7 @@ namespace
             }
             snapshot.condition_owner = condition_owner_res.value();
 
-            const auto connector_owner_res = fetchOwnerAddress(io_context, evm_instance, snapshot.connector_address);
+            const auto connector_owner_res = fetchEntityOwner(io_context, evm_instance, pt::EntityKind::CONNECTOR, "DeployConnector");
             if(!connector_owner_res)
             {
                 snapshot.error_message = std::format("Connector owner lookup failed: {}", connector_owner_res.error());
@@ -552,4 +567,35 @@ TEST_F(UnitTest, PT_Deploy_Transformation_InvalidInput_CleansTemporarySoliditySo
     EXPECT_FALSE(std::filesystem::exists(source_path)) << std::format("Temporary Solidity source still exists: {}", source_path.string());
 }
 
+TEST_F(UnitTest, PT_Deploy_Transformation_RejectsRebuiltArtifactHashMismatch)
+{
+    ASSERT_TRUE(std::filesystem::exists(solcPath()));
+    ASSERT_TRUE(std::filesystem::exists(ptPath() / "contracts"));
+
+    const auto storage_path = makeDeployStoragePath();
+    ASSERT_TRUE(prepareDeployStorageDirectories(storage_path));
+
+    asio::io_context io_context;
+    evm::EVM evm_instance(io_context, EVMC_SHANGHAI, solcPath(), ptPath());
+    io_context.run();
+    registry::Registry registry(io_context);
+
+    TransformationRecord record;
+    record.mutable_transformation()->set_name("VerifiedReplay");
+    record.mutable_transformation()->set_sol_src("return x;");
+    record.set_owner(evmc::hex(makeAddressFromSuffix("pt_verified_replay_owner")));
+
+    const auto result = runAwaitable(
+        io_context,
+        loader::deployTransformation(
+            evm_instance,
+            registry,
+            record,
+            storage_path,
+            false,
+            chain::bytes32ToHex(chain::keccakString("different artifact"))));
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().kind, pt::PTDeployError::Kind::INVALID_INPUT);
+}
 

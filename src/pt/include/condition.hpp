@@ -45,6 +45,9 @@ namespace dcn::pt
         chain::Address condition_address{};
         chain::Address owner{};
         std::uint32_t args_count{};
+        evmc::bytes32 content_hash{};
+        evmc::bytes32 metadata_hash{};
+        evmc::bytes32 runtime_code_hash{};
     };
 
     std::optional<ConditionAddedEvent> decodeConditionAddedEvent(

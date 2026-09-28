@@ -75,7 +75,8 @@ target_link_libraries("${PROJECT_NAME}Lib"
         "${PROJECT_PREFIX}::Loader"
         "${PROJECT_PREFIX}::Registry"
         "${PROJECT_PREFIX}::Chain"
-        "${PROJECT_PREFIX}::Sepolia"
+        "${PROJECT_PREFIX}::Rpc"
+        "${PROJECT_PREFIX}::Publish"
 )
 
 target_sources("${PROJECT_NAME}Lib" PUBLIC

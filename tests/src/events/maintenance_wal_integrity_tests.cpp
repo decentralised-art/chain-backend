@@ -162,7 +162,7 @@ TEST_F(UnitTest, Events_Prune_DeletesOnlyConsumedFinalizedBelowFloor)
     }
 
     // Prune: watermark = event1's change_seq, finalized_floor_block = 200 (covers all blocks)
-    const std::size_t pruned = store.pruneConsumedRaw(watermark, 200, 100);
+    const std::size_t pruned = store.pruneConsumedRaw("local", watermark, 200, 100);
     EXPECT_EQ(pruned, 1u);  // only event1 qualifies
 
     // event1 must be gone from BOTH tables

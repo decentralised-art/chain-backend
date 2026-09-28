@@ -47,7 +47,7 @@ TEST(RegistryProjection, Transformation_IsMaterializedAndJobDeleted)
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
     registry::Registry registry(io);
 
-    // Build real ABI payload for TransformationAdded(address,string,address,address,uint32)
+    // Build real ABI payload for TransformationAdded(address,string,address,address,uint32,bytes32,bytes32,bytes32)
     const chain::Address caller = makeAddressFromByte(0x41);
     const chain::Address tf_addr = makeAddressFromByte(0x43);
     const chain::Address owner  = makeAddressFromByte(0x42);
@@ -304,7 +304,7 @@ TEST(RegistryProjection, PoisonRow_IsRetriedThenDeadLettered_AndDoesNotWedgePipe
         EXPECT_EQ(dead.front().block_number, 100);
     }
 
-    (void)store.pruneConsumedRaw(projector.cursor(), 1'000, 100);
+    (void)store.pruneConsumedRaw("local", projector.cursor(), 1'000, 100);
     EXPECT_EQ(store.readDeadLetters(events::REGISTRY_DEAD_LETTER_BIT, 10).size(), 1u);
 
     // The idle-time sweep retries the row; the payload is still undecodable, so it
@@ -348,7 +348,7 @@ TEST(RegistryProjection, DeadLetteredRow_IsRecoveredBySweep_AndBecomesPrunable)
     const auto changes = store.readChangesSince(0, 10);
     ASSERT_EQ(changes.size(), 1u);
     ASSERT_TRUE(store.markDeadLetter(
-        events::REGISTRY_DEAD_LETTER_BIT, changes.front().chain_id,
+        events::REGISTRY_DEAD_LETTER_BIT, changes.front().source_id,
         changes.front().block_hash, changes.front().log_index));
     ASSERT_TRUE(runAw(io, registry.setMaterializationCursor(changes.front().change_seq)));
 
@@ -357,7 +357,7 @@ TEST(RegistryProjection, DeadLetteredRow_IsRecoveredBySweep_AndBecomesPrunable)
     EXPECT_EQ(projector.cursor(), changes.front().change_seq);
 
     // While dead-lettered, the row is exempt from pruning.
-    EXPECT_EQ(store.pruneConsumedRaw(projector.cursor(), 1'000, 100), 0u);
+    EXPECT_EQ(store.pruneConsumedRaw("local", projector.cursor(), 1'000, 100), 0u);
     EXPECT_FALSE(runAw(io, registry.hasTransformation(name)));
 
     // Idle pass → the sweep recovers the event into the registry and clears the bit.
@@ -366,7 +366,7 @@ TEST(RegistryProjection, DeadLetteredRow_IsRecoveredBySweep_AndBecomesPrunable)
     EXPECT_TRUE(store.readDeadLetters(events::REGISTRY_DEAD_LETTER_BIT, 10).empty());
 
     // Once resolved, the row becomes prunable again.
-    EXPECT_EQ(store.pruneConsumedRaw(projector.cursor(), 1'000, 100), 1u);
+    EXPECT_EQ(store.pruneConsumedRaw("local", projector.cursor(), 1'000, 100), 1u);
 }
 
 // ---------------------------------------------------------------------------
@@ -453,7 +453,7 @@ TEST(RegistryProjection, DeadLetterSweepInterval_IsConfigurable)
 
     // Quarantine the (recoverable) row after the anchor pass.
     ASSERT_TRUE(store.markDeadLetter(
-        events::REGISTRY_DEAD_LETTER_BIT, changes.front().chain_id,
+        events::REGISTRY_DEAD_LETTER_BIT, changes.front().source_id,
         changes.front().block_hash, changes.front().log_index));
 
     // Inside the interval: the sweep is throttled, so the row is not retried.

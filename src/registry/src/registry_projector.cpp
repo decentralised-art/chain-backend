@@ -86,7 +86,7 @@ namespace dcn::registry
                 // chain event data is lost.
                 co_await async::ensureOnStrand(_write_strand);
                 if(!_store.markDeadLetter(
-                    events::REGISTRY_DEAD_LETTER_BIT, row.chain_id, row.block_hash, row.log_index))
+                    events::REGISTRY_DEAD_LETTER_BIT, row.source_id, row.block_hash, row.log_index))
                 {
                     // The quarantine could not be made durable; advancing now would let
                     // pruning delete the row, so keep the cursor parked and retry.
@@ -165,7 +165,7 @@ namespace dcn::registry
 
             co_await async::ensureOnStrand(_write_strand);
             if(_store.clearDeadLetter(
-                events::REGISTRY_DEAD_LETTER_BIT, row.chain_id, row.block_hash, row.log_index))
+                events::REGISTRY_DEAD_LETTER_BIT, row.source_id, row.block_hash, row.log_index))
             {
                 spdlog::info("[RegistryProjector] dead-lettered change_seq={} resolved "
                     "(block={} log_index={} event_type='{}')",
@@ -190,6 +190,64 @@ namespace dcn::registry
             topics.push_back(*t);
         }
 
+        // Chain versions are canonical: a remote event is written even when a local
+        // version of the same name is already resolved, and the difference is recorded.
+        // Local events keep the strict equality check that guards the
+        // POST-then-project path.
+        const bool local_source = row.source_id == events::LOCAL_SOURCE_ID;
+
+        EntitySource source{
+            .source_id = row.source_id,
+            .chain_namespace = row.chain_namespace,
+            .chain_id = row.chain_id,
+            .registry_address = row.registry_address,
+            .content_hash = row.content_hash.value_or(""),
+            .metadata_hash = row.metadata_hash.value_or(""),
+            .runtime_code_hash = row.runtime_code_hash.value_or(""),
+            .block_hash = row.block_hash,
+            .log_index = row.log_index
+        };
+        const auto materializedAddress = [&row](const chain::Address & decoded)
+        {
+            if(row.entity_address == events::EPHEMERAL_ENTITY_ADDRESS) return chain::Address{};
+            return evmc::from_hex<chain::Address>(row.entity_address).value_or(decoded);
+        };
+
+        // A chain version whose artifact differs from the version currently resolved for
+        // the name. Recorded for operators; the chain version still takes precedence.
+        const auto definitionConflict = [&](const EntityKind kind, const std::string & name) -> asio::awaitable<bool>
+        {
+            if(local_source) co_return false;
+            const auto existing = co_await _registry.getEntityLocation(kind, name);
+            co_return existing
+                && ((!existing->source.content_hash.empty() && existing->source.content_hash != source.content_hash)
+                    || (!existing->source.metadata_hash.empty() && existing->source.metadata_hash != source.metadata_hash));
+        };
+
+        const auto kindFromEvent = [](const std::string_view event_type) -> std::optional<EntityKind>
+        {
+            if(event_type == events::CONNECTOR_REMOVED_TYPE) return EntityKind::CONNECTOR;
+            if(event_type == events::TRANSFORMATION_REMOVED_TYPE) return EntityKind::TRANSFORMATION;
+            if(event_type == events::CONDITION_REMOVED_TYPE) return EntityKind::CONDITION;
+            return std::nullopt;
+        };
+
+        if(const auto kind = kindFromEvent(row.event_type))
+        {
+            co_return co_await _registry.removeEntityVersion(*kind, row.source_id, row.name);
+        }
+
+        if(row.event_type == events::ENTITY_OWNER_CHANGED_TYPE)
+        {
+            if(!row.entity_kind || !row.old_owner) co_return false;
+            const EntityKind kind = *row.entity_kind;
+            const auto old_owner = evmc::from_hex<chain::Address>(*row.old_owner);
+            const auto new_owner = evmc::from_hex<chain::Address>(row.owner);
+            if(!old_owner || !new_owner) co_return false;
+            co_return co_await _registry.changeEntityOwner(
+                kind, row.source_id, row.name, *old_owner, *new_owner);
+        }
+
         // ---- transformation_added ----
         if(row.event_type == events::TRANSFORMATION_ADDED_TYPE)
         {
@@ -204,20 +262,30 @@ namespace dcn::registry
 
             if(const auto existing = co_await _registry.getTransformationRecordHandle(event->name))
             {
+                source.definition_conflict = co_await definitionConflict(EntityKind::TRANSFORMATION, event->name);
                 const TransformationRecord & rec = **existing;
-                if(rec.transformation().args_count() != event->args_count
-                    || chain::normalizeHex(rec.owner()) != chain::addressToHex(event->owner))
+                const bool diverges = rec.transformation().args_count() != event->args_count
+                    || chain::normalizeHex(rec.owner()) != chain::addressToHex(event->owner);
+                if(local_source)
                 {
-                    // A pre-existing row diverges from canonical chain data. There is no
-                    // update/delete path on the registry, so we cannot reconcile here;
-                    // the error log records the divergence before the row is skipped.
-                    spdlog::error("[RegistryProjector] transformation '{}' diverges from chain "
-                        "(existing owner={} args={}, chain owner={} args={}) — will retry, then poison-skip",
-                        event->name, rec.owner(), rec.transformation().args_count(),
-                        chain::addressToHex(event->owner), event->args_count);
-                    co_return false;
+                    if(diverges)
+                    {
+                        spdlog::error("[RegistryProjector] transformation '{}' diverges from chain "
+                            "(existing owner={} args={}, chain owner={} args={}) — will retry, then poison-skip",
+                            event->name, rec.owner(), rec.transformation().args_count(),
+                            chain::addressToHex(event->owner), event->args_count);
+                        co_return false;
+                    }
+                    co_return true; // already present and matches — idempotent
                 }
-                co_return true; // already present and matches — idempotent
+                if(diverges)
+                {
+                    spdlog::warn("[RegistryProjector] transformation '{}' on source '{}' differs from the "
+                        "resolved version (resolved owner={} args={}, chain owner={} args={}); "
+                        "the chain version takes precedence",
+                        event->name, row.source_id, rec.owner(), rec.transformation().args_count(),
+                        chain::addressToHex(event->owner), event->args_count);
+                }
             }
 
             TransformationRecord record;
@@ -225,7 +293,8 @@ namespace dcn::registry
             record.mutable_transformation()->set_args_count(event->args_count);
             record.set_owner(chain::addressToHex(event->owner));
 
-            co_return co_await _registry.addTransformation(event->transformation_address, std::move(record));
+            co_return co_await _registry.addTransformationVersion(
+                source, materializedAddress(event->transformation_address), std::move(record));
         }
 
         // ---- condition_added ----
@@ -242,17 +311,30 @@ namespace dcn::registry
 
             if(const auto existing = co_await _registry.getConditionRecordHandle(event->name))
             {
+                source.definition_conflict = co_await definitionConflict(EntityKind::CONDITION, event->name);
                 const ConditionRecord & rec = **existing;
-                if(rec.condition().args_count() != event->args_count
-                    || chain::normalizeHex(rec.owner()) != chain::addressToHex(event->owner))
+                const bool diverges = rec.condition().args_count() != event->args_count
+                    || chain::normalizeHex(rec.owner()) != chain::addressToHex(event->owner);
+                if(local_source)
                 {
-                    spdlog::error("[RegistryProjector] condition '{}' diverges from chain "
-                        "(existing owner={} args={}, chain owner={} args={}) — will retry, then poison-skip",
-                        event->name, rec.owner(), rec.condition().args_count(),
-                        chain::addressToHex(event->owner), event->args_count);
-                    co_return false;
+                    if(diverges)
+                    {
+                        spdlog::error("[RegistryProjector] condition '{}' diverges from chain "
+                            "(existing owner={} args={}, chain owner={} args={}) — will retry, then poison-skip",
+                            event->name, rec.owner(), rec.condition().args_count(),
+                            chain::addressToHex(event->owner), event->args_count);
+                        co_return false;
+                    }
+                    co_return true;
                 }
-                co_return true;
+                if(diverges)
+                {
+                    spdlog::warn("[RegistryProjector] condition '{}' on source '{}' differs from the "
+                        "resolved version (resolved owner={} args={}, chain owner={} args={}); "
+                        "the chain version takes precedence",
+                        event->name, row.source_id, rec.owner(), rec.condition().args_count(),
+                        chain::addressToHex(event->owner), event->args_count);
+                }
             }
 
             ConditionRecord record;
@@ -260,7 +342,8 @@ namespace dcn::registry
             record.mutable_condition()->set_args_count(event->args_count);
             record.set_owner(chain::addressToHex(event->owner));
 
-            co_return co_await _registry.addCondition(event->condition_address, std::move(record));
+            co_return co_await _registry.addConditionVersion(
+                source, materializedAddress(event->condition_address), std::move(record));
         }
 
         // ---- connector_added ----
@@ -277,15 +360,27 @@ namespace dcn::registry
 
             if(const auto existing = co_await _registry.getConnectorRecordHandle(event->name))
             {
+                source.definition_conflict = co_await definitionConflict(EntityKind::CONNECTOR, event->name);
                 const ConnectorRecord & rec = **existing;
-                if(chain::normalizeHex(rec.owner()) != chain::addressToHex(event->owner))
+                const bool diverges = chain::normalizeHex(rec.owner()) != chain::addressToHex(event->owner);
+                if(local_source)
                 {
-                    spdlog::error("[RegistryProjector] connector '{}' diverges from chain "
-                        "(existing owner={}, chain owner={}) — will retry, then poison-skip",
-                        event->name, rec.owner(), chain::addressToHex(event->owner));
-                    co_return false;
+                    if(diverges)
+                    {
+                        spdlog::error("[RegistryProjector] connector '{}' diverges from chain "
+                            "(existing owner={}, chain owner={}) — will retry, then poison-skip",
+                            event->name, rec.owner(), chain::addressToHex(event->owner));
+                        co_return false;
+                    }
+                    co_return true;
                 }
-                co_return true;
+                if(diverges)
+                {
+                    spdlog::warn("[RegistryProjector] connector '{}' on source '{}' differs from the "
+                        "resolved version (resolved owner={}, chain owner={}); "
+                        "the chain version takes precedence",
+                        event->name, row.source_id, rec.owner(), chain::addressToHex(event->owner));
+                }
             }
 
             // Pass the chain-emitted format hash so the registry refuses to store a locally-recomputed
@@ -299,7 +394,8 @@ namespace dcn::registry
             }
 
             ConnectorRecord record = pt::buildConnectorRecordFromEvent(*event);
-            co_return co_await _registry.addConnector(event->connector_address, std::move(record), expected_format_hash);
+            co_return co_await _registry.addConnectorVersion(
+                source, materializedAddress(event->connector_address), std::move(record), expected_format_hash);
         }
 
         // Unknown event type — cannot be materialized; the error log records the row

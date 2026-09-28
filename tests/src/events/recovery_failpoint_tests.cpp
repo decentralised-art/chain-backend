@@ -43,9 +43,9 @@ TEST_F(UnitTest, Events_Recovery_WorkerThreadWrite_IsCommitted)
     {
         asio::io_context restarted_io_context;
         events::SQLiteHotStore restarted(paths.hot_db, CHAIN_ID);
-        const auto next_from = awaitLoadNextFromBlock(restarted_io_context, restarted, CHAIN_ID);
+        const auto next_from = awaitLoadNextCursor(restarted_io_context, restarted, events::CursorKind::NEXT_BLOCK);
         ASSERT_TRUE(next_from.has_value());
-        EXPECT_EQ(*next_from, 111);
+        EXPECT_EQ(*next_from, 111u);
     }
 
     events_sql::expectRowCount(paths.hot_db, "raw_events_hot", 1);

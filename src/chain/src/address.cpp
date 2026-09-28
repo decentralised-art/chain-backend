@@ -13,6 +13,15 @@ namespace dcn::chain
             return std::nullopt;
         }
 
+        // ABI encodes an address as a word whose upper 12 bytes are zero.
+        for(std::size_t i = 0; i < 12; ++i)
+        {
+            if(data[offset + i] != 0)
+            {
+                return std::nullopt;
+            }
+        }
+
         chain::Address addr{};
         std::memcpy(addr.bytes, data + offset + 12, 20);
         return addr;

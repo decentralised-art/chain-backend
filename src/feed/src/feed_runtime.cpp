@@ -16,8 +16,7 @@ namespace dcn::feed
                 _config.feed_db_path,
                 _config.archive_root,
                 _config.outbox_retention_ms,
-                _config.chain_id,
-                _config.chain_namespace)
+                _config.chain_id)
     {
     }
 

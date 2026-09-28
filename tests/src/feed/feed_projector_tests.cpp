@@ -79,7 +79,7 @@ TEST_F(UnitTest, Feed_Projector_DeadLetteredRow_IsRecoveredBySweep)
     const auto changes = store.readChangesSince(0, 10);
     ASSERT_EQ(changes.size(), 1u);
     ASSERT_TRUE(store.markDeadLetter(
-        events::FEED_DEAD_LETTER_BIT, changes.front().chain_id,
+        events::FEED_DEAD_LETTER_BIT, changes.front().source_id,
         changes.front().block_hash, changes.front().log_index));
     runAwaitable(io, feed_obj.setFeedCursor(changes.front().change_seq));
 
@@ -127,7 +127,7 @@ TEST_F(UnitTest, Feed_Projector_DeadLetterSweepInterval_IsConfigurable)
 
     // Quarantine the (recoverable) row after the anchor pass.
     ASSERT_TRUE(store.markDeadLetter(
-        events::FEED_DEAD_LETTER_BIT, changes.front().chain_id,
+        events::FEED_DEAD_LETTER_BIT, changes.front().source_id,
         changes.front().block_hash, changes.front().log_index));
 
     // Inside the interval: the sweep is throttled, so the row is not applied.

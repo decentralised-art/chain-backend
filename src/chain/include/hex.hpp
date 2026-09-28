@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+#include <span>
 #include <string>
 
 #ifdef interface
@@ -22,6 +24,9 @@ namespace dcn::chain
     std::string normalizeHex(std::string value);
 
     std::string toHexQuantity(const std::int64_t value);
+
+    // 0x-prefixed lowercase hex of arbitrary bytes.
+    std::string bytesToHex(std::span<const std::uint8_t> bytes);
 }
 
 namespace dcn::parse

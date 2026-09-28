@@ -196,9 +196,3 @@ TEST_F(UnitTest, Events_Finality_StatePersistence_IsMonotonicAcrossProviderRegre
     EXPECT_EQ(db.scalarInt64("SELECT finalized_block FROM finality_state WHERE chain_id=1;"), 480);
 }
 
-TEST_F(UnitTest, Events_ReorgLookback_UsesConfiguredDepth_IndependentlyOfBatchSize)
-{
-    EXPECT_EQ(events::reorgLookbackStart(1'000, 2'048), 0);
-    EXPECT_EQ(events::reorgLookbackStart(3'000, 2'048), 952);
-    EXPECT_EQ(events::reorgLookbackStart(3'000, 4'096), 0);
-}

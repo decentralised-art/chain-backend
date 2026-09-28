@@ -9,11 +9,13 @@ add_module(NAME "PT"
         "${PROJECT_PREFIX}::Parser"
         "${PROJECT_PREFIX}::Crypto"
         "${PROJECT_PREFIX}::Chain"
+        "${PROJECT_PREFIX}::File"
 
         absl::hash
         spdlog::spdlog
         asio
         evmc
+        secp256k1
         nlohmann_json
 )
 

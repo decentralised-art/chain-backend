@@ -497,7 +497,7 @@ TEST_F(UnitTest, Connector_ConstructSolidityCode_UsesConstructorPattern)
     ASSERT_TRUE(solidity_result.has_value());
     const std::string & solidity = *solidity_result;
 
-    EXPECT_NE(solidity.find("constructor(address registryAddr) ConnectorBase("), std::string::npos);
+    EXPECT_NE(solidity.find("constructor(address registryAddr, bytes32 contentHash_, bytes32 metadataHash_) "), std::string::npos);
     EXPECT_NE(solidity.find("__ConnectorBase_finalizeInit"), std::string::npos);
     EXPECT_NE(solidity.find("function _compositeDimIds()"), std::string::npos);
     EXPECT_NE(solidity.find("function _compositeNames()"), std::string::npos);
@@ -788,7 +788,7 @@ namespace dcn::tests
             condition_args.push_back(connector.condition_args(i));
         }
 
-        constexpr std::uint64_t head_words = 18;
+        constexpr std::uint64_t head_words = 21;
         const std::uint64_t head_bytes = head_words * 32u;
 
         std::vector<std::uint8_t> head;
@@ -840,6 +840,12 @@ namespace dcn::tests
         addDynamic(encodeUint32Array(transformation_arg_counts));
         // 17 transformationArgs (int32[])
         addDynamic(encodeInt32Array(transformation_args));
+        // 18 contentHash (bytes32)
+        appendBytes32Word(head, evmc::bytes32{});
+        // 19 metadataHash (bytes32)
+        appendBytes32Word(head, evmc::bytes32{});
+        // 20 runtimeCodeHash (bytes32)
+        appendBytes32Word(head, evmc::bytes32{});
 
         std::vector<std::uint8_t> data = std::move(head);
         data.insert(data.end(), tails.begin(), tails.end());
@@ -848,7 +854,7 @@ namespace dcn::tests
         out.data_hex = toHexString(data.data(), data.size());
 
         const evmc::bytes32 topic0 = chain::constructEventTopic(
-            "ConnectorAdded(address,address,string,address,uint32,uint32[],string[],uint32[],uint32[],string[],string,int32[],bytes32,uint32[],uint32[],uint32[],uint32[],string[],uint32[],int32[])");
+            "ConnectorAdded(address,address,string,address,uint32,uint32[],string[],uint32[],uint32[],string[],string,int32[],bytes32,uint32[],uint32[],uint32[],uint32[],string[],uint32[],int32[],bytes32,bytes32,bytes32)");
         out.topics_hex.push_back(toHexString(topic0.bytes, sizeof(topic0.bytes)));
 
         // topic[1] = caller (indexed), topic[2] = owner (indexed).

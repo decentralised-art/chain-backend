@@ -57,7 +57,7 @@ namespace dcn::feed
             }
 
             key.chain_namespace = key.feed_id.substr(0, f0);
-            key.chain_id = std::stoi(key.feed_id.substr(f0 + 1, f1 - (f0 + 1)));
+            key.chain_id = std::stoull(key.feed_id.substr(f0 + 1, f1 - (f0 + 1)));
         }
         catch(...)
         {

@@ -1,6 +1,7 @@
 #include "unit-tests.hpp"
 
 #include "events_test_harness.hpp"
+#include "registry_events.hpp"
 
 using namespace dcn;
 using namespace dcn::tests;
@@ -95,7 +96,7 @@ TEST_F(UnitTest, Events_Decoder_TransformationEvent_DecodesCanonicalFields)
     const chain::Address caller = makeAddressFromByte(0x11);
     const chain::Address owner = makeAddressFromByte(0x22);
     const chain::Address entity = makeAddressFromByte(0x33);
-    const std::string topic0 = topicForEvent("TransformationAdded(address,string,address,address,uint32)");
+    const std::string topic0 = topicForEvent("TransformationAdded(address,string,address,address,uint32,bytes32,bytes32,bytes32)");
     const std::string data = encodeSimpleAddedEventDataV2(caller, "TransformAlpha", entity, owner, 3);
 
     events::RawChainLog log = makeRawLog(
@@ -130,6 +131,26 @@ TEST_F(UnitTest, Events_Decoder_TransformationEvent_DecodesCanonicalFields)
     EXPECT_EQ(payload.value("args_count", 0), 3);
 }
 
+TEST_F(UnitTest, Events_Decoder_RejectsNamesThisServerCannotRepresent)
+{
+    events::PTEventDecoder decoder;
+    const std::string topic0 = topicForEvent("TransformationAdded(address,string,address,address,uint32,bytes32,bytes32,bytes32)");
+
+    // A name is a Solidity identifier and a file name here; anything else a chain
+    // event carries, including bytes that are not UTF-8, is refused without throwing.
+    for(const std::string & name : {std::string("has space"), std::string("../escape"), std::string("ÿþ"), std::string(129, 'a')})
+    {
+        const std::string data = encodeSimpleAddedEventDataV2(
+            makeAddressFromByte(0x11), name, makeAddressFromByte(0x33), makeAddressFromByte(0x22), 1);
+        const events::RawChainLog log = makeRawLog(
+            100, 0, 0, hexBytes(0xA1, 32), hexBytes(0xB1, 32), topic0, data, false, 1'700'000'000, 1'000);
+
+        std::optional<events::DecodedEvent> decoded;
+        EXPECT_NO_THROW(decoded = decoder.decode(log));
+        EXPECT_FALSE(decoded.has_value());
+    }
+}
+
 TEST_F(UnitTest, Events_Decoder_UnsupportedTopic_ReturnsNullopt)
 {
     events::PTEventDecoder decoder;
@@ -160,7 +181,7 @@ TEST_F(UnitTest, Events_Decoder_MalformedPayload_ReturnsNullopt)
         0,
         hexBytes(0xA3, 32),
         hexBytes(0xB3, 32),
-        topicForEvent("ConditionAdded(address,string,address,address,uint32)"),
+        topicForEvent("ConditionAdded(address,string,address,address,uint32,bytes32,bytes32,bytes32)"),
         "0x1234",
         false,
         1'700'000'020,
@@ -184,7 +205,7 @@ TEST_F(UnitTest, Events_Decoder_RemovedFlag_MapsToRemovedState)
         2,
         hexBytes(0xA4, 32),
         hexBytes(0xB4, 32),
-        topicForEvent("ConditionAdded(address,string,address,address,uint32)"),
+        topicForEvent("ConditionAdded(address,string,address,address,uint32,bytes32,bytes32,bytes32)"),
         encodeSimpleAddedEventDataV2(caller, "ConditionAlpha", entity, owner, 1),
         true,
         1'700'000'030,
@@ -259,4 +280,92 @@ TEST_F(UnitTest, Events_ParseRawLog_AcceptsWellFormedLog)
     EXPECT_EQ(parsed->block_number, 0x10);
     EXPECT_EQ(parsed->tx_index, 0x1);
     EXPECT_EQ(parsed->log_index, 0x2);
+}
+
+TEST_F(UnitTest, Events_Decoder_RemovedEvent_DecodesOwnerEntityAndHashes)
+{
+    events::PTEventDecoder decoder;
+
+    const chain::Address caller = makeAddressFromByte(0x21);
+    const chain::Address owner = makeAddressFromByte(0x22);
+    const chain::Address entity = makeAddressFromByte(0x23);
+
+    const events::RawChainLog log = makeRawLog(
+        120,
+        0,
+        0,
+        hexBytes(0xA5, 32),
+        hexBytes(0xB5, 32),
+        pt::eventTopic(pt::TRANSFORMATION_REMOVED_SIGNATURE),
+        encodeRemovedEventData(caller, owner, "RemovedAlpha", entity, 0xC1, 0xC2),
+        false,
+        1'700'000'040,
+        1'700'000'041'000);
+
+    const auto decoded = decoder.decode(log);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->event_type, events::EventType::TRANSFORMATION_REMOVED);
+    EXPECT_EQ(decoded->name, "RemovedAlpha");
+    EXPECT_EQ(decoded->caller, chain::addressToHex(caller));
+    EXPECT_EQ(decoded->owner, chain::addressToHex(owner));
+    EXPECT_EQ(decoded->entity_address, chain::addressToHex(entity));
+    EXPECT_EQ(decoded->content_hash.value_or(""), hexBytes(0xC1, 32));
+    EXPECT_EQ(decoded->metadata_hash.value_or(""), hexBytes(0xC2, 32));
+    ASSERT_TRUE(decoded->entity_kind.has_value());
+    EXPECT_EQ(*decoded->entity_kind, pt::EntityKind::TRANSFORMATION);
+}
+
+TEST_F(UnitTest, Events_Decoder_EntityOwnerChanged_DecodesKindAndOwners)
+{
+    events::PTEventDecoder decoder;
+
+    const chain::Address entity = makeAddressFromByte(0x31);
+    const chain::Address old_owner = makeAddressFromByte(0x32);
+    const chain::Address new_owner = makeAddressFromByte(0x33);
+
+    const events::RawChainLog log = makeRawLog(
+        121,
+        0,
+        0,
+        hexBytes(0xA6, 32),
+        hexBytes(0xB6, 32),
+        pt::eventTopic(pt::ENTITY_OWNER_CHANGED_SIGNATURE),
+        encodeOwnerChangedEventData(2, "OwnedCondition", entity, old_owner, new_owner),
+        false,
+        1'700'000'050,
+        1'700'000'051'000);
+
+    const auto decoded = decoder.decode(log);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->event_type, events::EventType::ENTITY_OWNER_CHANGED);
+    EXPECT_EQ(decoded->name, "OwnedCondition");
+    ASSERT_TRUE(decoded->entity_kind.has_value());
+    EXPECT_EQ(*decoded->entity_kind, pt::EntityKind::CONDITION);
+    EXPECT_EQ(decoded->entity_address, chain::addressToHex(entity));
+    EXPECT_EQ(decoded->old_owner.value_or(""), chain::addressToHex(old_owner));
+    EXPECT_EQ(decoded->owner, chain::addressToHex(new_owner));
+
+    const auto payload = json::parse(decoded->decoded_json, nullptr, false);
+    ASSERT_FALSE(payload.is_discarded());
+    EXPECT_EQ(payload.value("kind", ""), "condition");
+    EXPECT_EQ(payload.value("new_owner", ""), chain::addressToHex(new_owner));
+}
+
+TEST_F(UnitTest, Events_Decoder_EntityOwnerChanged_RejectsUnknownKind)
+{
+    events::PTEventDecoder decoder;
+
+    const events::RawChainLog log = makeRawLog(
+        122,
+        0,
+        0,
+        hexBytes(0xA7, 32),
+        hexBytes(0xB7, 32),
+        pt::eventTopic(pt::ENTITY_OWNER_CHANGED_SIGNATURE),
+        encodeOwnerChangedEventData(3, "Unknown", makeAddressFromByte(0x41), makeAddressFromByte(0x42), makeAddressFromByte(0x43)),
+        false,
+        1'700'000'060,
+        1'700'000'061'000);
+
+    EXPECT_FALSE(decoder.decode(log).has_value());
 }

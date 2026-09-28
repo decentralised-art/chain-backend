@@ -380,19 +380,21 @@ export function updateExecuteActionAvailability() {
     const nameInput = document.getElementById('executeName');
     const particleCountInput = document.getElementById('executeN');
     const fetchGraphButton = document.getElementById('btn_fetchBeforeExecute');
-    const executeButton = document.getElementById('btn_execute');
-    if (!nameInput || !executeButton) {
+    const runButtons = [document.getElementById('btn_execute'), document.getElementById('btn_simulate')];
+    if (!nameInput || runButtons.some((button) => !button)) {
         return;
     }
 
     const hasName = nameInput.value.trim().length > 0;
     const hasParticleCount = Boolean(particleCountInput && particleCountInput.value.trim().length > 0);
     setControlAvailability(fetchGraphButton, hasName, 'Fill connector name first.');
-    setControlAvailability(
-        executeButton,
-        hasName && hasParticleCount,
-        hasName ? 'Fill particle count first.' : 'Fill connector name first.'
-    );
+    for (const button of runButtons) {
+        setControlAvailability(
+            button,
+            hasName && hasParticleCount,
+            hasName ? 'Fill particle count first.' : 'Fill connector name first.'
+        );
+    }
 }
 
 function updateClearConnectorDimensionsAvailability() {

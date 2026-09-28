@@ -3,6 +3,15 @@
 #include <clocale>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <climits>
+#include <optional>
+
+#include <poll.h>
+#include <signal.h>
+
 namespace dcn::native {
     bool configureTerminal()
     {
@@ -15,7 +24,10 @@ namespace dcn::native {
         return true;
     }
 
-    std::pair<int, std::string> runProcess(const std::string& command, std::vector<std::string> args)
+    std::pair<int, std::string> runProcess(
+        const std::string& command,
+        std::vector<std::string> args,
+        std::optional<std::chrono::milliseconds> timeout)
     {
         const bool has_path_separator = command.find('/') != std::string::npos;
         if (has_path_separator && access(command.c_str(), X_OK) != 0)
@@ -69,10 +81,45 @@ namespace dcn::native {
 
         std::string output;
         char buffer[256];
-        ssize_t count;
 
-        while ((count = read(pipefd[0], buffer, sizeof(buffer))) > 0)
-            output.append(buffer, count);
+        const auto deadline = timeout
+            ? std::optional(std::chrono::steady_clock::now() + *timeout)
+            : std::nullopt;
+        bool killed = false;
+
+        while (true)
+        {
+            if (deadline && !killed)
+            {
+                const long long remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    *deadline - std::chrono::steady_clock::now()).count();
+                pollfd descriptor{.fd = pipefd[0], .events = POLLIN, .revents = 0};
+                const int ready = remaining > 0
+                    ? poll(&descriptor, 1, static_cast<int>(std::min<long long>(remaining, INT_MAX)))
+                    : 0;
+                if (ready < 0 && errno == EINTR)
+                {
+                    continue;
+                }
+                if (ready == 0)
+                {
+                    // The child outlived its deadline: stop it and drain what it wrote.
+                    kill(pid, SIGKILL);
+                    killed = true;
+                    continue;
+                }
+            }
+
+            const ssize_t count = read(pipefd[0], buffer, sizeof(buffer));
+            if (count > 0)
+            {
+                output.append(buffer, static_cast<std::size_t>(count));
+            }
+            else if (count == 0 || errno != EINTR)
+            {
+                break;
+            }
+        }
 
         close(pipefd[0]);
 
@@ -84,6 +131,11 @@ namespace dcn::native {
         }
 
         int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        if (killed)
+        {
+            output += "\n[process terminated: deadline exceeded]";
+            exit_code = -1;
+        }
 
         return {exit_code, output};
     }

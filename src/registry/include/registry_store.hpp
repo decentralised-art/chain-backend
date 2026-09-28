@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "address.hpp"
@@ -18,6 +19,45 @@ namespace dcn::registry
     using ConnectorRecordHandle = std::shared_ptr<const ConnectorRecord>;
     using TransformationRecordHandle = std::shared_ptr<const TransformationRecord>;
     using ConditionRecordHandle = std::shared_ptr<const ConditionRecord>;
+
+    using EntityKind = pt::EntityKind;
+
+    // source_id of the in-process EVM simulation; every other source is a chain.
+    constexpr std::string_view LOCAL_SOURCE_ID = "local";
+
+    struct EntitySource
+    {
+        std::string source_id = "local";
+        std::string chain_namespace = "local";
+        std::uint64_t chain_id = 1;
+        std::string registry_address = "0x0";
+        std::string content_hash;
+        std::string metadata_hash;
+        std::string runtime_code_hash;
+        std::string block_hash;
+        std::int64_t log_index = 0;
+        pt::ArtifactState artifact_state = pt::ArtifactState::MISSING;
+        bool definition_conflict = false;
+    };
+
+    struct EntityLocation
+    {
+        EntitySource source;
+        chain::Address address{};
+        bool active = true;
+    };
+
+    struct ArtifactReference
+    {
+        EntityKind kind = EntityKind::CONNECTOR;
+        std::string source_id;
+        std::string name;
+        std::string content_hash;
+        std::string metadata_hash;
+        std::string runtime_code_hash;
+        pt::ArtifactState state = pt::ArtifactState::MISSING;
+        std::uint32_t attempts = 0;
+    };
 
     struct ConnectorBatchItem
     {
@@ -69,6 +109,12 @@ namespace dcn::registry
                 const ConnectorRecord & record,
                 const evmc::bytes32 & format_hash,
                 const std::vector<ScalarLabel> & canonical_scalar_labels) = 0;
+            virtual bool addConnectorVersion(
+                const EntitySource & source,
+                const chain::Address & address,
+                const ConnectorRecord & record,
+                const evmc::bytes32 & format_hash,
+                const std::vector<ScalarLabel> & canonical_scalar_labels) = 0;
 
             virtual bool addConnectorsBatch(
                 const std::vector<ConnectorBatchItem> & items,
@@ -98,6 +144,10 @@ namespace dcn::registry
             virtual bool addTransformation(
                 const chain::Address & address,
                 const TransformationRecord & record) = 0;
+            virtual bool addTransformationVersion(
+                const EntitySource & source,
+                const chain::Address & address,
+                const TransformationRecord & record) = 0;
 
             virtual bool addTransformationsBatch(
                 const std::vector<TransformationBatchItem> & items,
@@ -110,6 +160,31 @@ namespace dcn::registry
             virtual bool addCondition(
                 const chain::Address & address,
                 const ConditionRecord & record) = 0;
+            virtual bool addConditionVersion(
+                const EntitySource & source,
+                const chain::Address & address,
+                const ConditionRecord & record) = 0;
+
+            virtual std::optional<EntityLocation> getEntityLocation(EntityKind kind, const std::string & name) const = 0;
+            virtual bool hasRemoteEntity(EntityKind kind, const std::string & name) const = 0;
+            // True when this server's local simulation holds a version of the entity.
+            virtual bool hasLocalEntity(EntityKind kind, const std::string & name) const = 0;
+            virtual bool removeEntityVersion(EntityKind kind, const std::string & source_id, const std::string & name) = 0;
+            virtual bool changeEntityOwner(
+                EntityKind kind,
+                const std::string & source_id,
+                const std::string & name,
+                const chain::Address & old_owner,
+                const chain::Address & new_owner) = 0;
+            virtual std::vector<ArtifactReference> getArtifactsDue(
+                std::int64_t now_ms,
+                std::size_t limit) const = 0;
+            virtual bool setArtifactState(
+                EntityKind kind,
+                const std::string & source_id,
+                const std::string & name,
+                pt::ArtifactState state,
+                std::int64_t retry_at_ms) = 0;
 
             virtual bool addConditionsBatch(
                 const std::vector<ConditionBatchItem> & items,
