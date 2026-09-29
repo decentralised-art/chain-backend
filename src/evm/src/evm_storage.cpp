@@ -10,8 +10,61 @@
 #include <ctime>
 #include <limits>
 
+#include <secp256k1.h>
+#include <secp256k1_recovery.h>
+
 namespace dcn::evm
 {
+    namespace
+    {
+        constexpr std::uint64_t FIRST_CREATE_NONCE = 100;
+        constexpr std::int64_t ECRECOVER_GAS = 3000;
+
+        bool _isEcrecover(const evmc::address& address)
+        {
+            evmc::address ecrecover{};
+            ecrecover.bytes[19] = 0x01;
+            return address == ecrecover;
+        }
+
+        // The ecrecover precompile: hash, v, r and s as four words (short input is zero
+        // padded); answers the signer as one word, or nothing when none can be recovered.
+        // Unlike signature verification it accepts a high s, as a chain does.
+        evmc::Result _ecrecover(const evmc_message& msg)
+        {
+            if(msg.gas < ECRECOVER_GAS) return evmc::Result{EVMC_OUT_OF_GAS};
+            const std::int64_t gas_left = msg.gas - ECRECOVER_GAS;
+
+            std::array<std::uint8_t, 128> input{};
+            if(msg.input_data != nullptr)
+            {
+                std::copy_n(msg.input_data, std::min(msg.input_size, input.size()), input.begin());
+            }
+
+            const bool v_valid = std::all_of(input.begin() + 32, input.begin() + 63, [](const std::uint8_t b) { return b == 0; })
+                && (input[63] == 27 || input[63] == 28);
+            if(!v_valid) return evmc::Result{EVMC_SUCCESS, gas_left, 0, nullptr, 0};
+
+            const secp256k1_context* ctx = secp256k1_context_static;
+            secp256k1_ecdsa_recoverable_signature signature;
+            secp256k1_pubkey public_key;
+            if(!secp256k1_ecdsa_recoverable_signature_parse_compact(ctx, &signature, input.data() + 64, input[63] - 27)
+                || !secp256k1_ecdsa_recover(ctx, &public_key, &signature, input.data()))
+            {
+                return evmc::Result{EVMC_SUCCESS, gas_left, 0, nullptr, 0};
+            }
+
+            std::array<std::uint8_t, 65> serialized{};
+            std::size_t length = serialized.size();
+            secp256k1_ec_pubkey_serialize(ctx, serialized.data(), &length, &public_key, SECP256K1_EC_UNCOMPRESSED);
+            const chain::Address signer = chain::ethAddressFromPublicKey(serialized.data(), length);
+
+            std::array<std::uint8_t, 32> word{};
+            std::copy(std::begin(signer.bytes), std::end(signer.bytes), word.begin() + 12);
+            return evmc::Result{EVMC_SUCCESS, gas_left, 0, word.data(), word.size()};
+        }
+    }
+
     EVMStorage::EVMStorage(evmc::VM & vm, evmc_revision rev)
         :   _vm(vm),
             _revision(rev)
@@ -51,8 +104,95 @@ namespace dcn::evm
 
     evmc_storage_status EVMStorage::set_storage(const evmc::address& address, const evmc::bytes32& key, const evmc::bytes32& value) noexcept
     {
-        _accounts[to_key(address)].storage[key] = value;
+        const std::string account_key = to_key(address);
+        if(_journaling())
+        {
+            const auto account = _accounts.find(account_key);
+            if(account == _accounts.end())
+            {
+                _recordAccount(account_key);
+            }
+            else
+            {
+                const auto slot = account->second.storage.find(key);
+                _journal.push_back(SlotChange{
+                    .account = account_key,
+                    .key = key,
+                    .previous = slot == account->second.storage.end()
+                        ? std::nullopt
+                        : std::optional<evmc::bytes32>(slot->second)});
+            }
+        }
+        _accounts[account_key].storage[key] = value;
         return EVMC_STORAGE_MODIFIED;
+    }
+
+    void EVMStorage::_recordAccount(const std::string& account)
+    {
+        if(!_journaling()) return;
+        const auto it = _accounts.find(account);
+        _journal.push_back(AccountChange{
+            .account = account,
+            .previous = it == _accounts.end() ? std::nullopt : std::optional<Account>(it->second)});
+    }
+
+    std::uint64_t EVMStorage::_spendCreateNonce(const evmc::address& creator)
+    {
+        const auto it = _create_nonce.find(creator);
+        const std::optional<std::uint64_t> previous =
+            it == _create_nonce.end() ? std::nullopt : std::optional<std::uint64_t>(it->second);
+        if(_journaling())
+        {
+            _journal.push_back(NonceChange{.creator = creator, .previous = previous});
+        }
+
+        const std::uint64_t nonce = previous.value_or(FIRST_CREATE_NONCE);
+        _create_nonce[creator] = nonce + 1;
+        return nonce;
+    }
+
+    EVMStorage::Checkpoint EVMStorage::_checkpoint() const noexcept
+    {
+        return Checkpoint{
+            .journal_size = _journal.size(),
+            .emitted_logs = _emitted_logs.size(),
+            .next_log_seq = _next_log_seq,
+            .next_log_index = _tx_context_stack.empty() ? 0 : _tx_context_stack.back().next_log_index};
+    }
+
+    void EVMStorage::_revertTo(const Checkpoint& checkpoint)
+    {
+        // Newest first, so every record restores the state it saw.
+        while(_journal.size() > checkpoint.journal_size)
+        {
+            auto & entry = _journal.back();
+            if(auto * slot = std::get_if<SlotChange>(&entry))
+            {
+                auto & storage = _accounts[slot->account].storage;
+                if(slot->previous) storage[slot->key] = *slot->previous;
+                else storage.erase(slot->key);
+            }
+            else if(auto * account = std::get_if<AccountChange>(&entry))
+            {
+                if(account->previous) _accounts[account->account] = std::move(*account->previous);
+                else _accounts.erase(account->account);
+            }
+            else
+            {
+                auto & nonce = std::get<NonceChange>(entry);
+                if(nonce.previous) _create_nonce[nonce.creator] = *nonce.previous;
+                else _create_nonce.erase(nonce.creator);
+            }
+            _journal.pop_back();
+        }
+
+        _emitted_logs.erase(
+            _emitted_logs.begin() + static_cast<std::ptrdiff_t>(checkpoint.emitted_logs), _emitted_logs.end());
+        _next_log_seq = checkpoint.next_log_seq;
+        if(!_tx_context_stack.empty())
+        {
+            _tx_context_stack.back().next_log_index = checkpoint.next_log_index;
+        }
     }
 
     evmc::uint256be EVMStorage::get_balance(const evmc::address& addr) const noexcept
@@ -110,6 +250,10 @@ namespace dcn::evm
         // Transfer balance
         // implement evmc_uint256be operations
         //_accounts[to_key(beneficiary)].balance += it->second.balance;
+        if(_journaling())
+        {
+            _journal.push_back(AccountChange{.account = key, .previous = std::move(it->second)});
+        }
         _accounts.erase(it);
         return true;
     }
@@ -177,12 +321,43 @@ namespace dcn::evm
         };
         TxContextScopeGuard tx_context_scope_guard{_tx_context_stack, top_level_call};
 
-        if (msg.kind == EVMC_CALL || msg.kind == EVMC_DELEGATECALL || msg.kind == EVMC_CALLCODE) 
+        // CREATE spends its creator's nonce in the creator's frame, ahead of the new frame's
+        // checkpoint: a failed creation keeps the bump, as on a chain, and only a failure
+        // of the creator's own frame undoes it.
+        const std::uint64_t create_nonce = msg.kind == EVMC_CREATE ? _spendCreateNonce(actual_sender) : 0;
+
+        const Checkpoint checkpoint = _checkpoint();
+        evmc::Result result = _dispatch(msg, actual_sender, create_nonce);
+        if(result.status_code != EVMC_SUCCESS)
+        {
+            _revertTo(checkpoint);
+        }
+        if(top_level_call)
+        {
+            // The transaction has ended, so nothing can revert its changes any more.
+            _journal.clear();
+        }
+        return result;
+    }
+
+    evmc::Result EVMStorage::_dispatch(
+        const evmc_message& msg,
+        const evmc::address& actual_sender,
+        const std::uint64_t create_nonce) noexcept
+    {
+        if (msg.kind == EVMC_CALL || msg.kind == EVMC_DELEGATECALL || msg.kind == EVMC_CALLCODE)
         {
             evmc::address code_address = msg.recipient;
             if (msg.kind == EVMC_DELEGATECALL || msg.kind == EVMC_CALLCODE)
             {
                 code_address = msg.code_address;
+            }
+
+            // ponytail: ecrecover is the only precompile served, since PT verifies owner
+            // signatures with it; serve others once a contract calls one.
+            if(_isEcrecover(code_address))
+            {
+                return _ecrecover(msg);
             }
 
             auto it = _accounts.find(to_key(code_address));
@@ -228,15 +403,10 @@ namespace dcn::evm
             const std::vector<std::uint8_t> init_code(patched_msg.input_data, patched_msg.input_data + patched_msg.input_size);
 
             // Calculate address
-            if(!_create_nonce.contains(actual_sender))
-            {
-                _create_nonce[actual_sender] = 100;
-            }
-
             evmc_address new_address;
             if (patched_msg.kind == EVMC_CREATE)
             {
-                new_address = derive_create_address(actual_sender, _create_nonce[actual_sender]++);
+                new_address = derive_create_address(actual_sender, create_nonce);
             }
             else // CREATE2
             {
@@ -273,7 +443,7 @@ namespace dcn::evm
             }
 
             deploy_contract(new_address, std::move(deployed_code),
-                patched_msg.value, actual_sender, _create_nonce[actual_sender] - 1);
+                patched_msg.value, actual_sender, create_nonce);
 
             result.create_address = new_address;
             
@@ -679,6 +849,7 @@ namespace dcn::evm
         }
 
         spdlog::debug(std::format("Deploying contract to {} by {}", addr,creator));
+        _recordAccount(to_key(addr));
         auto& account = _accounts[to_key(addr)];
         account.code = std::move(code);
         account.balance = value;

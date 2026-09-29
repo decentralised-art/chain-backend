@@ -942,7 +942,6 @@ int main(int argc, char* argv[])
         dcn::feed::FeedRuntimeConfig{
             .feed_db_path   = cfg.feed_db,
             .archive_root   = cfg.feed_archive_root,
-            .chain_id       = cfg.events_chain_id,
             .hot_window_days = cfg.events_hot_window_days,
             .outbox_retention_ms = static_cast<std::int64_t>(cfg.events_outbox_retention_days) * 24LL * 60LL * 60LL * 1000LL,
             .archive_interval_ms = cfg.events_archive_interval_ms
@@ -1064,7 +1063,7 @@ int main(int argc, char* argv[])
     // rather than a 404 that looks like a wrong URL.
     server.addRoute({dcn::http::Method::OPTIONS, "/publish/<string>/prepare"}, dcn::OPTIONS_publish);
     server.addRoute({dcn::http::Method::POST, "/publish/<string>/prepare"},
-        dcn::POST_publishPrepare, std::ref(auth_manager), std::ref(registry), std::ref(evm), publisher_ptr, std::cref(cfg));
+        dcn::POST_publishPrepare, std::ref(auth_manager), std::ref(evm), publisher_ptr, std::cref(cfg));
     server.addRoute({dcn::http::Method::OPTIONS, "/publish/<string>"}, dcn::OPTIONS_publish);
     server.addRoute({dcn::http::Method::POST, "/publish/<string>"},
         dcn::POST_publishConfirm, std::ref(auth_manager), publisher_ptr);

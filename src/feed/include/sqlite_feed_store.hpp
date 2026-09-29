@@ -21,8 +21,7 @@ namespace dcn::feed
             SqliteFeedStore(
                 const std::filesystem::path & feed_db_path,
                 const std::filesystem::path & archive_root,
-                std::int64_t outbox_retention_ms,
-                std::uint64_t default_chain_id);
+                std::int64_t outbox_retention_ms);
 
             ~SqliteFeedStore() override;
 
@@ -33,14 +32,14 @@ namespace dcn::feed
             std::int64_t minAvailableStreamSeq() const override;
             std::int64_t getFeedCursor() const override;
             void setFeedCursor(std::int64_t last_change_seq) override;
-            bool runArchiveCycle(std::uint64_t chain_id, std::size_t hot_window_days, std::int64_t now_ms) override;
+            bool runArchiveCycle(std::size_t hot_window_days, std::int64_t now_ms) override;
             storage::sqlite::WalCheckpointStats checkpointWal(storage::sqlite::WalCheckpointMode mode) override;
 
         private:
             bool _initializeFeedSchema();
             bool _initializeArchiveSchema(sqlite3 * archive_db) const;
             bool _exportMonth(const std::uint64_t chain_id, const std::string & month_token, const std::int64_t now_ms);
-            std::vector<std::filesystem::path> _candidateArchivePaths(const std::optional<CursorKey> & before_key) const;
+            std::vector<std::filesystem::path> _candidateArchivePaths() const;
             void _appendFeedRowsFromDatabase(
                 sqlite3 * db,
                 const char * table_name,
@@ -58,7 +57,5 @@ namespace dcn::feed
             sqlite3 * _write_db = nullptr;
             sqlite3 * _read_db = nullptr;
             std::unique_ptr<events::IEventShardRouter> _shard_router;
-
-            std::uint64_t _default_chain_id = 1;
     };
 }

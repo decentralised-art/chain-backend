@@ -256,7 +256,7 @@ TEST_F(UnitTest, API_PublishPrepare_RebuildsTheCallersLocalEntityIntoAnOwnerPaid
         const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
         return runAwaitable(io_context, POST_publishPrepare(
             postRequest("/publish/transformation/prepare", token, json{{"name", name}}),
-            {kindArg("transformation")}, {}, auth_manager, registry, evm_instance, &publisher, cfg));
+            {kindArg("transformation")}, {}, auth_manager, evm_instance, &publisher, cfg));
     };
 
     const auto prepared = prepare(owner, "PubTx");

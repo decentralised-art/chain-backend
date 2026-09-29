@@ -502,7 +502,6 @@ namespace dcn
         std::vector<server::RouteArg> route_args,
         server::QueryArgsList query_args,
         auth::AuthManager & auth_manager,
-        registry::Registry & registry,
         evm::EVM & evm,
         const publish::Publisher * publisher,
         const config::Config & config);

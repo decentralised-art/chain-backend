@@ -68,6 +68,7 @@
             sendPublication,
             confirmPublication,
             resetPublication,
+            updatePublicationHash,
             updatePublishActionAvailability
         } from './js/publish';
 
@@ -115,7 +116,7 @@
         document.getElementById('btn_confirmPublication').addEventListener('click', confirmPublication);
         document.getElementById('publishKind').addEventListener('change', resetPublication);
         document.getElementById('publishName').addEventListener('input', resetPublication);
-        document.getElementById('publishTxHash').addEventListener('input', updatePublishActionAvailability);
+        document.getElementById('publishTxHash').addEventListener('input', updatePublicationHash);
         document.getElementById('btn_publishCopyResponse').addEventListener('click', () => copyTextFromElement('publishResponseBody'));
         updatePublishActionAvailability();
 
@@ -447,6 +448,8 @@
                     </div>
                     <div class="tab-grid">
                         <div class="tab-column">
+                            <h3>Preparation and sending</h3>
+                            <p class="tab-hint">Prepare builds an unsigned transaction without spending gas. Send with wallet submits it; publication happens when it is successfully mined.</p>
                             <label for="publishKind">Kind</label>
                             <select id="publishKind">
                                 <option value="transformation">Transformation</option>
@@ -458,19 +461,22 @@
                             <input type="text" id="publishName" placeholder="add">
 
                             <div class="button-row">
-                                <button id="btn_preparePublication" class="action-button">🔒 Prepare</button>
-                                <button id="btn_sendPublication" class="action-button">Send with wallet</button>
+                                <button id="btn_preparePublication" class="action-button" disabled>🔒 Prepare</button>
+                                <button id="btn_sendPublication" class="action-button" disabled>Send with wallet</button>
                             </div>
+                            <p class="tab-hint">A connector's transformations, conditions and composites must be published first.</p>
 
+                            <h3>Confirmation</h3>
+                            <p id="publishConfirmationHint" class="tab-hint">Confirm checks the transaction receipt to verify that it successfully published this entity for your account. It sends no transaction and spends no gas, so it is safe to repeat. After sending, pending transactions are checked automatically every five seconds for about ten minutes.</p>
                             <label for="publishTxHash">Transaction hash</label>
-                            <input type="text" id="publishTxHash" placeholder="0x...">
+                            <input type="text" id="publishTxHash" placeholder="0x followed by 64 hexadecimal characters" aria-describedby="publishConfirmationHint">
                             <div class="button-row">
-                                <button id="btn_confirmPublication" class="action-button">🔒 Confirm</button>
+                                <button id="btn_confirmPublication" class="action-button" aria-describedby="publishConfirmationHint" disabled>🔒 Confirm</button>
                             </div>
 
                             <p id="publishStatus" class="publish-status" role="status" aria-live="polite">Log in, then prepare the publication of an entity you created.</p>
-                            <p class="tab-hint">A connector's transformations, conditions and composites must be published first.</p>
-                            <p class="tab-hint">A transaction that was already sent can be confirmed after preparing again: paste its hash and press Confirm.</p>
+                            <p class="tab-hint">A successful confirmation means the publication was mined. The server's registry listing updates after the block is final, even if you never press Confirm.</p>
+                            <p class="tab-hint">After refreshing, select the same entity and Prepare again. If it is already published, its address is shown. To check the original transaction's receipt, paste its hash and press Confirm; do not send it again.</p>
                         </div>
 
                         <div class="tab-column">

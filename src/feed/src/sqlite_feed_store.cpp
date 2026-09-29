@@ -232,12 +232,10 @@ namespace dcn::feed
 
     SqliteFeedStore::SqliteFeedStore(const std::filesystem::path& feed_db_path,
                                      const std::filesystem::path& archive_root,
-                                     const std::int64_t outbox_retention_ms,
-                                     const std::uint64_t default_chain_id)
+                                     const std::int64_t outbox_retention_ms)
         : _feed_db_path(feed_db_path)
         , _archive_root(archive_root)
         , _outbox_retention_ms(outbox_retention_ms)
-        , _default_chain_id(default_chain_id)
         , _shard_router(std::make_unique<events::MonthlyEventShardRouter>(_archive_root))
     {
         if (!_feed_db_path.parent_path().empty())
@@ -405,40 +403,42 @@ namespace dcn::feed
     // runArchiveCycle
     // -----------------------------------------------------------------------
 
-    bool SqliteFeedStore::runArchiveCycle(const std::uint64_t chain_id, const std::size_t hot_window_days, const std::int64_t now_ms)
+    bool SqliteFeedStore::runArchiveCycle(const std::size_t hot_window_days, const std::int64_t now_ms)
     {
         try
         {
-            std::vector<std::string> months;
+            // Every chain the feed holds is archived, one shard per chain and month.
+            std::vector<std::pair<std::uint64_t, std::string>> shards;
             {
-                storage::sqlite::Statement months_stmt(
+                storage::sqlite::Statement shards_stmt(
                     _write_db,
-                    "SELECT DISTINCT strftime('%Y-%m', block_time, 'unixepoch') AS month_token "
+                    "SELECT DISTINCT chain_id, strftime('%Y-%m', block_time, 'unixepoch') AS month_token "
                     "FROM feed_items_hot f "
-                    "WHERE f.chain_id=?1 AND f.status='finalized' AND f.exported=0 "
-                    "AND f.block_time IS NOT NULL AND f.projector_version>=?2 "
-                    "ORDER BY month_token ASC "
+                    "WHERE f.status='finalized' AND f.exported=0 "
+                    "AND f.block_time IS NOT NULL AND f.projector_version>=?1 "
+                    "ORDER BY month_token ASC, chain_id ASC "
                     "LIMIT 8;");
 
-                sqlite3_bind_int64(months_stmt.get(), 1, static_cast<sqlite3_int64>(chain_id));
-                sqlite3_bind_int(months_stmt.get(), 2, CURRENT_PROJECTOR_VERSION);
+                sqlite3_bind_int(shards_stmt.get(), 1, CURRENT_PROJECTOR_VERSION);
 
-                int months_rc = SQLITE_OK;
-                while ((months_rc = months_stmt.step()) == SQLITE_ROW)
+                int shards_rc = SQLITE_OK;
+                while ((shards_rc = shards_stmt.step()) == SQLITE_ROW)
                 {
-                    const unsigned char* month = sqlite3_column_text(months_stmt.get(), 0);
+                    const unsigned char* month = sqlite3_column_text(shards_stmt.get(), 1);
                     if (month != nullptr)
                     {
-                        months.emplace_back(reinterpret_cast<const char*>(month));
+                        shards.emplace_back(
+                            static_cast<std::uint64_t>(sqlite3_column_int64(shards_stmt.get(), 0)),
+                            reinterpret_cast<const char*>(month));
                     }
                 }
-                if (months_rc != SQLITE_DONE)
+                if (shards_rc != SQLITE_DONE)
                 {
                     throw std::runtime_error(sqlite3_errmsg(_write_db));
                 }
             }
 
-            for (const std::string& month : months)
+            for (const auto& [chain_id, month] : shards)
             {
                 if (!_exportMonth(chain_id, month, now_ms))
                 {
@@ -469,11 +469,10 @@ namespace dcn::feed
                         "CREATE TEMP TABLE prune_keys AS "
                         "SELECT chain_id, tx_hash, log_index "
                         "FROM feed_items_hot "
-                        "WHERE chain_id=?1 AND status='finalized' AND exported=1 "
-                        "AND block_time IS NOT NULL AND block_time < ?2;");
+                        "WHERE status='finalized' AND exported=1 "
+                        "AND block_time IS NOT NULL AND block_time < ?1;");
 
-                    sqlite3_bind_int64(create_prune_keys.get(), 1, static_cast<sqlite3_int64>(chain_id));
-                    sqlite3_bind_int64(create_prune_keys.get(), 2, static_cast<sqlite3_int64>(cutoff_seconds));
+                    sqlite3_bind_int64(create_prune_keys.get(), 1, static_cast<sqlite3_int64>(cutoff_seconds));
 
                     if (create_prune_keys.step() != SQLITE_DONE)
                     {
@@ -569,7 +568,7 @@ namespace dcn::feed
         // with archival (driven by block-time aging), so an archived row can
         // outrank a full hot page. Always scan the archive shards and let the
         // sort/truncate below pick the true top rows.
-        const std::vector<std::filesystem::path> archive_paths = _candidateArchivePaths(before_key);
+        const std::vector<std::filesystem::path> archive_paths = _candidateArchivePaths();
 
         for (const auto& archive_path : archive_paths)
         {
@@ -1284,24 +1283,18 @@ namespace dcn::feed
     // _candidateArchivePaths
     // -----------------------------------------------------------------------
 
-    std::vector<std::filesystem::path> SqliteFeedStore::_candidateArchivePaths(
-        const std::optional<CursorKey>& before_key) const
+    std::vector<std::filesystem::path> SqliteFeedStore::_candidateArchivePaths() const
     {
         std::vector<std::filesystem::path> paths;
 
-        std::string sql = "SELECT path FROM shard_catalog WHERE chain_id=?1 AND state='READY' ";
-        if (before_key.has_value())
-        {
-            sql += "AND min_block <= ?2 ";
-        }
-        sql += "ORDER BY max_block DESC;";
-
-        storage::sqlite::Statement stmt(_read_db, sql.c_str());
-        sqlite3_bind_int64(stmt.get(), 1, static_cast<sqlite3_int64>(before_key.has_value() ? before_key->chain_id : _default_chain_id));
-        if (before_key.has_value())
-        {
-            sqlite3_bind_int64(stmt.get(), 2, static_cast<sqlite3_int64>(before_key->block_number));
-        }
+        // Every chain's shards take part: the page order is by projection time, which
+        // neither a chain nor a block range bounds, and block numbers of different
+        // sources are not comparable.
+        // ponytail: one open per READY shard per page; record created_at_ms bounds in the
+        // catalog and skip shards past the cursor once shard counts make pages slow.
+        storage::sqlite::Statement stmt(
+            _read_db,
+            "SELECT path FROM shard_catalog WHERE state='READY' ORDER BY archive_month DESC, chain_id ASC;");
 
         int rc = SQLITE_OK;
         while ((rc = stmt.step()) == SQLITE_ROW)

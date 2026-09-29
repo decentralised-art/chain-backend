@@ -15,8 +15,7 @@ namespace dcn::feed
         , _feed(io_context,
                 _config.feed_db_path,
                 _config.archive_root,
-                _config.outbox_retention_ms,
-                _config.chain_id)
+                _config.outbox_retention_ms)
     {
     }
 
@@ -110,7 +109,7 @@ namespace dcn::feed
                 break;
             }
 
-            (void)co_await _feed.runArchiveCycle(_config.chain_id, _config.hot_window_days, utils::nowMs());
+            (void)co_await _feed.runArchiveCycle(_config.hot_window_days, utils::nowMs());
         }
 
         spdlog::info("Feed archive loop stopped");

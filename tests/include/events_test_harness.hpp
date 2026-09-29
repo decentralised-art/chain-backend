@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <sqlite3.h>
@@ -53,8 +54,24 @@ namespace dcn::tests::events_harness
         std::filesystem::path feed_db;
         std::filesystem::path feed_archive_root;
 
+        TempEventsPaths() = default;
+
+        // Owns `root`: a moved-from value (such as a returned local the compiler did
+        // not elide) must not remove the directory its successor uses.
+        TempEventsPaths(TempEventsPaths && other) noexcept
+            : root(std::exchange(other.root, {}))
+            , hot_db(std::move(other.hot_db))
+            , feed_db(std::move(other.feed_db))
+            , feed_archive_root(std::move(other.feed_archive_root))
+        {
+        }
+        TempEventsPaths(const TempEventsPaths &) = delete;
+        TempEventsPaths & operator=(const TempEventsPaths &) = delete;
+        TempEventsPaths & operator=(TempEventsPaths &&) = delete;
+
         ~TempEventsPaths()
         {
+            if(root.empty()) return;
             std::error_code ec;
             std::filesystem::remove_all(root, ec);
         }
@@ -582,11 +599,10 @@ namespace dcn::tests::events_harness
     inline bool awaitRunArchiveCycle(
         asio::io_context & io_context,
         feed::Feed & feed,
-        const std::uint64_t chain_id,
         const std::size_t hot_window_days,
         const std::int64_t now_ms)
     {
-        return runAwaitable(io_context, feed.runArchiveCycle(chain_id, hot_window_days, now_ms));
+        return runAwaitable(io_context, feed.runArchiveCycle(hot_window_days, now_ms));
     }
 
     inline std::optional<std::uint64_t> awaitLoadNextCursor(

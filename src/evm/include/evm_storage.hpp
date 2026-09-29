@@ -5,7 +5,9 @@
 #include <cstring>
 #include <vector>
 #include <format>
+#include <optional>
 #include <stack>
+#include <variant>
 
 // Undefine the conflicting macro
 #ifdef interface
@@ -70,17 +72,19 @@ namespace dcn::evm
                 spdlog::error(std::format("add_account: Account {} already exists", addr));
                 return false;
             }
+            _recordAccount(to_key(addr));
             _accounts.emplace(to_key(addr), Account{});
             return true;
         }
 
         void set_balance(const evmc::address& addr, std::uint64_t x) noexcept
-        {   
+        {
             if(account_exists(addr) == false)
             {
                 spdlog::error(std::format("set_balance : Account {} does not exist", addr));
                 return;
             }
+            _recordAccount(to_key(addr));
             Account & acc = _accounts.at(to_key(addr));
 
             acc.balance = evmc::uint256be{};
@@ -153,10 +157,48 @@ namespace dcn::evm
             std::int64_t next_log_index = 0;
         };
 
+        // Undo records for the changes made inside call frames, so a frame that does not
+        // succeed leaves no trace, as on a chain.
+        struct SlotChange
+        {
+            std::string account;
+            evmc::bytes32 key;
+            std::optional<evmc::bytes32> previous;
+        };
+        struct AccountChange
+        {
+            std::string account;
+            std::optional<Account> previous;
+        };
+        struct NonceChange
+        {
+            evmc::address creator;
+            std::optional<std::uint64_t> previous;
+        };
+        struct Checkpoint
+        {
+            std::size_t journal_size = 0;
+            std::size_t emitted_logs = 0;
+            std::uint64_t next_log_seq = 0;
+            std::int64_t next_log_index = 0;
+        };
+
+        // `create_nonce` is the creator nonce a CREATE spent on the new address.
+        evmc::Result _dispatch(const evmc_message& msg, const evmc::address& actual_sender, std::uint64_t create_nonce) noexcept;
+
+        // Changes outside any call frame (account setup by the embedder) are permanent.
+        bool _journaling() const noexcept { return !_sender_stack.empty(); }
+        void _recordAccount(const std::string& account);
+        std::uint64_t _spendCreateNonce(const evmc::address& creator);
+        Checkpoint _checkpoint() const noexcept;
+        void _revertTo(const Checkpoint& checkpoint);
+
         evmc::bytes32 make_pseudo_hash(
             std::uint64_t value_a,
             std::uint64_t value_b,
             std::uint64_t value_c) const;
+
+        std::vector<std::variant<SlotChange, AccountChange, NonceChange>> _journal;
 
         evmc::VM & _vm;
         evmc_revision _revision;

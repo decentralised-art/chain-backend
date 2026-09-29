@@ -13,14 +13,12 @@ namespace dcn::feed
         asio::io_context & io_context,
         std::filesystem::path feed_db_path,
         std::filesystem::path archive_root,
-        std::int64_t outbox_retention_ms,
-        std::uint64_t default_chain_id)
+        std::int64_t outbox_retention_ms)
         : _strand(asio::make_strand(io_context))
         , _store(std::make_unique<SqliteFeedStore>(
             std::move(feed_db_path),
             std::move(archive_root),
-            outbox_retention_ms,
-            default_chain_id))
+            outbox_retention_ms))
     {
     }
 
@@ -36,10 +34,10 @@ namespace dcn::feed
         _store->maintainOutbox(now_ms);
     }
 
-    asio::awaitable<bool> Feed::runArchiveCycle(std::uint64_t chain_id, std::size_t hot_window_days, std::int64_t now_ms)
+    asio::awaitable<bool> Feed::runArchiveCycle(std::size_t hot_window_days, std::int64_t now_ms)
     {
         co_await async::ensureOnStrand(_strand);
-        co_return _store->runArchiveCycle(chain_id, hot_window_days, now_ms);
+        co_return _store->runArchiveCycle(hot_window_days, now_ms);
     }
 
     FeedPage Feed::getFeedPage(const FeedQuery & query) const

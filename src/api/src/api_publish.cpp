@@ -142,7 +142,6 @@ namespace dcn
         /// chain-derivable state only and never holds the Solidity source a build needs.
         asio::awaitable<std::expected<loader::PreparedPublication, http::Response>> rebuild(
             const PublishTarget & target,
-            registry::Registry & registry,
             evm::EVM & evm,
             const publish::Publisher & publisher,
             const std::filesystem::path & storage_path)
@@ -170,7 +169,7 @@ namespace dcn
                 auto record = ownedLocalRecord(loader::loadLocalConnector(storage_path, target.name), target.owner);
                 if(!record) co_return std::unexpected(std::move(record.error()));
                 prepared = co_await loader::prepareConnectorPublication(
-                    evm, registry, std::move(*record), storage_path, publisher.registryAddress());
+                    evm, std::move(*record), storage_path, publisher.registryAddress());
                 break;
             }
             }
@@ -206,7 +205,6 @@ namespace dcn
         std::vector<server::RouteArg> args,
         server::QueryArgsList,
         auth::AuthManager & auth_manager,
-        registry::Registry & registry,
         evm::EVM & evm,
         const publish::Publisher * publisher,
         const config::Config & config)
@@ -214,7 +212,7 @@ namespace dcn
         auto target = co_await beginPublication(request, args, auth_manager, publisher);
         if(!target) co_return std::move(target.error());
 
-        auto prepared = co_await rebuild(*target, registry, evm, *publisher, config.storage_path);
+        auto prepared = co_await rebuild(*target, evm, *publisher, config.storage_path);
         if(!prepared) co_return std::move(prepared.error());
 
         const std::string kind_name(pt::entityKindName(target->kind));

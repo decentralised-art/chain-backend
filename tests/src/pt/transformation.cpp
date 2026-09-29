@@ -142,8 +142,10 @@ TEST_F(UnitTest, Transformation_ConstructSolidityCode_UsesConstructorPattern)
     ASSERT_TRUE(solidity_result.has_value());
     const std::string & solidity = *solidity_result;
 
-    EXPECT_NE(solidity.find("constructor(address registryAddr)"), std::string::npos);
-    EXPECT_NE(solidity.find("TransformationBase(\""), std::string::npos);
+    // TransformationBase(name, argc, contentHash, metadataHash) binds the published hashes.
+    EXPECT_NE(solidity.find(
+        "constructor(bytes32 contentHash_, bytes32 metadataHash_) "
+        "TransformationBase(\"transform_add\",1, contentHash_, metadataHash_){}"), std::string::npos);
     EXPECT_EQ(solidity.find("function initialize(address registryAddr) external initializer"), std::string::npos);
     EXPECT_EQ(solidity.find("__TransformationBase_init"), std::string::npos);
 }

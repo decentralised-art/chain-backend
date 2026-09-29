@@ -17,7 +17,6 @@ namespace dcn::feed
     {
         std::filesystem::path feed_db_path;
         std::filesystem::path archive_root;
-        std::uint64_t chain_id = 1;
         std::size_t hot_window_days = 90;
         std::int64_t outbox_retention_ms = 7LL * 24 * 60 * 60 * 1000;
         unsigned int archive_interval_ms = 30 * 1000;

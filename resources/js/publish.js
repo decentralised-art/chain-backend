@@ -9,10 +9,11 @@ const EXPLORERS = {
 const CONFIRM_POLL_MS = 5000;
 const CONFIRM_POLL_LIMIT = 120;
 
-// The last "prepared" answer: the wallet sends exactly its transaction, and confirmation
-// is checked against its content hash.
+// The selected publication's identity and optional unsigned transaction.
+// Confirmation is checked against its content hash.
 let prepared = null;
 let pollTimer = null;
+let busy = false;
 
 function byId(id) {
     return document.getElementById(id);
@@ -36,7 +37,7 @@ function setStatus(message, { isError = false, txHash = null } = {}) {
     status.replaceChildren(document.createTextNode(message));
     status.classList.toggle('is-error', isError);
 
-    const explorer = txHash && prepared && EXPLORERS[prepared.transaction.chainId];
+    const explorer = txHash && EXPLORERS[prepared?.transaction?.chainId];
     if (explorer) {
         const link = document.createElement('a');
         link.href = `${explorer}/tx/${txHash}`;
@@ -53,19 +54,53 @@ function stopPolling() {
 }
 
 export function updatePublishActionAvailability() {
-    byId('btn_sendPublication').disabled = !prepared;
-    byId('btn_confirmPublication').disabled = !prepared || !byId('publishTxHash').value.trim();
+    const txHash = byId('publishTxHash').value.trim();
+    byId('btn_preparePublication').disabled = busy || !byId('publishName').value.trim();
+    byId('btn_sendPublication').disabled = busy || prepared?.status !== 'prepared' || !!txHash;
+    byId('btn_confirmPublication').disabled = busy || pollTimer !== null || !prepared || !/^0x[0-9a-fA-F]{64}$/.test(txHash);
+    for (const id of ['publishKind', 'publishName', 'publishTxHash']) {
+        byId(id).disabled = busy;
+    }
+}
+
+function setBusy(value) {
+    busy = value;
+    updatePublishActionAvailability();
+}
+
+export function updatePublicationHash() {
+    if (busy) return;
+    stopPolling();
+    updatePublishActionAvailability();
+    if (!prepared) return;
+    const txHash = byId('publishTxHash').value.trim();
+    if (txHash) {
+        setStatus(/^0x[0-9a-fA-F]{64}$/.test(txHash)
+            ? 'Press Confirm to check the existing transaction. No transaction will be sent.'
+            : 'Enter the full transaction hash: 0x followed by 64 hexadecimal characters.');
+    } else if (prepared.status === 'prepared') {
+        setStatus(`Ready to send from ${prepared.transaction.from}. It deploys the entity at ${prepared.address}.`);
+    } else {
+        setStatus('Paste the original transaction hash to check its receipt, or Prepare again to check the publication status.');
+    }
 }
 
 // Changing what to publish invalidates the prepared transaction.
 export function resetPublication() {
+    if (busy) return;
     stopPolling();
     prepared = null;
+    byId('publishTxHash').value = '';
+    showResponse('-', 'Waiting...');
+    setStatus('Prepare the publication of the selected entity.');
     updatePublishActionAvailability();
 }
 
 export async function preparePublication() {
-    resetPublication();
+    if (busy) return;
+    stopPolling();
+    prepared = null;
+    updatePublishActionAvailability();
 
     const kind = byId('publishKind').value;
     const name = byId('publishName').value.trim();
@@ -74,7 +109,8 @@ export async function preparePublication() {
         return;
     }
 
-    setStatus('Rebuilding the entity and preparing its transaction...');
+    setBusy(true);
+    setStatus('Rebuilding the entity and checking whether it is already published...');
     try {
         const res = await requestWithLogin(apiUrl(`/publish/${kind}/prepare`), {
             method: 'POST',
@@ -85,11 +121,15 @@ export async function preparePublication() {
         showResponse(res.status, text);
         const body = parseJson(text);
 
-        if (res.ok && body?.status === 'prepared') {
+        if (res.ok && (body?.status === 'prepared' || body?.status === 'published')) {
             prepared = { kind, name, ...body };
-            setStatus(`Ready to send from ${body.transaction.from}. It deploys the entity at ${body.address}.`);
-        } else if (res.ok && body?.status === 'published') {
-            setStatus(`Already published at ${body.address}.`);
+            if (body.status === 'published') {
+                setStatus(`Already published at ${body.address}. No transaction needs to be sent. Confirm can check the original transaction's receipt.`);
+            } else if (byId('publishTxHash').value.trim()) {
+                setStatus('Prepared. Press Confirm to check the existing transaction. Preparing does not resend it.');
+            } else {
+                setStatus(`Ready to send from ${body.transaction.from}. It deploys the entity at ${body.address}.`);
+            }
         } else {
             const missing = [...(body?.missing ?? []), ...(body?.mismatched ?? [])];
             const detail = missing.length ? ` Publish these first: ${missing.join(', ')}.` : '';
@@ -98,12 +138,19 @@ export async function preparePublication() {
     } catch (error) {
         showResponse('Error', error.message);
         setStatus(error.message, { isError: true });
+    } finally {
+        setBusy(false);
     }
-    updatePublishActionAvailability();
 }
 
 export async function sendPublication() {
-    if (!prepared) {
+    if (busy || prepared?.status !== 'prepared' || byId('publishTxHash').value.trim()) {
+        return;
+    }
+    if (prepared.deadline * 1000 <= Date.now()) {
+        prepared.status = 'expired';
+        updatePublishActionAvailability();
+        setStatus('The prepared transaction has expired. Prepare again before sending.', { isError: true });
         return;
     }
     if (typeof window.ethereum === 'undefined') {
@@ -112,6 +159,9 @@ export async function sendPublication() {
     }
 
     const { transaction } = prepared;
+    let txHash;
+    setBusy(true);
+    setStatus('Complete the request in your wallet.');
     try {
         // The registry accepts the publication only from its owner, who also pays for it.
         const [account] = await window.ethereum.request({ method: 'eth_requestAccounts' });
@@ -128,14 +178,16 @@ export async function sendPublication() {
             });
         }
 
-        const txHash = await window.ethereum.request({ method: 'eth_sendTransaction', params: [transaction] });
+        txHash = await window.ethereum.request({ method: 'eth_sendTransaction', params: [transaction] });
+        prepared.status = 'sent';
         byId('publishTxHash').value = txHash;
-        updatePublishActionAvailability();
-        setStatus('Sent. Waiting for it to be mined...', { txHash });
-        await confirmUntilSettled(0);
+        setStatus('Sent. Checking whether the publication has been mined...', { txHash });
     } catch (error) {
         setStatus(error?.message || 'The wallet did not send the transaction.', { isError: true });
+    } finally {
+        setBusy(false);
     }
+    if (txHash) await confirmUntilSettled(0);
 }
 
 export function confirmPublication() {
@@ -144,12 +196,16 @@ export function confirmPublication() {
 
 // Asks the server about the transaction; while it is unmined, asks again a little later.
 async function confirmUntilSettled(attempt) {
+    if (busy) return;
     stopPolling();
     const txHash = byId('publishTxHash').value.trim();
-    if (!prepared || !txHash) {
+    if (!prepared || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+        updatePublishActionAvailability();
         return;
     }
 
+    setBusy(true);
+    setStatus('Checking the transaction receipt...', { txHash });
     try {
         const res = await requestWithLogin(apiUrl(`/publish/${prepared.kind}`), {
             method: 'POST',
@@ -168,8 +224,9 @@ async function confirmUntilSettled(attempt) {
             setStatus('Waiting for the transaction to be mined...', { txHash });
             pollTimer = setTimeout(() => confirmUntilSettled(attempt + 1), CONFIRM_POLL_MS);
         } else if (res.status === 201) {
+            prepared.status = 'mined';
             setStatus(
-                `Published at ${body.address} in block ${body.block_number}. The registry lists it once that block is final.`,
+                `Publication mined at ${body.address} in block ${body.block_number}. The server's registry listing updates after that block is final.`,
                 { txHash });
         } else {
             setStatus(body?.message || `Confirmation failed (${res.status}).`, { isError: true, txHash });
@@ -177,5 +234,7 @@ async function confirmUntilSettled(attempt) {
     } catch (error) {
         showResponse('Error', error.message);
         setStatus(error.message, { isError: true });
+    } finally {
+        setBusy(false);
     }
 }

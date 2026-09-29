@@ -62,7 +62,6 @@ namespace dcn::loader
         std::string expected_content_hash = {});
     asio::awaitable<std::expected<PreparedPublication, pt::PTDeployError>> prepareConnectorPublication(
         evm::EVM & evm,
-        registry::Registry & registry,
         ConnectorRecord connector,
         const std::filesystem::path & storage_path,
         const chain::Address & target_registry,

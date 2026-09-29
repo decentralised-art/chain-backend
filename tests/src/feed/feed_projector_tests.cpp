@@ -38,7 +38,7 @@ TEST_F(UnitTest, Feed_Projector_ConsumesEventsChangelogIntoFeedDb)
     asio::io_context io;
 
     events::SQLiteHotStore store(epaths.hot_db, CHAIN_ID);
-    dcn::feed::Feed feed_obj(io, fpaths.feed_db, fpaths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    dcn::feed::Feed feed_obj(io, fpaths.feed_db, fpaths.feed_archive_root, 7LL*24*60*60*1000);
     auto strand = asio::make_strand(io);
     dcn::feed::FeedProjector proj(store, feed_obj, strand);
 
@@ -63,7 +63,7 @@ TEST_F(UnitTest, Feed_Projector_DeadLetteredRow_IsRecoveredBySweep)
     asio::io_context io;
 
     events::SQLiteHotStore store(epaths.hot_db, CHAIN_ID);
-    dcn::feed::Feed feed_obj(io, fpaths.feed_db, fpaths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    dcn::feed::Feed feed_obj(io, fpaths.feed_db, fpaths.feed_archive_root, 7LL*24*60*60*1000);
     auto strand = asio::make_strand(io);
 
     auto evd = makeDecodedEvent(60, 0, 1, 0xB0, 0xD0,
@@ -102,7 +102,7 @@ TEST_F(UnitTest, Feed_Projector_DeadLetterSweepInterval_IsConfigurable)
     asio::io_context io;
 
     events::SQLiteHotStore store(epaths.hot_db, CHAIN_ID);
-    dcn::feed::Feed feed_obj(io, fpaths.feed_db, fpaths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    dcn::feed::Feed feed_obj(io, fpaths.feed_db, fpaths.feed_archive_root, 7LL*24*60*60*1000);
     auto strand = asio::make_strand(io);
 
     auto evd = makeDecodedEvent(60, 0, 1, 0xB0, 0xD0,
@@ -147,7 +147,6 @@ TEST_F(UnitTest, Feed_Runtime_StartStop_ArchiveLoopRuns)
     dcn::feed::FeedRuntime runtime(io, dcn::feed::FeedRuntimeConfig{
         .feed_db_path = fpaths.feed_db,
         .archive_root = fpaths.feed_archive_root,
-        .chain_id = CHAIN_ID,
         .archive_interval_ms = 10,
         .wal_checkpoint_interval_ms = 10});
     runtime.start();

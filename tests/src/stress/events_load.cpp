@@ -39,7 +39,7 @@ TEST_F(StressTest, Stress_Events_SustainedIngestProjectionEnvelope)
     const auto paths = makeTempEventsPaths("stress_events_envelope");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     std::int64_t next_block = 3'000;
     std::size_t emitted = 0;

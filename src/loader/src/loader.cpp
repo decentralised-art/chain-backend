@@ -239,9 +239,13 @@ namespace dcn::loader
         ConnectorEnsureContext & ensure_context,
         std::string expected_content_hash);
 
+    // A connector is compiled and registered against the local EVM's registry, so each
+    // dependency's content hash is read from there: it names the exact artifact the
+    // connector was built against, and it exists as soon as the dependency is deployed,
+    // before any event about it has been projected.
     static asio::awaitable<std::expected<std::vector<pt::ArtifactDependency>, pt::PTDeployError>>
     collectConnectorDependencies(
-        registry::Registry & registry,
+        evm::EVM & evm,
         const Connector & connector)
     {
         std::set<std::pair<pt::EntityKind, std::string>> names;
@@ -272,14 +276,29 @@ namespace dcn::loader
         dependencies.reserve(names.size());
         for(const auto & [kind, name] : names)
         {
-            const auto location = co_await registry.getEntityLocation(kind, name);
-            std::string content_hash = location ? location->source.content_hash : std::string{};
-            if(content_hash.empty())
+            std::vector<std::uint8_t> call = chain::constructSelector("getEntityContentHash(uint8,string)");
+            const std::vector<std::uint8_t> key = pt::abi::encodeTuple({
+                pt::abi::uintComponent(static_cast<std::uint64_t>(kind)),
+                pt::abi::stringComponent(name)});
+            call.insert(call.end(), key.begin(), key.end());
+
+            co_await evm.setGas(evm.getRegistryAddress(), evm::DEFAULT_GAS_LIMIT);
+            const auto output = co_await evm.execute(
+                evm.getRegistryAddress(), evm.getRegistryAddress(), std::move(call), evm::DEFAULT_GAS_LIMIT, 0);
+            if(!output || output->size() != 32)
             {
-                spdlog::error("Cannot bundle connector '{}': dependency '{}' has no artifact", connector.name(), name);
+                spdlog::error("Cannot bundle connector '{}': reading dependency '{}' failed", connector.name(), name);
+                co_return std::unexpected(pt::PTDeployError{});
+            }
+
+            evmc::bytes32 content_hash{};
+            std::ranges::copy(*output, content_hash.bytes);
+            if(content_hash == evmc::bytes32{})
+            {
+                spdlog::error("Cannot bundle connector '{}': dependency '{}' is not registered", connector.name(), name);
                 co_return std::unexpected(pt::PTDeployError{.kind = pt::PTDeployError::Kind::INVALID_INPUT});
             }
-            dependencies.push_back({.kind = kind, .name = name, .content_hash = std::move(content_hash)});
+            dependencies.push_back({.kind = kind, .name = name, .content_hash = chain::bytes32ToHex(content_hash)});
         }
         co_return dependencies;
     }
@@ -1017,7 +1036,7 @@ namespace dcn::loader
             co_return std::unexpected(pt::PTDeployError{.kind = pt::PTDeployError::Kind::INVALID_INPUT});
         }
 
-        auto dependencies = co_await collectConnectorDependencies(registry, connector);
+        auto dependencies = co_await collectConnectorDependencies(evm, connector);
         if(!dependencies) co_return std::unexpected(dependencies.error());
 
         co_return co_await _deployObjectLocally(
@@ -1139,7 +1158,6 @@ namespace dcn::loader
 
     asio::awaitable<std::expected<PreparedPublication, pt::PTDeployError>> prepareConnectorPublication(
         evm::EVM & evm,
-        registry::Registry & registry,
         ConnectorRecord connector_record,
         const std::filesystem::path & storage_path,
         const chain::Address & target_registry,
@@ -1151,7 +1169,7 @@ namespace dcn::loader
             co_return std::unexpected(pt::PTDeployError{.kind = pt::PTDeployError::Kind::INVALID_INPUT});
         }
 
-        auto dependencies = co_await collectConnectorDependencies(registry, connector_record.connector());
+        auto dependencies = co_await collectConnectorDependencies(evm, connector_record.connector());
         if(!dependencies) co_return std::unexpected(dependencies.error());
 
         co_return co_await _preparePublication(

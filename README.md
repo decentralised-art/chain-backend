@@ -81,7 +81,7 @@ cmake -S . -B build -DCMAKE_INSTALL_PREFIX=install -DDECENTRALIZED_ART_BUILD_TES
 
 ## Sepolia On chain config
 
-1. First start: deploy registry and runner (one time)
+First start: deploy registry and runner (one time)
 
 ```sh
 $env:DCN_CHAIN_RPC     = "https://eth-sepolia.g.alchemy.com/v2/<ALCHEMY_API_KEY>"
@@ -96,7 +96,7 @@ $env:DCN_BOOTSTRAP_KEY = "0x<deployer private key>"
   --chain-batch-size 10
 ```
 
-2. Next start
+Next start
 
 ```sh
  .\<INSTALL_DIRECTORY>\bin\DecentralisedArtServer.exe --chain-rpc-env DCN_CHAIN_RPC --events-chain-id 11155111 `

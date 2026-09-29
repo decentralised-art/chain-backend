@@ -76,7 +76,7 @@ TEST_F(UnitTest, Events_Maintenance_WalCheckpointRunsAndReportsStats)
     const auto paths = makeTempEventsPaths("maintenance_wal_checkpoint");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent event =
         makeDecodedEvent(201, 0, 1, 0xAA, 0xBA, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'010'000);

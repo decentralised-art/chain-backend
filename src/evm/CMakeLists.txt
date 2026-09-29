@@ -13,6 +13,7 @@ add_module(NAME "EVM"
         asio
         evmc
         evmone
+        secp256k1
         nlohmann_json
         protobuf::libprotobuf
 )

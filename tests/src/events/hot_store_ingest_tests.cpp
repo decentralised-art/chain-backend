@@ -180,7 +180,7 @@ TEST_F(UnitTest, Events_HotStore_ReorgReplacement_MarksOldRowsRemovedAndQueuesJo
     const auto paths = makeTempEventsPaths("ingest_reorg_replace");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     events::DecodedEvent old_event = makeDecodedEvent(50, 0, 1, 0xAA, 0xC1, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'000'400);
     const events::ChainBlockInfo old_block = makeBlockInfo(50, old_event.raw.block_hash, hexBytes(0x95, 32), 1'700'000'400, 1'700'000'401'000);
@@ -221,7 +221,7 @@ TEST_F(UnitTest, Events_HotStore_RemovedRawWithoutDecodedEvent_StillInvalidatesN
     const auto paths = makeTempEventsPaths("ingest_removed_raw_without_decoded");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent inserted = makeDecodedEvent(
         75,
@@ -271,7 +271,7 @@ TEST_F(UnitTest, Events_HotStore_RemovedRawWithDecodedObserved_StillPinsRawState
     const auto paths = makeTempEventsPaths("ingest_removed_raw_with_decoded_observed");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent inserted = makeDecodedEvent(
         88,

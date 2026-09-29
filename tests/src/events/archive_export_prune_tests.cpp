@@ -47,7 +47,7 @@ TEST_F(UnitTest, Events_Archive_ExportsOnlyFinalizedUnexportedRows)
     const auto paths = makeTempEventsPaths("archive_export_predicate");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent finalized = makeDecodedEvent(100, 0, 1, 0xF0, 0x30, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'001'000);
     finalizeAndProject(store_io_context, store, feed_obj, finalized, 1'700'001'000'200);
@@ -63,7 +63,7 @@ TEST_F(UnitTest, Events_Archive_ExportsOnlyFinalizedUnexportedRows)
         1'700'001'001'200));
     EXPECT_EQ(projectAll(store_io_context, store, feed_obj, 1'700'001'001'300), 1u);
 
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 36500, 1'700'001'100'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 36500, 1'700'001'100'000));
 
     // Archive cycle does not touch normalized_events_hot; both rows survive it and are only
     // deleted later by the min-cursor prune loop once all projectors have consumed them.
@@ -87,13 +87,13 @@ TEST_F(UnitTest, Events_Archive_ReExportCycle_IsIdempotent)
     const auto paths = makeTempEventsPaths("archive_idempotent");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(102, 0, 1, 0xF2, 0x32, events::EventType::TRANSFORMATION_ADDED, events::EventState::OBSERVED, 1'700'001'002);
     finalizeAndProject(store_io_context, store, feed_obj, event, 1'700'001'002'200);
 
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 36500, 1'700'001'110'000));
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 36500, 1'700'001'120'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 36500, 1'700'001'110'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 36500, 1'700'001'120'000));
 
     // Archive cycle marks feed_items_hot.exported=1 but does NOT touch normalized_events_hot.
     SqliteReadonly fdb(paths.feed_db);
@@ -107,18 +107,18 @@ TEST_F(UnitTest, Events_Archive_PrunesOnlyAfterExportedRowsExist)
     const auto paths = makeTempEventsPaths("archive_prune_gate");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(103, 0, 1, 0xF3, 0x33, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'600'000'000);
     finalizeAndProject(store_io_context, store, feed_obj, event, 1'700'001'003'200);
 
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 36500, 1'700'001'130'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 36500, 1'700'001'130'000));
     events_sql::expectRowCount(paths.hot_db, "normalized_events_hot", 1);
 
     // Second cycle with hot_window=0: prunes feed_items_hot once exported.
     // raw_events_hot and normalized_events_hot are no longer pruned by the archive cycle;
     // they are deleted by the min-cursor prune loop (pruneConsumedRaw).
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 0, 1'900'000'000'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 0, 1'900'000'000'000));
     events_sql::expectRowCount(paths.feed_db, "feed_items_hot", 0);
 }
 
@@ -127,12 +127,12 @@ TEST_F(UnitTest, Events_Archive_IsNotReplayAuthority_GlobalOutboxRemainsSource)
     const auto paths = makeTempEventsPaths("archive_not_replay_authority");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(104, 0, 1, 0xF4, 0x34, events::EventType::CONDITION_ADDED, events::EventState::OBSERVED, 1'600'000'001);
     finalizeAndProject(store_io_context, store, feed_obj, event, 1'700'001'004'200);
 
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 0, 1'900'000'000'001));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 0, 1'900'000'000'001));
 
     const feed::StreamPage stream = feed_obj.getStreamPage(feed::StreamQuery{
         .since_seq = 0,
@@ -147,7 +147,7 @@ TEST_F(UnitTest, Events_Archive_MonthSelection_IncludesPendingFinalizedFeedRows)
     const auto paths = makeTempEventsPaths("archive_feed_month_candidate");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
         105,
@@ -160,14 +160,14 @@ TEST_F(UnitTest, Events_Archive_MonthSelection_IncludesPendingFinalizedFeedRows)
         1'700'001'005);
     finalizeAndProject(store_io_context, store, feed_obj, event, 1'700'001'005'200);
 
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 36500, 1'700'001'140'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 36500, 1'700'001'140'000));
 
     {
         SqliteWritable fdb(paths.feed_db);
         fdb.exec("UPDATE feed_items_hot SET exported=0 WHERE chain_id=1;");
     }
 
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 36500, 1'700'001'150'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 36500, 1'700'001'150'000));
 
     // Archive cycle re-marks feed_items_hot.exported=1.
     {
@@ -181,7 +181,7 @@ TEST_F(UnitTest, Events_Archive_DoesNotExportOrPruneRowsWithUnconsumedChanges)
     const auto paths = makeTempEventsPaths("archive_respects_projection_backlog");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
         200,
@@ -211,7 +211,7 @@ TEST_F(UnitTest, Events_Archive_DoesNotExportOrPruneRowsWithUnconsumedChanges)
 
     // The finality transition created new change_seq entries beyond feed_cursor.
     // Run an aggressive archive/prune cycle - it must not export the row since feed_cursor hasn't consumed it.
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 0, 1'900'000'000'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 0, 1'900'000'000'000));
 
     SqliteReadonly db(paths.hot_db);
     EXPECT_EQ(db.scalarInt64("SELECT COUNT(1) FROM normalized_events_hot;"), 1);
@@ -222,7 +222,7 @@ TEST_F(UnitTest, Events_Archive_NormalizedRowsRequireFeedProjectionEvidence)
     const auto paths = makeTempEventsPaths("archive_requires_feed_projection_evidence");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
         210,
@@ -240,7 +240,7 @@ TEST_F(UnitTest, Events_Archive_NormalizedRowsRequireFeedProjectionEvidence)
         fdb.exec("DELETE FROM feed_items_hot WHERE chain_id=1;");
     }
 
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 0, 1'900'001'000'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 0, 1'900'001'000'000));
 
     SqliteReadonly db(paths.hot_db);
     EXPECT_EQ(db.scalarInt64("SELECT COUNT(1) FROM normalized_events_hot;"), 1);
@@ -251,7 +251,7 @@ TEST_F(UnitTest, Events_Archive_FinalizationRejectsFeedRowsWithDivergedSnapshot)
     const auto paths = makeTempEventsPaths("archive_snapshot_mismatch_feed");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
         320,
@@ -264,7 +264,7 @@ TEST_F(UnitTest, Events_Archive_FinalizationRejectsFeedRowsWithDivergedSnapshot)
         1'700'002'100);
     finalizeAndProject(store_io_context, store, feed_obj, event, 1'700'002'100'200);
 
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 36500, 1'700'002'100'300));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 36500, 1'700'002'100'300));
 
     {
         SqliteReadonly fdb(paths.feed_db);
@@ -299,7 +299,7 @@ TEST_F(UnitTest, Events_Archive_PruneRetainsBothRowsWhenFeedPairIsUnexported)
     const auto paths = makeTempEventsPaths("archive_prune_keeps_pair_when_feed_unexported");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
         330,
@@ -313,7 +313,7 @@ TEST_F(UnitTest, Events_Archive_PruneRetainsBothRowsWhenFeedPairIsUnexported)
     finalizeAndProject(store_io_context, store, feed_obj, event, 1'700'002'200'200);
 
     // First archive cycle: feed row becomes exported=1; normalized row is never marked by archive.
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 36500, 1'700'002'200'300));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 36500, 1'700'002'200'300));
     {
         SqliteReadonly fdb(paths.feed_db);
         EXPECT_EQ(fdb.scalarInt64("SELECT exported FROM feed_items_hot LIMIT 1;"), 1);
@@ -331,7 +331,7 @@ TEST_F(UnitTest, Events_Archive_PruneRetainsBothRowsWhenFeedPairIsUnexported)
     // Aggressive prune cycle: hot_window_days=0 makes everything prune-eligible
     // by block_time. With the pair-aware prune_keys gate, neither side should be
     // pruned — otherwise the unexported feed row would be orphaned.
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 0, 1'900'002'200'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 0, 1'900'002'200'000));
 
     // The unexported feed row prevents prune_keys from including it; all rows remain.
     {

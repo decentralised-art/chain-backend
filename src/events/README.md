@@ -235,23 +235,24 @@ flowchart TD
 ```
 
 Feed archive is owned by `FeedRuntime`, not by `EventRuntime`. Its loop calls
-`Feed::runArchiveCycle(chain_id, hot_window_days, now_ms)` every
-`archive_interval_ms`.
+`Feed::runArchiveCycle(hot_window_days, now_ms)` every `archive_interval_ms`;
+each cycle archives every chain the feed holds.
 
 | Item | Behavior |
 | --- | --- |
 | Archive root | `--feed-archive-root`, default `storage/feed/archive`. |
 | Shard path | `chain-<chain_id>/<YYYY-MM>.sqlite`, from `MonthlyEventShardRouter`. |
 | Month source | `strftime('%Y-%m', block_time, 'unixepoch')` from finalized `feed_items_hot` rows. |
-| Export predicate | `chain_id` matches, `status='finalized'`, `exported=0`, `block_time IS NOT NULL`, and current projector version. |
+| Export predicate | `status='finalized'`, `exported=0`, `block_time IS NOT NULL`, and current projector version, for every chain; rows go to the shard of their own chain and month. |
 | Archive table | Each shard stores `feed_items_archive`; only feed items are exported. |
 | Catalog | Hot feed DB stores `shard_catalog(chain_id, archive_month, path, state, min_block, max_block, row_count, last_export_ms)`. Ready shards are marked `state='READY'`. |
 | Hot pruning | Exported hot feed rows are deleted only after they are old enough for `hot_window_days`; archived copies remain in the monthly shard. |
 | Events hot-store pruning | Separate from feed archive. Raw/normalized event rows are pruned by `EventRuntime` using projector cursors and the reorg floor. |
 
-Historical feed reads can scan ready archive shards from `shard_catalog` when
-the hot feed table alone cannot satisfy the query. The registry database is not
-archived by month; it remains the current materialized registry view.
+Historical feed reads merge the hot table with every READY shard of every chain:
+the page order is by projection time, which neither a chain nor a block range
+bounds. The registry database is not archived by month; it remains the current
+materialized registry view.
 
 ## Registry Placement
 

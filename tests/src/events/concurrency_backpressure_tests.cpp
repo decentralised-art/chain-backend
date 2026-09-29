@@ -172,7 +172,7 @@ TEST_F(UnitTest, Events_Concurrency_StrandSerializedIngestAndProject_AreDetermin
     events_sql::expectRowCount(paths.hot_db, "raw_events_hot", 1);
 
     // Project via the feed-based approach (no longer strand-bound; FeedProjector owns its strand)
-    feed::Feed feed_obj(io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
     EXPECT_EQ(awaitProjectBatch(io_context, store, feed_obj, 8, 1'700'003'000'300), 1u);
     events_sql::expectRowCount(paths.feed_db, "feed_items_hot", 1);
 }
@@ -255,7 +255,7 @@ TEST_F(UnitTest, Events_Concurrency_IngestAndProjectSerializeOnSameHotWriteStran
 
     // Project via a fresh context so io_context.restart() is safe
     asio::io_context project_io;
-    feed::Feed feed_obj(project_io, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(project_io, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
     const std::size_t total_projected = projectAll(project_io, store, feed_obj, 1'700'003'500'999);
     EXPECT_EQ(total_projected, static_cast<std::size_t>(EVENT_COUNT));
     events_sql::expectRowCount(paths.feed_db, "feed_items_hot", EVENT_COUNT);
@@ -322,7 +322,7 @@ TEST_F(UnitTest, Events_Concurrency_ReadersDuringWriter_DoNotCorruptState)
     const auto paths = makeTempEventsPaths("concurrency_read_write");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     std::atomic<bool> done{false};
     std::atomic<int> read_iterations{0};

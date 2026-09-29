@@ -130,8 +130,7 @@ TEST_F(UnitTest, Events_Registry_E2E_ConnectorAndTransformationMaterializeInBoth
         io,
         feed_db_path,
         feed_archive_path,
-        /*outbox_retention_ms=*/ 7LL * 24 * 60 * 60 * 1000,
-        /*default_chain_id=*/ 1);
+        /*outbox_retention_ms=*/ 7LL * 24 * 60 * 60 * 1000);
 
     // FeedProjector (feed module) first — drives feed DB from events hot-store changes.
     event_runtime.addProjector(std::make_unique<dcn::feed::FeedProjector>(

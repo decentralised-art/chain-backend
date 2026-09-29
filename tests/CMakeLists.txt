@@ -116,6 +116,7 @@ add_executable("${UNIT_TEST_TARGET}"
     "src/api_publish.cpp"
     "src/chain_abi.cpp"
     "src/native_process.cpp"
+    "src/evm_storage.cpp"
 
     # --- rpc module test files ---
     "src/rpc/http_transport_tests.cpp"

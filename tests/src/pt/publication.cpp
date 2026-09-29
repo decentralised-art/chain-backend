@@ -447,6 +447,7 @@ TEST_F(UnitTest, PT_Ownable_ChangeOwnerToZero_RevertsAndKeepsOwner)
 
 namespace
 {
+    // IRegistry.Publication, field for field.
     pt::abi::Component publicationArgument(const pt::Publication & publication)
     {
         // The struct holds a string, so it is a dynamic tuple component.
@@ -458,6 +459,7 @@ namespace
             pt::abi::bytes32Component(publication.metadata_hash),
             pt::abi::bytes32Component(publication.creation_code_hash),
             pt::abi::bytes32Component(publication.runtime_code_hash),
+            pt::abi::bytes32Component(publication.registration_hash),
             pt::abi::uintComponent(publication.nonce),
             pt::abi::uintComponent(publication.deadline)})};
     }
@@ -474,6 +476,11 @@ namespace
         std::ofstream out(key_path, std::ios::trunc);
         out << hex_key;
         out.close();
+        // Key files readable by anyone but their owner are refused.
+        std::filesystem::permissions(
+            key_path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace);
 
         auto signer = publish::Signer::fromKeyFile(key_path);
         if(!signer) throw std::runtime_error(signer.error());
@@ -487,7 +494,7 @@ namespace
         const auto result = fixture.callRegistry(
             fixture.owner,
             fixture.encodeRegistryCall(
-                "publicationDigest((uint8,string,address,bytes32,bytes32,bytes32,bytes32,uint256,uint256))",
+                "publicationDigest((uint8,string,address,bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256))",
                 {publicationArgument(publication)}));
         if(!result || result->size() < 32) return {};
 
@@ -743,14 +750,7 @@ TEST_F(UnitTest, PT_Publication_ConnectorRegistrationMustMatchItsSignedHash)
         fixture.io_context,
         loader::prepareTransformationPublication(*fixture.evm_instance, dependency, fixture.storage_path));
     ASSERT_TRUE(dependency_prepared.has_value());
-    const auto dependency_address = fixture.publishTransformation("BoundTransform", fixture.owner);
-    ASSERT_TRUE(dependency_address.has_value());
-
-    registry::EntitySource dependency_source;
-    dependency_source.content_hash = dependency_prepared->content_hash;
-    ASSERT_TRUE(runAwaitable(
-        fixture.io_context,
-        fixture.registry.addTransformationVersion(dependency_source, *dependency_address, dependency)));
+    ASSERT_TRUE(fixture.publishTransformation("BoundTransform", fixture.owner).has_value());
 
     ConnectorRecord connector;
     connector.set_owner(chain::addressToHex(fixture.owner));
@@ -761,12 +761,17 @@ TEST_F(UnitTest, PT_Publication_ConnectorRegistrationMustMatchItsSignedHash)
         fixture.io_context,
         loader::prepareConnectorPublication(
             *fixture.evm_instance,
-            fixture.registry,
             connector,
             fixture.storage_path,
             fixture.evm_instance->getRegistryAddress()));
     ASSERT_TRUE(prepared.has_value());
     ASSERT_TRUE(prepared->registration.has_value());
+
+    // The dependency is bound to the artifact the local registry holds for it; the
+    // server's registry projection has not seen it at all.
+    ASSERT_EQ(prepared->dependencies.size(), 1u);
+    EXPECT_EQ(prepared->dependencies.front().name, "BoundTransform");
+    EXPECT_EQ(prepared->dependencies.front().content_hash, dependency_prepared->content_hash);
 
     pt::Publication & publication = prepared->publication;
     publication.nonce = 1;   // consumed once by the dependency
