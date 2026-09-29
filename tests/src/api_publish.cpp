@@ -78,9 +78,9 @@ namespace
         return source;
     }
 
-    http::Request makeExecuteRequest(const std::string & token, const std::string & connector_name)
+    http::Request makeExecuteRequest(const std::string & connector_name)
     {
-        return postRequest("/execute", token, json{
+        return postRequest("/execute", "", json{
             {"connector_name", connector_name},
             {"particles_count", 3},
             {"dynamic_ri", json::object()}});
@@ -400,7 +400,6 @@ TEST_F(UnitTest, API_PublishPrepare_RebuildsTheCallersLocalEntityIntoAnOwnerPaid
 TEST_F(UnitTest, API_Execute_RunsTheConnectorAsAGasCappedEthCallOnTheRunner)
 {
     asio::io_context io_context;
-    auth::AuthManager auth_manager(io_context);
 
     auto node = std::make_shared<FakeNode>();
     std::string runner_answer = "particles";
@@ -433,11 +432,10 @@ TEST_F(UnitTest, API_Execute_RunsTheConnectorAsAGasCappedEthCallOnTheRunner)
         .execute_max_gas = 1'000'000,
         .execute_block_tag = "safe"};
 
-    const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(makeAddressFromByte(0x44)));
+    // No login: the request carries no Authorization header.
     const auto execute = [&](const ChainAccess * access)
     {
-        return runAwaitable(io_context, POST_execute(
-            makeExecuteRequest(token, "ChainConnector"), {}, {}, auth_manager, access));
+        return runAwaitable(io_context, POST_execute(makeExecuteRequest("ChainConnector"), {}, {}, access));
     };
 
     // The chain answers alone: this server's registry knows nothing about the connector.
@@ -487,18 +485,17 @@ TEST_F(UnitTest, API_Simulate_ValidatesTheRequestAndRunsOnlyLocalConnectors)
 {
     asio::io_context io_context;
     registry::Registry registry(io_context);
-    auth::AuthManager auth_manager(io_context);
-    const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(makeAddressFromByte(0x44)));
 
     ASSERT_TRUE(std::filesystem::exists(solcPath())) << std::format("Missing Solidity compiler at '{}'", solcPath().string());
     evm::EVM evm_instance(io_context, EVMC_SHANGHAI, solcPath(), ptPath());
     io_context.run();
     config::Config cfg;
 
+    // No login: the request carries no Authorization header.
     const auto simulate = [&](const json & body)
     {
         return runAwaitable(io_context, POST_simulate(
-            postRequest("/simulate", token, body), {}, {}, auth_manager, registry, evm_instance, cfg));
+            postRequest("/simulate", "", body), {}, {}, registry, evm_instance, cfg));
     };
 
     EXPECT_EQ(simulate(json{{"connector_name", "Any"}, {"particles_count", 0}}).getCode(), http::Code::BadRequest);

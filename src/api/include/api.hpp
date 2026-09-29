@@ -558,7 +558,7 @@ namespace dcn
      * answer is {"block_number", "block_hash", "runner", "particles"}, so anyone can check
      * it by calling the runner at the same block. The chain decides whether the connector
      * exists: 404 when the runner's registry does not hold it, 503 when this server has no
-     * chain configured.
+     * chain configured. No login is required: an eth_call sends no transaction and costs no gas.
      *
      * @param chain Configured chain deployment, or null when the server has no RPC endpoint
      */
@@ -566,20 +566,18 @@ namespace dcn
         const http::Request & request,
         std::vector<server::RouteArg> route_args,
         server::QueryArgsList query_args,
-        const auth::AuthManager & auth_manager,
         const ChainAccess * chain);
 
     /**
      * @brief Handles POST /simulate: runs a connector created on this server on the local EVM.
      *
      * Only connectors with a local version qualify (404 otherwise); a connector that
-     * exists only on chain runs with POST /execute.
+     * exists only on chain runs with POST /execute. No login is required.
      */
     asio::awaitable<http::Response> POST_simulate(
         const http::Request & request,
         std::vector<server::RouteArg> route_args,
         server::QueryArgsList query_args,
-        const auth::AuthManager & auth_manager,
         registry::Registry & registry,
         evm::EVM & evm,
         const config::Config & config);
