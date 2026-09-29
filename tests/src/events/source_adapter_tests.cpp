@@ -35,7 +35,7 @@ namespace
         return std::filesystem::path(DECENTRALISED_ART_TEST_PT_PATH);
     }
 
-    const std::string TRANSFORMATION_ADDED_SIG = "TransformationAdded(address,string,address,address,uint32)";
+    const std::string TRANSFORMATION_ADDED_SIG = "TransformationAdded(address,string,address,address,uint32,bytes32,bytes32,bytes32)";
 
     evm::EVM::EmittedLogRecord makeRecord(
         const std::uint64_t seq,
@@ -68,7 +68,7 @@ namespace
     class FakeSource final : public events::IEmittedLogSource
     {
         public:
-            FakeSource(int chain_id, std::vector<evm::EVM::EmittedLogRecord> records, bool ephemeral, std::int64_t head)
+            FakeSource(std::uint64_t chain_id, std::vector<evm::EVM::EmittedLogRecord> records, bool ephemeral, std::int64_t head)
                 : _chain_id(chain_id)
                 , _records(std::move(records))
                 , _ephemeral(ephemeral)
@@ -76,7 +76,10 @@ namespace
             {
             }
 
-            int chainId() const override { return _chain_id; }
+            std::string_view sourceId() const override { return events::LOCAL_SOURCE_ID; }
+            std::uint64_t chainId() const override { return _chain_id; }
+            std::string_view chainNamespace() const override { return events::LOCAL_CHAIN_NAMESPACE; }
+            events::CursorKind cursorKind() const override { return events::CursorKind::LOCAL_SEQUENCE; }
             bool ephemeralEntities() const override { return _ephemeral; }
 
             asio::awaitable<events::SourcePoll> pollSince(std::uint64_t cursor, std::size_t limit) override
@@ -105,7 +108,7 @@ namespace
             std::uint64_t minCursorPolled() const { return _min_cursor.load(std::memory_order_acquire); }
 
         private:
-            int _chain_id;
+            std::uint64_t _chain_id;
             std::vector<evm::EVM::EmittedLogRecord> _records;
             bool _ephemeral;
             std::int64_t _head;
@@ -186,15 +189,29 @@ TEST_F(UnitTest, Events_LocalEvmSource_SurfacesEmittedLogsWithCursorAndFinality)
         max_block = std::max(max_block, record.block_number);
     }
 
-    EXPECT_EQ(poll.next_cursor, poll.records.back().seq + 1);
-    EXPECT_EQ(poll.finality.head, poll.finality.safe);
-    EXPECT_EQ(poll.finality.safe, poll.finality.finalized);
-    EXPECT_GE(poll.finality.head, max_block);
+    EXPECT_EQ(poll.next_cursor, poll.records.back().seq);
+    ASSERT_TRUE(poll.finality.has_value());
+    EXPECT_EQ(poll.finality->head, poll.finality->safe);
+    EXPECT_EQ(poll.finality->safe, poll.finality->finalized);
+    EXPECT_GE(poll.finality->head, max_block);
 
     // Draining past the end yields nothing and leaves the cursor where it was.
     const auto drained = runAwaitable(io_context, source.pollSince(poll.next_cursor, 1024));
     EXPECT_TRUE(drained.records.empty());
     EXPECT_EQ(drained.next_cursor, poll.next_cursor);
+
+    // The first log emitted after the source caught up is delivered, not skipped: a
+    // publication emits exactly one registry event.
+    transformation.mutable_transformation()->set_name("LaterTransform");
+    const auto later_deploy = runAwaitable(
+        io_context,
+        loader::deployTransformation(evm_instance, registry, transformation, storage_path));
+    ASSERT_TRUE(later_deploy) << std::format("deployTransformation failed: {}", later_deploy.error().kind);
+
+    const auto later = runAwaitable(io_context, source.pollSince(drained.next_cursor, 1024));
+    ASSERT_EQ(later.records.size(), 1u);
+    EXPECT_EQ(later.records.front().seq, poll.records.back().seq + 1);
+    EXPECT_EQ(later.next_cursor, later.records.front().seq);
 }
 
 // A source flagged ephemeralEntities() must have its decoded entity addresses
@@ -218,11 +235,11 @@ TEST_F(UnitTest, Events_Ingestion_EphemeralSource_RewritesEntityAddress)
     EXPECT_EQ(db.scalarInt64("SELECT COUNT(1) FROM normalized_events_hot WHERE entity_address='0x0';"), 1);
 }
 
-// The store keys cursor state by chain_id, so two sources sharing a chain_id would
+// The store keys cursor state by source_id, so two sources sharing a source_id would
 // clobber each other. start() must reject the duplicate: only the first source runs.
-TEST_F(UnitTest, Events_Ingestion_DuplicateChainIdSource_IsRejected)
+TEST_F(UnitTest, Events_Ingestion_DuplicateSourceIdSource_IsRejected)
 {
-    const auto paths = makeTempEventsPaths("ingestion_duplicate_chain_id");
+    const auto paths = makeTempEventsPaths("ingestion_duplicate_source_id");
 
     auto source_a = std::make_shared<FakeSource>(
         CHAIN_ID,
@@ -261,7 +278,7 @@ TEST_F(UnitTest, Events_Ingestion_SourceRegression_RewindsLocalCursor)
 {
     const auto paths = makeTempEventsPaths("ingestion_source_regression");
 
-    // Session 1: ingest at high blocks; cursor advances to seq 3, next_from_block ~1003.
+    // Session 1: ingest at high blocks; cursor advances to seq 3 at head 1002.
     std::vector<evm::EVM::EmittedLogRecord> high_records{
         makeRecord(0, 1'000, 0x43),
         makeRecord(1, 1'001, 0x44),
@@ -273,11 +290,11 @@ TEST_F(UnitTest, Events_Ingestion_SourceRegression_RewindsLocalCursor)
         runRuntimeFor(runtime, io_context, std::chrono::milliseconds(200));
 
         SqliteReadonly db(paths.hot_db);
-        EXPECT_EQ(db.scalarInt64("SELECT next_seq FROM local_ingest_resume_state WHERE chain_id=1;"), 3);
+        EXPECT_EQ(db.scalarInt64("SELECT next_cursor FROM source_resume WHERE source_id='local';"), 3);
     }
 
     // Session 2 (same db): the source restarted and re-emits from low blocks with a
-    // regressed head (< persisted next_from_block). Ingestion must rewind its local
+    // regressed head (< the persisted finality head). Ingestion must rewind its local
     // seq cursor to 0, re-read the restarted logs, then settle back at seq 3.
     std::vector<evm::EVM::EmittedLogRecord> low_records{
         makeRecord(0, 1, 0x43),
@@ -293,6 +310,6 @@ TEST_F(UnitTest, Events_Ingestion_SourceRegression_RewindsLocalCursor)
         EXPECT_EQ(source->minCursorPolled(), 0u);
 
         SqliteReadonly db(paths.hot_db);
-        EXPECT_EQ(db.scalarInt64("SELECT next_seq FROM local_ingest_resume_state WHERE chain_id=1;"), 3);
+        EXPECT_EQ(db.scalarInt64("SELECT next_cursor FROM source_resume WHERE source_id='local';"), 3);
     }
 }

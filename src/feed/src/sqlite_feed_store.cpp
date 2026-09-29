@@ -16,6 +16,9 @@
 namespace dcn::feed
 {
     constexpr int CURRENT_PROJECTOR_VERSION = 1;
+    // Bumped whenever a feed or archive table definition changes; a database of another
+    // version is refused.
+    constexpr int FEED_SCHEMA_VERSION = 1;
 
     static bool _usesLogicalFeedIdentity(const std::string_view event_type)
     {
@@ -26,7 +29,7 @@ namespace dcn::feed
 
     static std::string _logicalFeedId(
         const std::string & chain_namespace,
-        const int chain_id,
+        const std::uint64_t chain_id,
         const std::string & event_type,
         const std::string & name)
     {
@@ -35,7 +38,7 @@ namespace dcn::feed
 
     static std::string _projectedFeedId(
         const std::string & chain_namespace,
-        const int chain_id,
+        const std::uint64_t chain_id,
         const std::string & tx_hash,
         const std::int64_t log_index,
         const std::string & event_type,
@@ -138,7 +141,9 @@ namespace dcn::feed
     struct FeedArchiveRow
     {
         std::string feed_id;
-        int chain_id = 1;
+        std::string source_id;
+        std::string chain_namespace;
+        std::uint64_t chain_id = 1;
         std::string tx_hash;
         std::int64_t log_index = 0;
         std::int64_t block_number = 0;
@@ -156,7 +161,7 @@ namespace dcn::feed
 
     struct FeedHotKey
     {
-        int chain_id = 1;
+        std::uint64_t chain_id = 1;
         std::string feed_id;
         int projector_version = 0;
         std::int64_t updated_at_ms = 0;
@@ -227,14 +232,10 @@ namespace dcn::feed
 
     SqliteFeedStore::SqliteFeedStore(const std::filesystem::path& feed_db_path,
                                      const std::filesystem::path& archive_root,
-                                     const std::int64_t outbox_retention_ms,
-                                     const int default_chain_id,
-                                     std::string default_chain_namespace)
+                                     const std::int64_t outbox_retention_ms)
         : _feed_db_path(feed_db_path)
         , _archive_root(archive_root)
         , _outbox_retention_ms(outbox_retention_ms)
-        , _default_chain_id(default_chain_id)
-        , _default_chain_namespace(default_chain_namespace.empty() ? "local" : default_chain_namespace)
         , _shard_router(std::make_unique<events::MonthlyEventShardRouter>(_archive_root))
     {
         if (!_feed_db_path.parent_path().empty())
@@ -320,7 +321,8 @@ namespace dcn::feed
             throw std::runtime_error("Failed to configure feed read DB pragmas");
         }
 
-        if (!_initializeFeedSchema())
+        if (!storage::sqlite::ensureSchemaVersion(_write_db, FEED_SCHEMA_VERSION, "feed")
+            || !_initializeFeedSchema())
         {
             throw std::runtime_error("Failed to initialize feed DB schema");
         }
@@ -401,40 +403,42 @@ namespace dcn::feed
     // runArchiveCycle
     // -----------------------------------------------------------------------
 
-    bool SqliteFeedStore::runArchiveCycle(const int chain_id, const std::size_t hot_window_days, const std::int64_t now_ms)
+    bool SqliteFeedStore::runArchiveCycle(const std::size_t hot_window_days, const std::int64_t now_ms)
     {
         try
         {
-            std::vector<std::string> months;
+            // Every chain the feed holds is archived, one shard per chain and month.
+            std::vector<std::pair<std::uint64_t, std::string>> shards;
             {
-                storage::sqlite::Statement months_stmt(
+                storage::sqlite::Statement shards_stmt(
                     _write_db,
-                    "SELECT DISTINCT strftime('%Y-%m', block_time, 'unixepoch') AS month_token "
+                    "SELECT DISTINCT chain_id, strftime('%Y-%m', block_time, 'unixepoch') AS month_token "
                     "FROM feed_items_hot f "
-                    "WHERE f.chain_id=?1 AND f.status='finalized' AND f.exported=0 "
-                    "AND f.block_time IS NOT NULL AND f.projector_version>=?2 "
-                    "ORDER BY month_token ASC "
+                    "WHERE f.status='finalized' AND f.exported=0 "
+                    "AND f.block_time IS NOT NULL AND f.projector_version>=?1 "
+                    "ORDER BY month_token ASC, chain_id ASC "
                     "LIMIT 8;");
 
-                sqlite3_bind_int(months_stmt.get(), 1, chain_id);
-                sqlite3_bind_int(months_stmt.get(), 2, CURRENT_PROJECTOR_VERSION);
+                sqlite3_bind_int(shards_stmt.get(), 1, CURRENT_PROJECTOR_VERSION);
 
-                int months_rc = SQLITE_OK;
-                while ((months_rc = months_stmt.step()) == SQLITE_ROW)
+                int shards_rc = SQLITE_OK;
+                while ((shards_rc = shards_stmt.step()) == SQLITE_ROW)
                 {
-                    const unsigned char* month = sqlite3_column_text(months_stmt.get(), 0);
+                    const unsigned char* month = sqlite3_column_text(shards_stmt.get(), 1);
                     if (month != nullptr)
                     {
-                        months.emplace_back(reinterpret_cast<const char*>(month));
+                        shards.emplace_back(
+                            static_cast<std::uint64_t>(sqlite3_column_int64(shards_stmt.get(), 0)),
+                            reinterpret_cast<const char*>(month));
                     }
                 }
-                if (months_rc != SQLITE_DONE)
+                if (shards_rc != SQLITE_DONE)
                 {
                     throw std::runtime_error(sqlite3_errmsg(_write_db));
                 }
             }
 
-            for (const std::string& month : months)
+            for (const auto& [chain_id, month] : shards)
             {
                 if (!_exportMonth(chain_id, month, now_ms))
                 {
@@ -465,11 +469,10 @@ namespace dcn::feed
                         "CREATE TEMP TABLE prune_keys AS "
                         "SELECT chain_id, tx_hash, log_index "
                         "FROM feed_items_hot "
-                        "WHERE chain_id=?1 AND status='finalized' AND exported=1 "
-                        "AND block_time IS NOT NULL AND block_time < ?2;");
+                        "WHERE status='finalized' AND exported=1 "
+                        "AND block_time IS NOT NULL AND block_time < ?1;");
 
-                    sqlite3_bind_int(create_prune_keys.get(), 1, chain_id);
-                    sqlite3_bind_int64(create_prune_keys.get(), 2, static_cast<sqlite3_int64>(cutoff_seconds));
+                    sqlite3_bind_int64(create_prune_keys.get(), 1, static_cast<sqlite3_int64>(cutoff_seconds));
 
                     if (create_prune_keys.step() != SQLITE_DONE)
                     {
@@ -551,16 +554,6 @@ namespace dcn::feed
             else
             {
                 before_key = before_key_res.value();
-                if (before_key->chain_id != _default_chain_id
-                    || before_key->chain_namespace != _default_chain_namespace)
-                {
-                    spdlog::warn(
-                        "Ignoring feed cursor for chain={} on store default_chain={}:{}",
-                        std::format("{}:{}", before_key->chain_namespace, before_key->chain_id),
-                        _default_chain_namespace,
-                        _default_chain_id);
-                    return FeedPage {};
-                }
             }
         }
 
@@ -575,7 +568,7 @@ namespace dcn::feed
         // with archival (driven by block-time aging), so an archived row can
         // outrank a full hot page. Always scan the archive shards and let the
         // sort/truncate below pick the true top rows.
-        const std::vector<std::filesystem::path> archive_paths = _candidateArchivePaths(before_key);
+        const std::vector<std::filesystem::path> archive_paths = _candidateArchivePaths();
 
         for (const auto& archive_path : archive_paths)
         {
@@ -638,8 +631,6 @@ namespace dcn::feed
     {
         const std::size_t limit =
             std::clamp<std::size_t>((query.limit == 0) ? DEFAULT_STREAM_LIMIT : query.limit, 1, MAX_STREAM_LIMIT);
-        const std::string chain_prefix = std::format("{}:{}:%", _default_chain_namespace, _default_chain_id);
-
         StreamPage page {};
 
         {
@@ -656,13 +647,7 @@ namespace dcn::feed
                 throw std::runtime_error(sqlite3_errmsg(_read_db));
             }
 
-            storage::sqlite::Statement min_seq_stmt(_read_db, "SELECT MIN(stream_seq) FROM global_outbox WHERE feed_id LIKE ?1;");
-            sqlite3_bind_text(
-                min_seq_stmt.get(),
-                1,
-                chain_prefix.c_str(),
-                static_cast<int>(chain_prefix.size()),
-                SQLITE_TRANSIENT);
+            storage::sqlite::Statement min_seq_stmt(_read_db, "SELECT MIN(stream_seq) FROM global_outbox;");
             std::int64_t min_stream_seq = 0;
             const int min_seq_rc = min_seq_stmt.step();
             if (min_seq_rc == SQLITE_ROW)
@@ -685,17 +670,11 @@ namespace dcn::feed
             "SELECT "
             "o.stream_seq, o.status, o.feed_id, o.history_cursor, o.payload_json, o.created_at_ms, o.event_type "
             "FROM global_outbox o "
-            "WHERE o.stream_seq > ?1 AND o.feed_id LIKE ?2 "
+            "WHERE o.stream_seq > ?1 "
             "ORDER BY o.stream_seq ASC "
-            "LIMIT ?3;");
+            "LIMIT ?2;");
         sqlite3_bind_int64(stream_stmt.get(), 1, static_cast<sqlite3_int64>(query.since_seq));
-        sqlite3_bind_text(
-            stream_stmt.get(),
-            2,
-            chain_prefix.c_str(),
-            static_cast<int>(chain_prefix.size()),
-            SQLITE_TRANSIENT);
-        sqlite3_bind_int64(stream_stmt.get(), 3, static_cast<sqlite3_int64>(limit + 1));
+        sqlite3_bind_int64(stream_stmt.get(), 2, static_cast<sqlite3_int64>(limit + 1));
 
         int stream_rc = SQLITE_OK;
         while ((stream_rc = stream_stmt.step()) == SQLITE_ROW)
@@ -741,7 +720,6 @@ namespace dcn::feed
 
     std::int64_t SqliteFeedStore::minAvailableStreamSeq() const
     {
-        const std::string chain_prefix = std::format("{}:{}:%", _default_chain_namespace, _default_chain_id);
         std::int64_t replay_floor_seq = 0;
         {
             storage::sqlite::Statement floor_stmt(_read_db, "SELECT replay_floor_seq FROM outbox_stream_state WHERE singleton=1;");
@@ -755,13 +733,7 @@ namespace dcn::feed
                 throw std::runtime_error(sqlite3_errmsg(_read_db));
             }
         }
-        storage::sqlite::Statement min_stmt(_read_db, "SELECT MIN(stream_seq) FROM global_outbox WHERE feed_id LIKE ?1;");
-        sqlite3_bind_text(
-            min_stmt.get(),
-            1,
-            chain_prefix.c_str(),
-            static_cast<int>(chain_prefix.size()),
-            SQLITE_TRANSIENT);
+        storage::sqlite::Statement min_stmt(_read_db, "SELECT MIN(stream_seq) FROM global_outbox;");
         const int min_rc = min_stmt.step();
         if (min_rc == SQLITE_ROW)
         {
@@ -787,6 +759,8 @@ namespace dcn::feed
                storage::sqlite::exec(_write_db,
                     "CREATE TABLE IF NOT EXISTS feed_items_hot ("
                     "feed_id TEXT PRIMARY KEY,"
+                    "source_id TEXT NOT NULL DEFAULT 'local',"
+                    "chain_namespace TEXT NOT NULL DEFAULT 'local',"
                     "chain_id INTEGER NOT NULL,"
                     "tx_hash TEXT NOT NULL,"
                     "log_index INTEGER NOT NULL,"
@@ -807,6 +781,8 @@ namespace dcn::feed
                storage::sqlite::exec(_write_db,
                     "CREATE TABLE IF NOT EXISTS global_outbox ("
                     "stream_seq INTEGER PRIMARY KEY,"
+                    "source_id TEXT NOT NULL DEFAULT 'local',"
+                    "chain_namespace TEXT NOT NULL DEFAULT 'local',"
                     "feed_id TEXT NOT NULL,"
                     "op TEXT NOT NULL,"
                     "status TEXT NOT NULL,"
@@ -902,6 +878,8 @@ namespace dcn::feed
         return storage::sqlite::exec(archive_db,
                     "CREATE TABLE IF NOT EXISTS feed_items_archive ("
                     "feed_id TEXT PRIMARY KEY,"
+                    "source_id TEXT NOT NULL DEFAULT 'local',"
+                    "chain_namespace TEXT NOT NULL DEFAULT 'local',"
                     "chain_id INTEGER NOT NULL,"
                     "tx_hash TEXT NOT NULL,"
                     "log_index INTEGER NOT NULL,"
@@ -946,7 +924,7 @@ namespace dcn::feed
     // -----------------------------------------------------------------------
 
     bool SqliteFeedStore::_exportMonth(
-        const int chain_id,
+        const std::uint64_t chain_id,
         const std::string& month_token,
         const std::int64_t now_ms)
     {
@@ -968,13 +946,13 @@ namespace dcn::feed
                                       "SELECT "
                                       "feed_id, chain_id, tx_hash, log_index, block_number, tx_index, block_time, "
                                       "event_type, status, visible, history_cursor, payload_json, "
-                                      "created_at_ms, updated_at_ms, projector_version "
+                                      "created_at_ms, updated_at_ms, projector_version, source_id, chain_namespace "
                                       "FROM feed_items_hot f "
                                       "WHERE f.chain_id=?1 AND f.status='finalized' AND f.exported=0 "
                                       "AND f.block_time IS NOT NULL AND f.block_time>=?2 AND f.block_time<?3 "
                                       "AND f.projector_version>=?4;");
 
-                sqlite3_bind_int(select_feed.get(), 1, chain_id);
+                sqlite3_bind_int64(select_feed.get(), 1, static_cast<sqlite3_int64>(chain_id));
                 sqlite3_bind_int64(select_feed.get(), 2, static_cast<sqlite3_int64>(month_bounds->start_block_time));
                 sqlite3_bind_int64(select_feed.get(), 3, static_cast<sqlite3_int64>(month_bounds->end_block_time));
                 sqlite3_bind_int(select_feed.get(), 4, CURRENT_PROJECTOR_VERSION);
@@ -984,7 +962,7 @@ namespace dcn::feed
                 {
                     FeedArchiveRow row{};
                     row.feed_id = reinterpret_cast<const char*>(sqlite3_column_text(select_feed.get(), 0));
-                    row.chain_id = sqlite3_column_int(select_feed.get(), 1);
+                    row.chain_id = static_cast<std::uint64_t>(sqlite3_column_int64(select_feed.get(), 1));
                     row.tx_hash = reinterpret_cast<const char*>(sqlite3_column_text(select_feed.get(), 2));
                     row.log_index = static_cast<std::int64_t>(sqlite3_column_int64(select_feed.get(), 3));
                     row.block_number = static_cast<std::int64_t>(sqlite3_column_int64(select_feed.get(), 4));
@@ -998,6 +976,8 @@ namespace dcn::feed
                     row.created_at_ms = static_cast<std::int64_t>(sqlite3_column_int64(select_feed.get(), 12));
                     row.updated_at_ms = static_cast<std::int64_t>(sqlite3_column_int64(select_feed.get(), 13));
                     row.projector_version = sqlite3_column_int(select_feed.get(), 14);
+                    row.source_id = reinterpret_cast<const char*>(sqlite3_column_text(select_feed.get(), 15));
+                    row.chain_namespace = reinterpret_cast<const char*>(sqlite3_column_text(select_feed.get(), 16));
                     feed_hot_keys.push_back(FeedHotKey{
                         .chain_id = row.chain_id,
                         .feed_id = row.feed_id,
@@ -1069,7 +1049,8 @@ namespace dcn::feed
                     return false;
                 }
 
-                if (!_initializeArchiveSchema(archive_db))
+                if (!storage::sqlite::ensureSchemaVersion(archive_db, FEED_SCHEMA_VERSION, "feed archive shard")
+                    || !_initializeArchiveSchema(archive_db))
                 {
                     sqlite3_close(archive_db);
                     archive_db = nullptr;
@@ -1089,15 +1070,16 @@ namespace dcn::feed
                                           "INSERT INTO feed_items_archive("
                                           "feed_id, chain_id, tx_hash, log_index, block_number, tx_index, block_time, "
                                           "event_type, status, visible, history_cursor, payload_json, "
-                                          "created_at_ms, updated_at_ms, projector_version"
+                                          "created_at_ms, updated_at_ms, projector_version, source_id, chain_namespace"
                                           ") VALUES("
                                           "?1, ?2, ?3, ?4, ?5, ?6, ?7, "
-                                          "?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15"
+                                          "?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17"
                                           ") ON CONFLICT(feed_id) DO UPDATE SET "
                                           "chain_id=excluded.chain_id, tx_hash=excluded.tx_hash, log_index=excluded.log_index, "
                                           "block_number=excluded.block_number, tx_index=excluded.tx_index, "
                                           "block_time=excluded.block_time, event_type=excluded.event_type, status=excluded.status, "
                                           "visible=excluded.visible, history_cursor=excluded.history_cursor, "
+                                          "source_id=excluded.source_id, chain_namespace=excluded.chain_namespace, "
                                           "payload_json=excluded.payload_json, "
                                           "created_at_ms=excluded.created_at_ms, updated_at_ms=excluded.updated_at_ms, "
                                           "projector_version=excluded.projector_version;");
@@ -1106,7 +1088,7 @@ namespace dcn::feed
                     {
                         sqlite3_bind_text(
                             insert_feed.get(), 1, row.feed_id.c_str(), static_cast<int>(row.feed_id.size()), SQLITE_TRANSIENT);
-                        sqlite3_bind_int(insert_feed.get(), 2, row.chain_id);
+                        sqlite3_bind_int64(insert_feed.get(), 2, static_cast<sqlite3_int64>(row.chain_id));
                         sqlite3_bind_text(
                             insert_feed.get(), 3, row.tx_hash.c_str(), static_cast<int>(row.tx_hash.size()), SQLITE_TRANSIENT);
                         sqlite3_bind_int64(insert_feed.get(), 4, static_cast<sqlite3_int64>(row.log_index));
@@ -1134,6 +1116,8 @@ namespace dcn::feed
                         sqlite3_bind_int64(insert_feed.get(), 13, static_cast<sqlite3_int64>(row.created_at_ms));
                         sqlite3_bind_int64(insert_feed.get(), 14, static_cast<sqlite3_int64>(row.updated_at_ms));
                         sqlite3_bind_int(insert_feed.get(), 15, row.projector_version);
+                        sqlite3_bind_text(insert_feed.get(), 16, row.source_id.c_str(), static_cast<int>(row.source_id.size()), SQLITE_TRANSIENT);
+                        sqlite3_bind_text(insert_feed.get(), 17, row.chain_namespace.c_str(), static_cast<int>(row.chain_namespace.size()), SQLITE_TRANSIENT);
                         if (insert_feed.step() != SQLITE_DONE)
                         {
                             throw std::runtime_error(sqlite3_errmsg(archive_db));
@@ -1190,7 +1174,7 @@ namespace dcn::feed
                                       key.feed_id.c_str(),
                                       static_cast<int>(key.feed_id.size()),
                                       SQLITE_TRANSIENT);
-                    sqlite3_bind_int(mark_feed_exported.get(), 3, key.chain_id);
+                    sqlite3_bind_int64(mark_feed_exported.get(), 3, static_cast<sqlite3_int64>(key.chain_id));
                     sqlite3_bind_int(mark_feed_exported.get(), 4, key.projector_version);
                     sqlite3_bind_int64(mark_feed_exported.get(), 5, static_cast<sqlite3_int64>(key.updated_at_ms));
                     sqlite3_bind_text(mark_feed_exported.get(),
@@ -1234,7 +1218,7 @@ namespace dcn::feed
                                          "FROM feed_items_hot "
                                          "WHERE chain_id=?1 AND status='finalized' AND projector_version>=?2 AND exported=1 "
                                          "AND block_time IS NOT NULL AND block_time>=?3 AND block_time<?4;");
-                    sqlite3_bind_int(stats_stmt.get(), 1, chain_id);
+                    sqlite3_bind_int64(stats_stmt.get(), 1, static_cast<sqlite3_int64>(chain_id));
                     sqlite3_bind_int(stats_stmt.get(), 2, CURRENT_PROJECTOR_VERSION);
                     sqlite3_bind_int64(stats_stmt.get(), 3, static_cast<sqlite3_int64>(month_bounds->start_block_time));
                     sqlite3_bind_int64(stats_stmt.get(), 4, static_cast<sqlite3_int64>(month_bounds->end_block_time));
@@ -1261,7 +1245,7 @@ namespace dcn::feed
                     "path=excluded.path, state='READY', min_block=excluded.min_block, max_block=excluded.max_block, "
                     "row_count=excluded.row_count, last_export_ms=excluded.last_export_ms;");
 
-                sqlite3_bind_int(catalog_stmt.get(), 1, chain_id);
+                sqlite3_bind_int64(catalog_stmt.get(), 1, static_cast<sqlite3_int64>(chain_id));
                 sqlite3_bind_text(catalog_stmt.get(), 2, month_token.c_str(), static_cast<int>(month_token.size()), SQLITE_TRANSIENT);
 
                 const std::string archive_path_str = archive_path.string();
@@ -1299,24 +1283,18 @@ namespace dcn::feed
     // _candidateArchivePaths
     // -----------------------------------------------------------------------
 
-    std::vector<std::filesystem::path> SqliteFeedStore::_candidateArchivePaths(
-        const std::optional<CursorKey>& before_key) const
+    std::vector<std::filesystem::path> SqliteFeedStore::_candidateArchivePaths() const
     {
         std::vector<std::filesystem::path> paths;
 
-        std::string sql = "SELECT path FROM shard_catalog WHERE chain_id=?1 AND state='READY' ";
-        if (before_key.has_value())
-        {
-            sql += "AND min_block <= ?2 ";
-        }
-        sql += "ORDER BY max_block DESC;";
-
-        storage::sqlite::Statement stmt(_read_db, sql.c_str());
-        sqlite3_bind_int(stmt.get(), 1, before_key.has_value() ? before_key->chain_id : _default_chain_id);
-        if (before_key.has_value())
-        {
-            sqlite3_bind_int64(stmt.get(), 2, static_cast<sqlite3_int64>(before_key->block_number));
-        }
+        // Every chain's shards take part: the page order is by projection time, which
+        // neither a chain nor a block range bounds, and block numbers of different
+        // sources are not comparable.
+        // ponytail: one open per READY shard per page; record created_at_ms bounds in the
+        // catalog and skip shards past the cursor once shard counts make pages slow.
+        storage::sqlite::Statement stmt(
+            _read_db,
+            "SELECT path FROM shard_catalog WHERE state='READY' ORDER BY archive_month DESC, chain_id ASC;");
 
         int rc = SQLITE_OK;
         while ((rc = stmt.step()) == SQLITE_ROW)
@@ -1347,13 +1325,13 @@ namespace dcn::feed
                                                       std::vector<FeedItem>& out_items,
                                                       std::unordered_set<std::string>& seen_feed_ids) const
     {
-        const int chain_id = before_key.has_value() ? before_key->chain_id : _default_chain_id;
-
+        // Rows from every ingestion source share one page, ordered by the global
+        // (created_at_ms, block_number, tx_index, feed_id) key carried in the cursor.
         std::string sql = std::format(
             "SELECT "
             "feed_id, event_type, status, visible, tx_hash, block_number, tx_index, log_index, "
             "history_cursor, payload_json, created_at_ms, updated_at_ms, projector_version "
-            "FROM {} WHERE chain_id=?1 AND visible=1",
+            "FROM {} WHERE visible=1",
             table_name);
 
         if (!query.include_unfinalized)
@@ -1362,10 +1340,10 @@ namespace dcn::feed
         }
         if (query.event_type.has_value())
         {
-            sql += " AND event_type=?2";
+            sql += " AND event_type=?1";
         }
 
-        int before_param_base = query.event_type.has_value() ? 3 : 2;
+        int before_param_base = query.event_type.has_value() ? 2 : 1;
         if (before_key.has_value())
         {
             sql += std::format(" AND ("
@@ -1397,7 +1375,6 @@ namespace dcn::feed
         storage::sqlite::Statement stmt(db, sql.c_str());
 
         int param_index = 1;
-        sqlite3_bind_int(stmt.get(), param_index++, chain_id);
         if (query.event_type.has_value())
         {
             sqlite3_bind_text(stmt.get(),
@@ -1612,7 +1589,7 @@ namespace dcn::feed
 
         try
         {
-            const int chain_id = row.chain_id;
+            const std::uint64_t chain_id = row.chain_id;
             const std::int64_t log_index = row.log_index;
             const std::string& tx_hash = row.tx_hash;
             const std::int64_t block_number = row.block_number;
@@ -1625,7 +1602,7 @@ namespace dcn::feed
 
             const bool logical_feed_identity = _usesLogicalFeedIdentity(event_type);
             const std::string feed_id = _projectedFeedId(
-                _default_chain_namespace,
+                row.chain_namespace,
                 chain_id,
                 tx_hash,
                 log_index,
@@ -1676,7 +1653,7 @@ namespace dcn::feed
                 ? existing_history_cursor
                 : std::format("{}", CursorKey{
                       .chain_id = chain_id,
-                      .chain_namespace = _default_chain_namespace,
+                      .chain_namespace = row.chain_namespace,
                       .created_at_ms = created_at_ms,
                       .block_number = block_number,
                       .tx_index = tx_index,
@@ -1697,12 +1674,13 @@ namespace dcn::feed
                     _write_db,
                     "INSERT INTO feed_items_hot("
                     "feed_id, chain_id, tx_hash, log_index, block_number, tx_index, block_time, event_type, status, visible, "
-                    "history_cursor, payload_json, created_at_ms, updated_at_ms, projector_version, exported"
+                    "history_cursor, payload_json, created_at_ms, updated_at_ms, projector_version, exported, source_id, chain_namespace"
                     ") VALUES("
                     "?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, "
-                    "?11, ?12, ?13, ?14, ?15, 0"
+                    "?11, ?12, ?13, ?14, ?15, 0, ?16, ?17"
                     ") ON CONFLICT(feed_id) DO UPDATE SET "
                     "chain_id=excluded.chain_id, tx_hash=excluded.tx_hash, log_index=excluded.log_index, "
+                    "source_id=excluded.source_id, chain_namespace=excluded.chain_namespace, "
                     "block_number=excluded.block_number, tx_index=excluded.tx_index, "
                     "block_time=excluded.block_time, event_type=excluded.event_type, status=excluded.status, "
                     "visible=excluded.visible, history_cursor=excluded.history_cursor, "
@@ -1718,7 +1696,7 @@ namespace dcn::feed
 
                 sqlite3_bind_text(
                     upsert_feed_stmt.get(), 1, feed_id.c_str(), static_cast<int>(feed_id.size()), SQLITE_TRANSIENT);
-                sqlite3_bind_int(upsert_feed_stmt.get(), 2, chain_id);
+                sqlite3_bind_int64(upsert_feed_stmt.get(), 2, static_cast<sqlite3_int64>(chain_id));
                 sqlite3_bind_text(
                     upsert_feed_stmt.get(), 3, tx_hash.c_str(), static_cast<int>(tx_hash.size()), SQLITE_TRANSIENT);
                 sqlite3_bind_int64(upsert_feed_stmt.get(), 4, static_cast<sqlite3_int64>(log_index));
@@ -1737,6 +1715,8 @@ namespace dcn::feed
                 sqlite3_bind_int64(upsert_feed_stmt.get(), 13, static_cast<sqlite3_int64>(created_at_ms));
                 sqlite3_bind_int64(upsert_feed_stmt.get(), 14, static_cast<sqlite3_int64>(now_ms));
                 sqlite3_bind_int(upsert_feed_stmt.get(), 15, CURRENT_PROJECTOR_VERSION);
+                sqlite3_bind_text(upsert_feed_stmt.get(), 16, row.source_id.c_str(), static_cast<int>(row.source_id.size()), SQLITE_TRANSIENT);
+                sqlite3_bind_text(upsert_feed_stmt.get(), 17, row.chain_namespace.c_str(), static_cast<int>(row.chain_namespace.size()), SQLITE_TRANSIENT);
 
                 if (upsert_feed_stmt.step() != SQLITE_DONE)
                 {
@@ -1796,8 +1776,8 @@ namespace dcn::feed
                     storage::sqlite::Statement insert_outbox_stmt(
                         _write_db,
                         "INSERT INTO global_outbox(stream_seq, feed_id, op, status, event_type, history_cursor, payload_json, "
-                        "created_at_ms) "
-                        "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);");
+                        "created_at_ms, source_id, chain_namespace) "
+                        "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);");
 
                     sqlite3_bind_int64(insert_outbox_stmt.get(), 1, static_cast<sqlite3_int64>(stream_seq));
                     sqlite3_bind_text(
@@ -1813,6 +1793,8 @@ namespace dcn::feed
                     sqlite3_bind_text(
                         insert_outbox_stmt.get(), 7, payload_json.c_str(), static_cast<int>(payload_json.size()), SQLITE_TRANSIENT);
                     sqlite3_bind_int64(insert_outbox_stmt.get(), 8, static_cast<sqlite3_int64>(now_ms));
+                    sqlite3_bind_text(insert_outbox_stmt.get(), 9, row.source_id.c_str(), static_cast<int>(row.source_id.size()), SQLITE_TRANSIENT);
+                    sqlite3_bind_text(insert_outbox_stmt.get(), 10, row.chain_namespace.c_str(), static_cast<int>(row.chain_namespace.size()), SQLITE_TRANSIENT);
 
                     if (insert_outbox_stmt.step() != SQLITE_DONE)
                     {

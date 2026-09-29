@@ -33,6 +33,12 @@ namespace dcn::registry
                 const ConnectorRecord & record,
                 const evmc::bytes32 & format_hash,
                 const std::vector<ScalarLabel> & canonical_scalar_labels) override;
+            bool addConnectorVersion(
+                const EntitySource & source,
+                const chain::Address & address,
+                const ConnectorRecord & record,
+                const evmc::bytes32 & format_hash,
+                const std::vector<ScalarLabel> & canonical_scalar_labels) override;
 
             bool addConnectorsBatch(const std::vector<ConnectorBatchItem> & items, bool all_or_nothing = true) override;
 
@@ -59,6 +65,10 @@ namespace dcn::registry
             bool addTransformation(
                 const chain::Address & address,
                 const TransformationRecord & record) override;
+            bool addTransformationVersion(
+                const EntitySource & source,
+                const chain::Address & address,
+                const TransformationRecord & record) override;
 
             bool addTransformationsBatch(
                 const std::vector<TransformationBatchItem> & items,
@@ -72,6 +82,30 @@ namespace dcn::registry
             bool addCondition(
                 const chain::Address & address,
                 const ConditionRecord & record) override;
+            bool addConditionVersion(
+                const EntitySource & source,
+                const chain::Address & address,
+                const ConditionRecord & record) override;
+
+            std::optional<EntityLocation> getEntityLocation(EntityKind kind, const std::string & name) const override;
+            bool hasRemoteEntity(EntityKind kind, const std::string & name) const override;
+            bool hasLocalEntity(EntityKind kind, const std::string & name) const override;
+            bool removeEntityVersion(EntityKind kind, const std::string & source_id, const std::string & name) override;
+            bool changeEntityOwner(
+                EntityKind kind,
+                const std::string & source_id,
+                const std::string & name,
+                const chain::Address & old_owner,
+                const chain::Address & new_owner) override;
+            std::vector<ArtifactReference> getArtifactsDue(
+                std::int64_t now_ms,
+                std::size_t limit) const override;
+            bool setArtifactState(
+                EntityKind kind,
+                const std::string & source_id,
+                const std::string & name,
+                pt::ArtifactState state,
+                std::int64_t retry_at_ms) override;
 
             bool addConditionsBatch(
                 const std::vector<ConditionBatchItem> & items,
@@ -118,13 +152,15 @@ namespace dcn::registry
             // transformation defs + args, condition args, static running instances) using explicit
             // columns. Must be called inside an active transaction/savepoint.
             bool _insertConnectorRows(
+                const EntitySource & source,
+                const chain::Address & address,
                 const chain::Address & owner,
                 const evmc::bytes32 & format_hash,
                 const ConnectorRecord & record,
                 const std::vector<ScalarLabel> & canonical_scalar_labels) const;
 
             // Reassembles a ConnectorRecord from its explicit columns / child tables.
-            std::optional<ConnectorRecord> _readConnectorRecord(const std::string & name) const;
+            std::optional<ConnectorRecord> _readConnectorRecord(const std::string & source_id, const std::string & name) const;
 
             NameCursorPage _getOwnedCursorFromTable(
                 const char * table_name,

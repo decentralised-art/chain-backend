@@ -9,6 +9,7 @@
 #include <tuple>
 #include <variant>
 #include <set>
+#include <unordered_map>
 
 #include "events.hpp"
 #include "async.hpp"
@@ -20,12 +21,6 @@
 
 namespace dcn::events
 {
-    std::int64_t reorgLookbackStart(const std::int64_t next_from_block, const std::size_t reorg_window_blocks)
-    {
-        const std::int64_t lookback_blocks = static_cast<std::int64_t>(reorg_window_blocks);
-        return (next_from_block > lookback_blocks) ? (next_from_block - lookback_blocks) : 0;
-    }
-
     EventRuntime::EventRuntime(asio::io_context & io_context, EventRuntimeConfig cfg)
         : _io_context(io_context)
         , _config(std::move(cfg))
@@ -83,9 +78,7 @@ namespace dcn::events
 
         if(_config.ingestion_enabled)
         {
-            // ponytail: one cursor per chain_id in the store; reject duplicate sources.
-            // Per-source cursor keying is the upgrade path if same-chain failover is ever needed.
-            std::set<int> seen_chain_ids;
+            std::set<std::string> seen_source_ids;
             for(const auto & source : _config.sources)
             {
                 if(!source)
@@ -93,12 +86,12 @@ namespace dcn::events
                     continue;
                 }
 
-                if(!seen_chain_ids.insert(source->chainId()).second)
+                const std::string source_id(source->sourceId());
+                if(source_id.empty() || !seen_source_ids.insert(source_id).second)
                 {
                     spdlog::error(
-                        "events ingestion: duplicate source for chain_id={} skipped "
-                        "(one source per chain_id; shared cursor would corrupt)",
-                        source->chainId());
+                        "events ingestion: empty or duplicate source_id='{}' skipped",
+                        source_id);
                     continue;
                 }
 
@@ -115,6 +108,13 @@ namespace dcn::events
         }
 
         _running.store(false, std::memory_order_release);
+
+        // A source waiting on a slow upstream would otherwise hold the stop until its
+        // own timeouts expire.
+        for(const auto & source : _config.sources)
+        {
+            if(source) source->cancel();
+        }
     }
 
     asio::awaitable<void> EventRuntime::stop()
@@ -178,64 +178,59 @@ namespace dcn::events
         co_return;
     }
 
-    asio::awaitable<std::optional<std::int64_t>> EventRuntime::_storeLoadNextFromBlock(const int chain_id) const
+    asio::awaitable<std::optional<std::uint64_t>> EventRuntime::_storeLoadNextCursor(
+        std::string source_id,
+        const CursorKind cursor_kind) const
     {
         co_await async::ensureOnStrand(_write_strand);
-        co_return _store->loadNextFromBlock(chain_id);
+        co_return _store->loadNextCursor(source_id, cursor_kind);
     }
 
-    asio::awaitable<std::optional<std::uint64_t>> EventRuntime::_storeLoadNextLocalSeq(const int chain_id) const
+    asio::awaitable<std::int64_t> EventRuntime::_storeLoadHeadBlock(std::string source_id) const
     {
         co_await async::ensureOnStrand(_write_strand);
-        co_return _store->loadNextLocalSeq(chain_id);
+        co_return _store->loadHeadBlock(source_id);
     }
 
-    asio::awaitable<bool> EventRuntime::_storeSaveNextLocalSeq(
-        const int chain_id,
-        const std::uint64_t next_seq,
-        const std::int64_t now_ms) const
+    asio::awaitable<FinalityCheckpoint> EventRuntime::_storeLoadFinalityCheckpoint(std::string source_id) const
     {
         co_await async::ensureOnStrand(_write_strand);
-        co_return _store->saveNextLocalSeq(chain_id, next_seq, now_ms);
-    }
-
-    asio::awaitable<std::vector<std::int64_t>> EventRuntime::_storeLoadReorgWindowBlocks(
-        const int chain_id,
-        const std::int64_t from_block,
-        const std::int64_t to_block) const
-    {
-        co_await async::ensureOnStrand(_write_strand);
-        co_return _store->loadReorgWindowBlocks(chain_id, from_block, to_block);
+        co_return _store->loadFinalityCheckpoint(source_id);
     }
 
     asio::awaitable<bool> EventRuntime::_storeIngestBatch(
-        const int chain_id,
+        std::string source_id,
+        const CursorKind cursor_kind,
+        const std::uint64_t chain_id,
         std::vector<RawChainLog> raw_events,
         std::vector<DecodedEvent> decoded_events,
         std::vector<ChainBlockInfo> block_infos,
-        const std::int64_t next_from_block,
+        const std::uint64_t next_cursor,
         const std::int64_t now_ms,
-        const std::optional<std::uint64_t> next_local_seq) const
+        std::optional<ScannedBlockRange> scanned_range) const
     {
         co_await async::ensureOnStrand(_write_strand);
         co_return _store->ingestBatch(
+            source_id,
+            cursor_kind,
             chain_id,
             raw_events,
             decoded_events,
             block_infos,
-            next_from_block,
+            next_cursor,
             now_ms,
-            next_local_seq);
+            scanned_range);
     }
 
     asio::awaitable<bool> EventRuntime::_storeApplyFinality(
-        const int chain_id,
+        std::string source_id,
+        const std::uint64_t chain_id,
         FinalityHeights heights,
         const std::int64_t now_ms,
         const std::size_t reorg_window_blocks) const
     {
         co_await async::ensureOnStrand(_write_strand);
-        co_return _store->applyFinality(chain_id, heights, now_ms, reorg_window_blocks);
+        co_return _store->applyFinality(source_id, chain_id, heights, now_ms, reorg_window_blocks);
     }
 
     asio::awaitable<storage::sqlite::WalCheckpointStats> EventRuntime::checkpointWal(storage::sqlite::WalCheckpointMode mode) const
@@ -246,86 +241,69 @@ namespace dcn::events
 
     asio::awaitable<void> EventRuntime::_runSourceIngestionLoop(std::shared_ptr<IEmittedLogSource> source)
     {
-        const int chain_id = source->chainId();
+        const std::string source_id(source->sourceId());
+        const std::string chain_namespace(source->chainNamespace());
+        const CursorKind cursor_kind = source->cursorKind();
+        const std::uint64_t chain_id = source->chainId();
         const bool ephemeral_entities = source->ephemeralEntities();
+        const std::uint64_t idle_ms = source->pollInterval()
+            ? static_cast<std::uint64_t>(source->pollInterval()->count())
+            : _config.poll_interval_ms;
 
-        spdlog::info("Events ingestion loop started for chain={}", chain_id);
-        std::uint64_t next_seq = 0;
-        std::optional<std::int64_t> next_from_block_hint = std::nullopt;
-
-        if(const auto persisted = co_await _storeLoadNextLocalSeq(chain_id); persisted.has_value())
-        {
-            next_seq = *persisted;
-        }
-        next_from_block_hint = co_await _storeLoadNextFromBlock(chain_id);
+        spdlog::info("Events ingestion loop started for source={} chain={}", source_id, chain_id);
+        std::uint64_t next_cursor = (co_await _storeLoadNextCursor(source_id, cursor_kind)).value_or(0);
+        source->restoreFinality(co_await _storeLoadFinalityCheckpoint(source_id));
+        std::int64_t prior_head = co_await _storeLoadHeadBlock(source_id);
 
         constexpr std::size_t MAX_POLL_LIMIT = 2048; // ponytail: matches feed::MAX_STREAM_LIMIT
         const std::size_t poll_limit = std::max<std::size_t>(1, std::min<std::size_t>(MAX_POLL_LIMIT, _config.block_batch_size * 8ULL));
-        constexpr const char* EPHEMERAL_ENTITY_ADDRESS = "0x0";
 
         while(!_stop_requested.load(std::memory_order_acquire))
         {
-            const SourcePoll poll = co_await source->pollSince(next_seq, poll_limit);
-            const std::vector<evm::EVM::EmittedLogRecord> & emitted_logs = poll.records;
-            const std::int64_t head_block = poll.finality.head;
-            const std::int64_t source_next_block = std::max<std::int64_t>(head_block, 0) + 1;
-            const bool source_regressed =
-                next_from_block_hint.has_value() && (source_next_block < *next_from_block_hint);
-            const bool missing_block_cursor_with_progress =
-                !next_from_block_hint.has_value() && emitted_logs.empty() && next_seq > 0;
+            SourcePoll poll = co_await source->pollSince(next_cursor, poll_limit);
 
-            if(source_regressed || missing_block_cursor_with_progress)
+            // The in-process EVM restarted with a shorter history, so its log sequence
+            // restarted too: resume from its beginning.
+            if(cursor_kind == CursorKind::LOCAL_SEQUENCE && poll.finality && prior_head > poll.finality->head)
             {
-                spdlog::warn(
-                    "Events local ingestion cursor rewind detected: source_next_block={} persisted_next_from_block={} "
-                    "persisted_next_local_seq={}; resetting local cursor to seq=0",
-                    source_next_block,
-                    next_from_block_hint.value_or(-1),
-                    next_seq);
-                const std::int64_t rewind_reset_ms = utils::nowMs();
-                next_seq = 0;
-                next_from_block_hint = source_next_block;
-                if(!co_await _storeSaveNextLocalSeq(chain_id, 0, rewind_reset_ms))
+                next_cursor = 0;
+                if(!co_await _storeIngestBatch(
+                    source_id, cursor_kind, chain_id, {}, {}, {}, next_cursor, utils::nowMs(), std::nullopt))
                 {
-                    spdlog::warn("Failed to persist ingestion cursor reset for chain={}", chain_id);
+                    co_await _sleepFor(idle_ms);
                 }
-            }
-
-            if(emitted_logs.empty())
-            {
-                if(!co_await _storeApplyFinality(chain_id, poll.finality, utils::nowMs(), _config.reorg_window_blocks))
-                {
-                    spdlog::warn("Failed to apply finality for chain={}, during ingestion loop", chain_id);
-                }
-
-                co_await _sleepFor(_config.poll_interval_ms);
-
+                prior_head = poll.finality->head;
                 continue;
             }
 
             std::vector<RawChainLog> raw_logs;
-            raw_logs.reserve(emitted_logs.size());
+            raw_logs.reserve(poll.records.size());
 
             std::vector<DecodedEvent> decoded_events;
-            decoded_events.reserve(emitted_logs.size());
+            decoded_events.reserve(poll.records.size());
 
             std::unordered_map<std::int64_t, ChainBlockInfo> block_map;
-            block_map.reserve(emitted_logs.size());
+            block_map.reserve(poll.records.size());
 
-            for(const auto & row : emitted_logs)
+            const std::int64_t now_ms = utils::nowMs();
+
+            for(const auto & row : poll.records)
             {
                 ChainBlockInfo info{
+                    .source_id = source_id,
                     .chain_id = chain_id,
                     .block_number = row.block_number,
                     .block_hash = chain::normalizeHex(row.block_hash),
                     .parent_hash = chain::normalizeHex(row.parent_hash),
                     .block_time = row.block_time,
-                    .seen_at_ms = utils::nowMs()
+                    .seen_at_ms = now_ms
                 };
 
                 block_map.insert_or_assign(info.block_number, std::move(info));
 
                 RawChainLog raw{
+                    .source_id = source_id,
+                    .chain_namespace = chain_namespace,
                     .chain_id = chain_id,
                     .block_number = row.block_number,
                     .block_hash = chain::normalizeHex(row.block_hash),
@@ -338,7 +316,7 @@ namespace dcn::events
                     .data_hex = chain::normalizeHex(row.data_hex),
                     .removed = false,
                     .block_time = row.block_time,
-                    .seen_at_ms = utils::nowMs()
+                    .seen_at_ms = now_ms
                 };
 
                 for(std::size_t i = 0; i < std::min<std::size_t>(raw.topics.size(), row.topics.size()); ++i)
@@ -347,38 +325,67 @@ namespace dcn::events
                 }
 
                 raw_logs.push_back(raw);
-                const auto decoded = _decoder->decode(raw);
 
-                if(decoded.has_value())
+                // One malformed log must never take the whole ingestion loop down: it is
+                // kept as raw evidence and recorded as a decode failure instead.
+                std::optional<DecodedEvent> decoded;
+                try
                 {
-                    DecodedEvent event = std::move(*decoded);
-
-                    if(ephemeral_entities)
-                    {
-                        event.entity_address = EPHEMERAL_ENTITY_ADDRESS;
-
-                        json payload = json::parse(event.decoded_json, nullptr, false);
-
-                        if(!payload.is_discarded() && payload.is_object())
-                        {
-                            switch(event.event_type)
-                            {
-                            case EventType::CONNECTOR_ADDED:
-                                payload["connector_address"] = EPHEMERAL_ENTITY_ADDRESS;
-                                break;
-                            case EventType::TRANSFORMATION_ADDED:
-                                payload["transformation_address"] = EPHEMERAL_ENTITY_ADDRESS;
-                                break;
-                            case EventType::CONDITION_ADDED:
-                                payload["condition_address"] = EPHEMERAL_ENTITY_ADDRESS;
-                                break;
-                            }
-                            event.decoded_json = payload.dump(-1, ' ', false, json::error_handler_t::replace);
-                        }
-                    }
-
-                    decoded_events.push_back(std::move(event));
+                    decoded = _decoder->decode(raw);
                 }
+                catch(...)
+                {
+                    utils::logException(
+                        std::current_exception(),
+                        std::format("events decode failed for source={} block={} log={}",
+                            source_id, raw.block_number, raw.log_index));
+                }
+
+                if(!decoded.has_value())
+                {
+                    continue;
+                }
+
+                DecodedEvent event = std::move(*decoded);
+
+                // History the source already reports final goes in final, without the
+                // observed -> safe -> finalized churn a large backfill would otherwise cause.
+                if(poll.finality && event.state == EventState::OBSERVED
+                   && event.raw.block_number <= poll.finality->finalized)
+                {
+                    event.state = EventState::FINALIZED;
+                }
+
+                if(ephemeral_entities)
+                {
+                    event.entity_address = std::string(EPHEMERAL_ENTITY_ADDRESS);
+
+                    json payload = json::parse(event.decoded_json, nullptr, false);
+
+                    if(!payload.is_discarded() && payload.is_object())
+                    {
+                        switch(event.event_type)
+                        {
+                        case EventType::CONNECTOR_ADDED:
+                            payload["connector_address"] = std::string(EPHEMERAL_ENTITY_ADDRESS);
+                            break;
+                        case EventType::TRANSFORMATION_ADDED:
+                            payload["transformation_address"] = std::string(EPHEMERAL_ENTITY_ADDRESS);
+                            break;
+                        case EventType::CONDITION_ADDED:
+                            payload["condition_address"] = std::string(EPHEMERAL_ENTITY_ADDRESS);
+                            break;
+                        case EventType::CONNECTOR_REMOVED:
+                        case EventType::TRANSFORMATION_REMOVED:
+                        case EventType::CONDITION_REMOVED:
+                        case EventType::ENTITY_OWNER_CHANGED:
+                            break;
+                        }
+                        event.decoded_json = payload.dump(-1, ' ', false, json::error_handler_t::replace);
+                    }
+                }
+
+                decoded_events.push_back(std::move(event));
             }
 
             std::vector<ChainBlockInfo> block_infos;
@@ -394,42 +401,46 @@ namespace dcn::events
                 return lhs.block_number < rhs.block_number;
             });
 
-            const std::int64_t max_seen_block = block_infos.empty()
-                ? std::max<std::int64_t>(head_block, 0)
-                : block_infos.back().block_number;
-            const std::int64_t next_block = max_seen_block + 1;
-
+            // An empty range still commits its cursor and still reconciles: a replacement
+            // block containing no PT event is exactly how a reorg erases a log without
+            // producing one.
             const bool ingest_ok = co_await _storeIngestBatch(
+                source_id,
+                cursor_kind,
                 chain_id,
                 std::move(raw_logs),
                 std::move(decoded_events),
                 std::move(block_infos),
-                next_block,
-                utils::nowMs(),
-                poll.next_cursor);
+                poll.next_cursor,
+                now_ms,
+                poll.scanned_range);
 
             if(!ingest_ok)
             {
-                co_await _sleepFor(_config.poll_interval_ms);
+                co_await _sleepFor(idle_ms);
                 continue;
             }
 
-            if(!co_await _storeApplyFinality(chain_id, poll.finality, utils::nowMs(), _config.reorg_window_blocks))
+            source->committed();
+            next_cursor = poll.next_cursor;
+
+            if(poll.finality)
             {
-                spdlog::error("Failed to apply finality during ingestion loop for chain={}", chain_id);
+                prior_head = std::max(prior_head, poll.finality->head);
+                if(!co_await _storeApplyFinality(source_id, chain_id, *poll.finality, now_ms, _config.reorg_window_blocks))
+                {
+                    spdlog::error("Failed to apply finality during ingestion loop for source={}", source_id);
+                }
             }
 
-            next_seq = poll.next_cursor;
-            next_from_block_hint = next_block;
-
-            if(emitted_logs.size() < poll_limit)
+            if(poll.caught_up)
             {
-                co_await _sleepFor(_config.poll_interval_ms);
+                co_await _sleepFor(idle_ms);
             }
         }
 
         co_await source->stop();
-        spdlog::info("Events ingestion loop stopped for chain={}", chain_id);
+        spdlog::info("Events ingestion loop stopped for source={}", source_id);
         co_return;
     }
 
@@ -492,20 +503,21 @@ namespace dcn::events
                 continue;
             }
 
-            // finalized_floor_block = head - reorg_window (below this we know nothing can reorg)
-            const std::int64_t head = _store->loadHeadBlock(_config.chain_id);
-            if(head <= 0)
-            {
-                continue;
-            }
-
-            const std::int64_t floor =
-                (head > static_cast<std::int64_t>(_config.reorg_window_blocks))
-                    ? (head - static_cast<std::int64_t>(_config.reorg_window_blocks))
-                    : 0;
-
             constexpr std::size_t PRUNE_BATCH = 500;
-            (void)_store->pruneConsumedRaw(watermark, floor, PRUNE_BATCH);
+            for(const auto & source : _config.sources)
+            {
+                if(!source) continue;
+                const std::string source_id(source->sourceId());
+                const std::int64_t head = _store->loadHeadBlock(source_id);
+                if(head <= 0) continue;
+
+                const std::int64_t floor =
+                    (head > static_cast<std::int64_t>(_config.reorg_window_blocks))
+                        ? (head - static_cast<std::int64_t>(_config.reorg_window_blocks))
+                        : 0;
+
+                (void)_store->pruneConsumedRaw(source_id, watermark, floor, PRUNE_BATCH);
+            }
         }
 
         spdlog::info("Events prune loop stopped");

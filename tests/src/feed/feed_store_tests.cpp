@@ -12,8 +12,7 @@ using namespace dcn::tests::events_harness;
 TEST_F(UnitTest, Feed_SqliteStore_ApplyChange_ProducesFeedItem)
 {
     const auto paths = makeTempEventsPaths("feed_store");
-    dcn::feed::SqliteFeedStore store(paths.feed_db, paths.feed_archive_root,
-                                     7LL*24*60*60*1000, CHAIN_ID);
+    dcn::feed::SqliteFeedStore store(paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     dcn::events::ChangeRecord row;
     row.chain_id = CHAIN_ID;

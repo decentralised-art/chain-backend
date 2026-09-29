@@ -21,7 +21,7 @@ namespace dcn::feed
             virtual std::int64_t minAvailableStreamSeq() const = 0;
             virtual std::int64_t getFeedCursor() const = 0;
             virtual void setFeedCursor(std::int64_t last_change_seq) = 0;
-            virtual bool runArchiveCycle(int chain_id, std::size_t hot_window_days, std::int64_t now_ms) = 0;
+            virtual bool runArchiveCycle(std::size_t hot_window_days, std::int64_t now_ms) = 0;
             virtual storage::sqlite::WalCheckpointStats checkpointWal(storage::sqlite::WalCheckpointMode mode) = 0;
     };
 }

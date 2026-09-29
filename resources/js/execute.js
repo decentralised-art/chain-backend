@@ -763,7 +763,17 @@ export async function fetchBeforeExecute() {
     }
 }
 
-export async function execute() {
+// Runs the connector on the chain's runner.
+export function execute() {
+    return runConnector('/execute');
+}
+
+// Runs a connector created on this server on the local EVM.
+export function simulate() {
+    return runConnector('/simulate');
+}
+
+async function runConnector(path) {
     const connector_name = normalizeConnectorName(document.getElementById('executeName').value);
     const particles_count = document.getElementById('executeN').value.trim();
     const dynamic_ri = buildDynamicRiPayload();
@@ -775,7 +785,7 @@ export async function execute() {
         return;
     }
     try {
-        const res = await requestWithLogin(apiUrl('/execute'),
+        const res = await requestWithLogin(apiUrl(path),
             {
                 method: 'POST',
                 headers: {

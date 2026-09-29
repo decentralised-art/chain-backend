@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 
+#include "entity.hpp"
 #include "native.h"
 #include <asio.hpp>
 
@@ -36,7 +37,10 @@ namespace dcn::events
 
     struct ChangeRecord
     {
-        int chain_id = 0;
+        std::string source_id = "local";
+        std::string chain_namespace = "local";
+        std::string registry_address = "0x0";
+        std::uint64_t chain_id = 0;
         std::string block_hash;
         std::int64_t log_index = 0;
         std::int64_t change_seq = 0;
@@ -50,6 +54,12 @@ namespace dcn::events
         std::array<std::optional<std::string>, 4> topics;
         std::int64_t block_number = 0;
         std::int64_t tx_index = 0;
+        std::optional<std::string> content_hash;
+        std::optional<std::string> metadata_hash;
+        std::optional<std::string> runtime_code_hash;
+        std::optional<pt::EntityKind> entity_kind;
+        std::optional<std::string> old_owner;
+        std::string entity_address;
     };
 
     class IEventProjector

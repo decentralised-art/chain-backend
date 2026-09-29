@@ -32,6 +32,14 @@ namespace dcn::events
             return std::string(TRANSFORMATION_ADDED_TYPE);
         case EventType::CONDITION_ADDED:
             return std::string(CONDITION_ADDED_TYPE);
+        case EventType::CONNECTOR_REMOVED:
+            return std::string(CONNECTOR_REMOVED_TYPE);
+        case EventType::TRANSFORMATION_REMOVED:
+            return std::string(TRANSFORMATION_REMOVED_TYPE);
+        case EventType::CONDITION_REMOVED:
+            return std::string(CONDITION_REMOVED_TYPE);
+        case EventType::ENTITY_OWNER_CHANGED:
+            return std::string(ENTITY_OWNER_CHANGED_TYPE);
         }
 
         assert(false);
@@ -76,11 +84,20 @@ namespace dcn::parse
         {
             return events::EventType::CONDITION_ADDED;
         }
+        if(value == events::CONNECTOR_REMOVED_TYPE) return events::EventType::CONNECTOR_REMOVED;
+        if(value == events::TRANSFORMATION_REMOVED_TYPE) return events::EventType::TRANSFORMATION_REMOVED;
+        if(value == events::CONDITION_REMOVED_TYPE) return events::EventType::CONDITION_REMOVED;
+        if(value == events::ENTITY_OWNER_CHANGED_TYPE) return events::EventType::ENTITY_OWNER_CHANGED;
 
         return std::unexpected(ParseError{ParseError::Kind::INVALID_VALUE});
     }
 
-    Result<dcn::events::RawChainLog> parseRawLog(const json & log_json, const std::int64_t seen_at_ms, int chain_id)
+    Result<dcn::events::RawChainLog> parseRawLog(
+        const json & log_json,
+        const std::int64_t seen_at_ms,
+        std::uint64_t chain_id,
+        std::string source_id,
+        std::string chain_namespace)
     {
         if(!log_json.is_object())
         {
@@ -109,6 +126,8 @@ namespace dcn::parse
         }
 
         events::RawChainLog log{
+            .source_id = std::move(source_id),
+            .chain_namespace = std::move(chain_namespace),
             .chain_id = chain_id,
             .block_number = *block_number,
             .block_hash = chain::normalizeHex(log_json["blockHash"].get<std::string>()),

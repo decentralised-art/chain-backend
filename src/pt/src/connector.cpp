@@ -327,38 +327,6 @@ namespace dcn
             }
         }
 
-        // Parallel transformation-definition arrays, ordered by (dimId, indexWithinDim),
-        // so that a full ConnectorRecord is reconstructable from the ConnectorAdded log alone.
-        std::string transformation_dim_ids_code;
-        std::string transformation_names_code;
-        std::string transformation_arg_counts_code;
-        std::string transformation_args_code;
-        std::size_t tx_k = 0;        // index into the parallel dimId/name/count arrays
-        std::size_t tx_arg_k = 0;    // index into the flattened args array
-        for(int i = 0; i < connector.dimensions_size(); ++i)
-        {
-            for(int j = 0; j < connector.dimensions(i).transformations_size(); ++j)
-            {
-                const auto & tf = connector.dimensions(i).transformations(j);
-                transformation_dim_ids_code += std::format("transformationDimIds[{}] = uint32({});\n", tx_k, i);
-                transformation_names_code += std::format(
-                    "transformationNames[{}] = \"{}\";\n",
-                    tx_k,
-                    _escapeSolidityStringLiteral(tf.name()));
-                transformation_arg_counts_code += std::format(
-                    "transformationArgCounts[{}] = uint32({});\n",
-                    tx_k,
-                    tf.args_size());
-                for(int k = 0; k < tf.args_size(); ++k)
-                {
-                    transformation_args_code += std::format("transformationArgs[{}] = int32({});\n", tx_arg_k, tf.args(k));
-                    ++tx_arg_k;
-                }
-                ++tx_k;
-            }
-        }
-        const std::size_t total_transformations = tx_k;
-        const std::size_t total_transformation_args = tx_arg_k;
 
         return std::format(
             "//SPDX-License-Identifier: MIT\n"
@@ -401,25 +369,10 @@ namespace dcn
             "conditionArgs = new int32[]({12});"
             "{13}"
             "}}\n"
-            "function _transformationDimIds() internal pure returns (uint32[] memory transformationDimIds) {{"
-            "transformationDimIds = new uint32[]({18});"
-            "{19}"
-            "}}\n"
-            "function _transformationNames() internal pure returns (string[] memory transformationNames) {{"
-            "transformationNames = new string[]({18});"
-            "{20}"
-            "}}\n"
-            "function _transformationArgCounts() internal pure returns (uint32[] memory transformationArgCounts) {{"
-            "transformationArgCounts = new uint32[]({18});"
-            "{21}"
-            "}}\n"
-            "function _transformationArgs() internal pure returns (int32[] memory transformationArgs) {{"
-            "transformationArgs = new int32[]({22});"
-            "{23}"
-            "}}\n"
-            "constructor(address registryAddr) ConnectorBase(registryAddr, \"{17}\", {14}) {{\n"
+            "constructor(address registryAddr, bytes32 contentHash_, bytes32 metadataHash_) "
+            "ConnectorBase(registryAddr, \"{17}\", {14}, contentHash_, metadataHash_) {{\n"
             "{15}"
-            "__ConnectorBase_finalizeInit(_compositeDimIds(), _compositeNames(), _bindingDimIds(), _bindingSlotIds(), _bindingNames(), _staticRiPositions(), _staticRiStartPoints(), _staticRiTransformShifts(), \"{16}\", _conditionArgs(), _transformationDimIds(), _transformationNames(), _transformationArgCounts(), _transformationArgs());\n"
+            "__ConnectorBase_finalizeInit(_compositeDimIds(), _compositeNames(), _bindingDimIds(), _bindingSlotIds(), _bindingNames(), _staticRiPositions(), _staticRiStartPoints(), _staticRiTransformShifts(), \"{16}\", _conditionArgs());\n"
             "}}\n"
             "}}",
 
@@ -440,13 +393,7 @@ namespace dcn
             connector.dimensions_size(),              // 14
             std::move(transform_def_code),            // 15
             escaped_condition_name,                   // 16
-            escaped_connector_name,                   // 17
-            total_transformations,                    // 18
-            std::move(transformation_dim_ids_code),   // 19
-            std::move(transformation_names_code),     // 20
-            std::move(transformation_arg_counts_code),// 21
-            total_transformation_args,                // 22
-            std::move(transformation_args_code)       // 23
+            escaped_connector_name                    // 17
         );
     }
 }
@@ -459,13 +406,13 @@ namespace dcn::pt
         const evmc::bytes32 topics[],
         std::size_t num_topics)
     {
-        if(data == nullptr || topics == nullptr || num_topics < 3 || data_size < 32 * 18)
+        if(data == nullptr || topics == nullptr || num_topics < 3 || data_size < 32 * 21)
         {
             return std::nullopt;
         }
 
         const evmc::bytes32 expected_topic = chain::constructEventTopic(
-            "ConnectorAdded(address,address,string,address,uint32,uint32[],string[],uint32[],uint32[],string[],string,int32[],bytes32,uint32[],uint32[],uint32[],uint32[],string[],uint32[],int32[])");
+            "ConnectorAdded(address,address,string,address,uint32,uint32[],string[],uint32[],uint32[],string[],string,int32[],bytes32,uint32[],uint32[],uint32[],uint32[],string[],uint32[],int32[],bytes32,bytes32,bytes32)");
 
         if(topics[0] != expected_topic)
         {
@@ -502,6 +449,11 @@ namespace dcn::pt
         const auto transformation_names_offset = chain::readWordAsSizeT(data, data_size, 480);
         const auto transformation_arg_counts_offset = chain::readWordAsSizeT(data, data_size, 512);
         const auto transformation_args_offset = chain::readWordAsSizeT(data, data_size, 544);
+
+        // Publication hashes, appended after the reconstruction arrays.
+        std::memcpy(event.content_hash.bytes, data + 576, 32);
+        std::memcpy(event.metadata_hash.bytes, data + 608, 32);
+        std::memcpy(event.runtime_code_hash.bytes, data + 640, 32);
 
         if(!name_offset || !connector_address || !dimensions_count || !composite_dim_ids_offset || !composite_names_offset || !binding_dim_ids_offset || !binding_slot_ids_offset || !binding_names_offset || !condition_offset || !condition_args_offset || !static_ri_positions_offset || !static_ri_start_points_offset || !static_ri_transform_shifts_offset || !transformation_dim_ids_offset || !transformation_names_offset || !transformation_arg_counts_offset || !transformation_args_offset)
         {

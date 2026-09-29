@@ -1,6 +1,9 @@
 #pragma once
 
 #include <array>
+#include <chrono>
+#include <map>
+#include <string_view>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -41,6 +44,34 @@
 
 namespace dcn::evm
 {
+    /// The one set of solc settings every contract is compiled with and every artifact records.
+    struct CompilerSettings
+    {
+        std::string_view evm_version;
+        bool optimizer = true;
+        std::uint32_t optimizer_runs = 200;
+        bool via_ir = true;
+    };
+
+    inline constexpr CompilerSettings SOLC_SETTINGS{
+        .evm_version = "shanghai",
+        .optimizer = true,
+        .optimizer_runs = 200,
+        .via_ir = true};
+
+    /// Upper bound on one solc run; a compilation still running then is killed.
+    inline constexpr std::chrono::seconds SOLC_TIMEOUT{120};
+
+    struct CompiledContract
+    {
+        std::vector<std::uint8_t> creation_code;
+        std::vector<std::uint8_t> runtime_code;
+
+        // Every source unit the compilation read, by stable unit name, with the keccak256
+        // solc recorded for it in the contract metadata.
+        std::map<std::string, std::string> sources;
+    };
+
     class EVM
     {
     public:
@@ -58,10 +89,25 @@ namespace dcn::evm
         asio::awaitable<bool> addAccount(chain::Address address, std::uint64_t initial_gas) noexcept;
         asio::awaitable<bool> setGas(chain::Address address, std::uint64_t gas) noexcept;
 
+        // Compiles one file with SOLC_SETTINGS. solc runs on a dedicated thread, one
+        // compilation at a time, so the io_context keeps serving while it works.
         asio::awaitable<bool> compile(std::filesystem::path code_path,
                 std::filesystem::path out_dir,
                 std::filesystem::path base_path = {},
-                std::filesystem::path includes = {}) const noexcept;
+                std::filesystem::path include_path = {}) const noexcept;
+
+        // Compiles `source` as the source unit `unit_name` against the PT sources and returns
+        // `contract_name`'s code. The unit sits on an include path, so its name carries no
+        // machine-specific directory: the bytecode metadata, and with it the bytecode, is
+        // the same wherever the source is compiled.
+        asio::awaitable<std::expected<CompiledContract, std::string>> compileSource(
+                std::string unit_name,
+                std::string source,
+                std::string contract_name,
+                std::filesystem::path work_dir) const;
+
+        // Exact compiler version, e.g. "0.8.30+commit.73712a01"; empty when it could not be read.
+        const std::string & solcVersion() const;
 
         asio::awaitable<std::expected<chain::Address, chain::DeployError>> deploy(  
                     std::istream & code_stream, 
@@ -104,6 +150,9 @@ namespace dcn::evm
 
         std::filesystem::path _solc_path;
         std::filesystem::path _pt_path;
+        std::string _solc_version;
+
+        mutable asio::thread_pool _compile_pool{1};
 
         EVMStorage _storage;
         

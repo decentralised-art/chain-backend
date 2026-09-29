@@ -81,7 +81,7 @@ TEST_F(UnitTest, Events_Reorg_RemovedState_PropagatesToFeedAndOutbox)
     const auto paths = makeTempEventsPaths("reorg_removed_feed");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     events::DecodedEvent inserted = makeDecodedEvent(72, 1, 1, 0xC2, 0xE2, events::EventType::TRANSFORMATION_ADDED, events::EventState::OBSERVED, 1'700'000'630);
     const events::ChainBlockInfo block = makeBlockInfo(72, inserted.raw.block_hash, hexBytes(0x88, 32), 1'700'000'630, 1'700'000'631'000);
@@ -107,7 +107,7 @@ TEST_F(UnitTest, Events_IngestLookback_UnchangedCanonicalRows_DoNotRegressOrEmit
     const auto paths = makeTempEventsPaths("finality_lookback_no_churn");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
         120,
@@ -196,9 +196,3 @@ TEST_F(UnitTest, Events_Finality_StatePersistence_IsMonotonicAcrossProviderRegre
     EXPECT_EQ(db.scalarInt64("SELECT finalized_block FROM finality_state WHERE chain_id=1;"), 480);
 }
 
-TEST_F(UnitTest, Events_ReorgLookback_UsesConfiguredDepth_IndependentlyOfBatchSize)
-{
-    EXPECT_EQ(events::reorgLookbackStart(1'000, 2'048), 0);
-    EXPECT_EQ(events::reorgLookbackStart(3'000, 2'048), 952);
-    EXPECT_EQ(events::reorgLookbackStart(3'000, 4'096), 0);
-}

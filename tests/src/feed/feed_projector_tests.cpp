@@ -38,7 +38,7 @@ TEST_F(UnitTest, Feed_Projector_ConsumesEventsChangelogIntoFeedDb)
     asio::io_context io;
 
     events::SQLiteHotStore store(epaths.hot_db, CHAIN_ID);
-    dcn::feed::Feed feed_obj(io, fpaths.feed_db, fpaths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    dcn::feed::Feed feed_obj(io, fpaths.feed_db, fpaths.feed_archive_root, 7LL*24*60*60*1000);
     auto strand = asio::make_strand(io);
     dcn::feed::FeedProjector proj(store, feed_obj, strand);
 
@@ -63,7 +63,7 @@ TEST_F(UnitTest, Feed_Projector_DeadLetteredRow_IsRecoveredBySweep)
     asio::io_context io;
 
     events::SQLiteHotStore store(epaths.hot_db, CHAIN_ID);
-    dcn::feed::Feed feed_obj(io, fpaths.feed_db, fpaths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    dcn::feed::Feed feed_obj(io, fpaths.feed_db, fpaths.feed_archive_root, 7LL*24*60*60*1000);
     auto strand = asio::make_strand(io);
 
     auto evd = makeDecodedEvent(60, 0, 1, 0xB0, 0xD0,
@@ -79,7 +79,7 @@ TEST_F(UnitTest, Feed_Projector_DeadLetteredRow_IsRecoveredBySweep)
     const auto changes = store.readChangesSince(0, 10);
     ASSERT_EQ(changes.size(), 1u);
     ASSERT_TRUE(store.markDeadLetter(
-        events::FEED_DEAD_LETTER_BIT, changes.front().chain_id,
+        events::FEED_DEAD_LETTER_BIT, changes.front().source_id,
         changes.front().block_hash, changes.front().log_index));
     runAwaitable(io, feed_obj.setFeedCursor(changes.front().change_seq));
 
@@ -102,7 +102,7 @@ TEST_F(UnitTest, Feed_Projector_DeadLetterSweepInterval_IsConfigurable)
     asio::io_context io;
 
     events::SQLiteHotStore store(epaths.hot_db, CHAIN_ID);
-    dcn::feed::Feed feed_obj(io, fpaths.feed_db, fpaths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    dcn::feed::Feed feed_obj(io, fpaths.feed_db, fpaths.feed_archive_root, 7LL*24*60*60*1000);
     auto strand = asio::make_strand(io);
 
     auto evd = makeDecodedEvent(60, 0, 1, 0xB0, 0xD0,
@@ -127,7 +127,7 @@ TEST_F(UnitTest, Feed_Projector_DeadLetterSweepInterval_IsConfigurable)
 
     // Quarantine the (recoverable) row after the anchor pass.
     ASSERT_TRUE(store.markDeadLetter(
-        events::FEED_DEAD_LETTER_BIT, changes.front().chain_id,
+        events::FEED_DEAD_LETTER_BIT, changes.front().source_id,
         changes.front().block_hash, changes.front().log_index));
 
     // Inside the interval: the sweep is throttled, so the row is not applied.
@@ -147,7 +147,6 @@ TEST_F(UnitTest, Feed_Runtime_StartStop_ArchiveLoopRuns)
     dcn::feed::FeedRuntime runtime(io, dcn::feed::FeedRuntimeConfig{
         .feed_db_path = fpaths.feed_db,
         .archive_root = fpaths.feed_archive_root,
-        .chain_id = CHAIN_ID,
         .archive_interval_ms = 10,
         .wal_checkpoint_interval_ms = 10});
     runtime.start();

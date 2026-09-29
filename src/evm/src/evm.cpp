@@ -3,10 +3,103 @@
 #include <string_view>
 
 #include "evm.hpp"
+
+#include <cctype>
+#include <regex>
+
+#include <nlohmann/json.hpp>
 #include "utils.hpp"
 
 namespace dcn::evm
 {
+    namespace
+    {
+        std::vector<std::string> _solcArguments(
+            const std::filesystem::path & out_dir,
+            const std::filesystem::path & base_path,
+            const std::vector<std::filesystem::path> & include_paths)
+        {
+            const CompilerSettings & settings = SOLC_SETTINGS;
+            std::vector<std::string> args{
+                "--evm-version", std::string(settings.evm_version),
+                "--overwrite", "-o", out_dir.string(),
+                "--bin", "--bin-runtime", "--abi", "--metadata"};
+
+            if(settings.via_ir)
+            {
+                args.emplace_back("--via-ir");
+            }
+            if(settings.optimizer)
+            {
+                args.emplace_back("--optimize");
+                args.emplace_back("--optimize-runs");
+                args.emplace_back(std::to_string(settings.optimizer_runs));
+            }
+            if(!base_path.empty())
+            {
+                args.emplace_back("--base-path");
+                args.emplace_back(base_path.string());
+            }
+            for(const auto & include_path : include_paths)
+            {
+                args.emplace_back("--include-path");
+                args.emplace_back(include_path.string());
+            }
+            return args;
+        }
+
+        std::pair<int, std::string> _runSolc(const std::filesystem::path & solc_path, std::vector<std::string> args)
+        {
+            try
+            {
+                return native::runProcess(solc_path.string(), std::move(args), SOLC_TIMEOUT);
+            }
+            catch(const std::exception & error)
+            {
+                return {-1, error.what()};
+            }
+        }
+
+        std::string _readSolcVersion(const std::filesystem::path & solc_path)
+        {
+            const auto [exit_code, output] = _runSolc(solc_path, {"--version"});
+            static const std::regex pattern(R"((\d+\.\d+\.\d+\+commit\.[0-9a-fA-F]+))");
+            std::smatch match;
+            if(exit_code == 0 && std::regex_search(output, match, pattern))
+            {
+                return match[1].str();
+            }
+            spdlog::error("Cannot determine the solc version of '{}'", solc_path.string());
+            return {};
+        }
+
+        std::optional<std::string> _readFile(const std::filesystem::path & path)
+        {
+            std::ifstream input(path, std::ios::binary);
+            if(!input.is_open())
+            {
+                return std::nullopt;
+            }
+            return std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        }
+
+        std::optional<std::vector<std::uint8_t>> _readHexFile(const std::filesystem::path & path)
+        {
+            auto text = _readFile(path);
+            if(!text)
+            {
+                return std::nullopt;
+            }
+            std::erase_if(*text, [](const unsigned char c) { return std::isspace(c) != 0; });
+            auto bytes = evmc::from_hex(*text);
+            if(!bytes)
+            {
+                return std::nullopt;
+            }
+            return std::vector<std::uint8_t>(bytes->begin(), bytes->end());
+        }
+    }
+
     namespace
     {
         std::vector<std::uint8_t> copyResultBytes(const evmc::Result & result)
@@ -196,6 +289,8 @@ namespace dcn::evm
             throw std::runtime_error("Failed to create EVM instance");
         }
 
+        _solc_version = _readSolcVersion(_solc_path);
+
         _vm.set_option("O", "0"); // disable optimizations
 
         // Initialize the genesis account
@@ -285,52 +380,127 @@ namespace dcn::evm
         co_return true;
     }
 
-    asio::awaitable<bool> EVM::compile(std::filesystem::path code_path, std::filesystem::path out_dir, std::filesystem::path base_path, std::filesystem::path includes) const noexcept
+    const std::string & EVM::solcVersion() const
     {
-        co_await async::ensureOnStrand(_strand);
+        return _solc_version;
+    }
 
-        if(!std::filesystem::exists(code_path))
+    asio::awaitable<bool> EVM::compile(
+        std::filesystem::path code_path,
+        std::filesystem::path out_dir,
+        std::filesystem::path base_path,
+        std::filesystem::path include_path) const noexcept
+    {
+        std::error_code exists_ec;
+        if(!std::filesystem::exists(code_path, exists_ec))
         {
             spdlog::error(std::format("File {} does not exist", code_path.string()));
             co_return false;
         }
 
-        std::vector<std::string> args = {
-            "--evm-version", "shanghai",
-            "--overwrite", "-o", out_dir.string(),
-            "--via-ir", "--optimize", "--bin",
-            "--abi",
-            code_path.string()
-        };
-
-        if(!includes.empty() && base_path.empty())
+        if(!include_path.empty() && base_path.empty())
         {
             spdlog::error("Base path must be specified if includes are specified");
             co_return false;
         }
 
-        if (!base_path.empty()) 
-        {
-            args.emplace_back("--base-path");
-            args.emplace_back(base_path.string());
-        }
+        std::vector<std::filesystem::path> include_paths;
+        if(!include_path.empty()) include_paths.push_back(std::move(include_path));
+        std::vector<std::string> args = _solcArguments(out_dir, base_path, include_paths);
+        args.push_back(code_path.string());
 
-        if (!includes.empty()) 
-        {
-            args.emplace_back("--include-path");
-            args.emplace_back(includes.string());
-        }
-
-        const auto [exit_code, compile_result] = dcn::native::runProcess(_solc_path.string(), std::move(args));
+        const auto [exit_code, compile_result] = co_await asio::co_spawn(
+            _compile_pool,
+            [solc = _solc_path, args = std::move(args)]() mutable -> asio::awaitable<std::pair<int, std::string>>
+            {
+                co_return _runSolc(solc, std::move(args));
+            },
+            asio::use_awaitable);
 
         spdlog::info("Solc exited with code {},\n{}\n{}", exit_code, code_path.string(), compile_result);
 
-        if(exit_code != 0)
-        {
-            co_return false;
-        }
-        
-        co_return true;
+        co_return exit_code == 0;
+    }
+
+    asio::awaitable<std::expected<CompiledContract, std::string>> EVM::compileSource(
+        std::string unit_name,
+        std::string source,
+        std::string contract_name,
+        std::filesystem::path work_dir) const
+    {
+        const std::filesystem::path solc = _solc_path;
+        const std::filesystem::path pt_contracts = _pt_path / "contracts";
+        const std::filesystem::path pt_modules = _pt_path / "node_modules";
+
+        // Everything runs on the single compile thread, so two compilations never share a
+        // source file or an output file.
+        co_return co_await asio::co_spawn(
+            _compile_pool,
+            [=]() -> asio::awaitable<std::expected<CompiledContract, std::string>>
+            {
+                std::error_code ec;
+                std::filesystem::create_directories(work_dir, ec);
+                if(ec)
+                {
+                    co_return std::unexpected(std::format("cannot create '{}': {}", work_dir.string(), ec.message()));
+                }
+
+                const std::filesystem::path source_path = work_dir / unit_name;
+                {
+                    std::ofstream output(source_path, std::ios::binary | std::ios::trunc);
+                    output << source;
+                    if(!output)
+                    {
+                        co_return std::unexpected(std::format("cannot write '{}'", source_path.string()));
+                    }
+                }
+
+                std::vector<std::string> args = _solcArguments(work_dir, pt_contracts, {pt_modules, work_dir});
+                args.push_back(source_path.string());
+                const auto [exit_code, output] = _runSolc(solc, std::move(args));
+                std::filesystem::remove(source_path, ec);
+                if(exit_code != 0)
+                {
+                    co_return std::unexpected(std::format("solc exited with {}: {}", exit_code, output));
+                }
+
+                auto creation_code = _readHexFile(work_dir / (contract_name + ".bin"));
+                auto runtime_code = _readHexFile(work_dir / (contract_name + ".bin-runtime"));
+                const auto metadata_text = _readFile(work_dir / (contract_name + "_meta.json"));
+                if(!creation_code || !runtime_code || runtime_code->empty() || !metadata_text)
+                {
+                    co_return std::unexpected(std::format("solc produced no output for '{}'", contract_name));
+                }
+
+                const nlohmann::json metadata = nlohmann::json::parse(*metadata_text, nullptr, false);
+                const auto sources_it = metadata.is_object() ? metadata.find("sources") : metadata.end();
+                if(metadata.is_discarded() || sources_it == metadata.end() || !sources_it->is_object())
+                {
+                    co_return std::unexpected(std::format("solc metadata for '{}' lists no sources", contract_name));
+                }
+
+                CompiledContract compiled{
+                    .creation_code = std::move(*creation_code),
+                    .runtime_code = std::move(*runtime_code)};
+                for(const auto & [unit, description] : sources_it->items())
+                {
+                    const auto hash = description.is_object() ? description.find("keccak256") : description.end();
+                    if(hash == description.end() || !hash->is_string())
+                    {
+                        co_return std::unexpected(std::format("solc metadata has no hash for source '{}'", unit));
+                    }
+                    compiled.sources.emplace(unit, hash->get<std::string>());
+                }
+
+                if(!compiled.sources.contains(unit_name))
+                {
+                    co_return std::unexpected(std::format(
+                        "solc did not record '{}' under its stable source unit name", unit_name));
+                }
+
+                co_return compiled;
+            },
+            asio::use_awaitable);
     }
 
     asio::awaitable<std::expected<chain::Address, chain::DeployError>> EVM::deploy(

@@ -17,14 +17,10 @@ namespace dcn::feed
     {
         std::filesystem::path feed_db_path;
         std::filesystem::path archive_root;
-        int chain_id = 1;
         std::size_t hot_window_days = 90;
         std::int64_t outbox_retention_ms = 7LL * 24 * 60 * 60 * 1000;
         unsigned int archive_interval_ms = 30 * 1000;
         unsigned int wal_checkpoint_interval_ms = 15 * 1000;
-        // Must match the namespace of the event source feeding the projector
-        // (IEmittedLogSource::chainNamespace); only the local EVM source exists today.
-        std::string chain_namespace = "local";
     };
 
     class FeedRuntime final

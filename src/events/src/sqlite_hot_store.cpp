@@ -15,6 +15,9 @@
 
 namespace dcn::events
 {
+    // Bumped whenever a table definition changes; a database of another version is refused.
+    constexpr int HOT_SCHEMA_VERSION = 1;
+
     static std::optional<std::int64_t> _columnInt64Optional(sqlite3_stmt * stmt, const int index)
     {
         if(sqlite3_column_type(stmt, index) == SQLITE_NULL)
@@ -52,48 +55,45 @@ namespace dcn::events
         return sqlite3_bind_text(stmt, index, value->c_str(), static_cast<int>(value->size()), SQLITE_TRANSIENT);
     }
 
-    static bool _columnExists(sqlite3 * db, const char * table, const char * column)
-    {
-        storage::sqlite::Statement stmt(db, std::format("PRAGMA table_info({});", table).c_str());
-        int rc = SQLITE_OK;
-        while ((rc = stmt.step()) == SQLITE_ROW)
-        {
-            const unsigned char * name = sqlite3_column_text(stmt.get(), 1);
-            if (name != nullptr && std::string_view(reinterpret_cast<const char *>(name)) == column)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
     // Column list shared by readChangesSince / readDeadLetters; must stay in sync
     // with _changeRecordFromRow below.
     constexpr const char * CHANGE_RECORD_COLUMNS =
-        "n.chain_id, n.block_hash, n.log_index, n.change_seq, n.event_type, n.state, "
+        "n.source_id, n.chain_namespace, r.address, n.chain_id, n.block_hash, n.log_index, n.change_seq, n.event_type, n.state, "
         "n.name, n.owner, r.data_hex, r.topic0, r.topic1, r.topic2, r.topic3, n.block_number, n.tx_index, "
-        "n.tx_hash, n.block_time ";
+        "n.tx_hash, n.block_time, n.content_hash, n.metadata_hash, n.runtime_code_hash, n.entity_kind, n.old_owner, n.entity_address ";
 
     static ChangeRecord _changeRecordFromRow(sqlite3_stmt * stmt)
     {
         ChangeRecord rec{};
-        rec.chain_id = sqlite3_column_int(stmt, 0);
-        rec.block_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        rec.log_index = static_cast<std::int64_t>(sqlite3_column_int64(stmt, 2));
-        rec.change_seq = static_cast<std::int64_t>(sqlite3_column_int64(stmt, 3));
-        rec.event_type = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
-        rec.state = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
-        rec.name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
-        rec.owner = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7));
-        rec.data_hex = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
-        rec.topics[0] = _columnTextOptional(stmt, 9);
-        rec.topics[1] = _columnTextOptional(stmt, 10);
-        rec.topics[2] = _columnTextOptional(stmt, 11);
-        rec.topics[3] = _columnTextOptional(stmt, 12);
-        rec.block_number = static_cast<std::int64_t>(sqlite3_column_int64(stmt, 13));
-        rec.tx_index = static_cast<std::int64_t>(sqlite3_column_int64(stmt, 14));
-        rec.tx_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 15));
-        rec.block_time = _columnInt64Optional(stmt, 16);
+        rec.source_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        rec.chain_namespace = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        rec.registry_address = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        rec.chain_id = static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 3));
+        rec.block_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        rec.log_index = static_cast<std::int64_t>(sqlite3_column_int64(stmt, 5));
+        rec.change_seq = static_cast<std::int64_t>(sqlite3_column_int64(stmt, 6));
+        rec.event_type = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7));
+        rec.state = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
+        rec.name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
+        rec.owner = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+        rec.data_hex = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 11));
+        rec.topics[0] = _columnTextOptional(stmt, 12);
+        rec.topics[1] = _columnTextOptional(stmt, 13);
+        rec.topics[2] = _columnTextOptional(stmt, 14);
+        rec.topics[3] = _columnTextOptional(stmt, 15);
+        rec.block_number = static_cast<std::int64_t>(sqlite3_column_int64(stmt, 16));
+        rec.tx_index = static_cast<std::int64_t>(sqlite3_column_int64(stmt, 17));
+        rec.tx_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 18));
+        rec.block_time = _columnInt64Optional(stmt, 19);
+        rec.content_hash = _columnTextOptional(stmt, 20);
+        rec.metadata_hash = _columnTextOptional(stmt, 21);
+        rec.runtime_code_hash = _columnTextOptional(stmt, 22);
+        if(const auto kind = _columnTextOptional(stmt, 23))
+        {
+            rec.entity_kind = pt::parseEntityKind(*kind);
+        }
+        rec.old_owner = _columnTextOptional(stmt, 24);
+        rec.entity_address = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 25));
         return rec;
     }
 
@@ -118,7 +118,7 @@ namespace dcn::events
         }
     };
     SQLiteHotStore::SQLiteHotStore(const std::filesystem::path& hot_db_path,
-                                   const int default_chain_id)
+                                   const std::uint64_t default_chain_id)
         : _hot_db_path(hot_db_path)
         , _default_chain_id(default_chain_id)
     {
@@ -194,7 +194,8 @@ namespace dcn::events
             throw std::runtime_error("Failed to configure events hot read DB pragmas");
         }
 
-        if (!_initializeHotSchema())
+        if (!storage::sqlite::ensureSchemaVersion(_write_db, HOT_SCHEMA_VERSION, "events hot")
+            || !_initializeHotSchema())
         {
             throw std::runtime_error("Failed to initialize events hot DB schema");
         }
@@ -267,23 +268,16 @@ namespace dcn::events
         return stats;
     }
 
-    std::optional<std::int64_t> SQLiteHotStore::loadNextFromBlock(const int chain_id)
+    std::optional<std::uint64_t> SQLiteHotStore::loadNextCursor(
+        const std::string & source_id,
+        const CursorKind kind)
     {
-        storage::sqlite::Statement stmt(_write_db, "SELECT next_from_block FROM ingest_resume_state WHERE chain_id=?1;");
-        sqlite3_bind_int(stmt.get(), 1, chain_id);
-
-        if (stmt.step() != SQLITE_ROW)
-        {
-            return std::nullopt;
-        }
-
-        return static_cast<std::int64_t>(sqlite3_column_int64(stmt.get(), 0));
-    }
-
-    std::optional<std::uint64_t> SQLiteHotStore::loadNextLocalSeq(const int chain_id)
-    {
-        storage::sqlite::Statement stmt(_write_db, "SELECT next_seq FROM local_ingest_resume_state WHERE chain_id=?1;");
-        sqlite3_bind_int(stmt.get(), 1, chain_id);
+        storage::sqlite::Statement stmt(
+            _write_db,
+            "SELECT next_cursor FROM source_resume WHERE source_id=?1 AND cursor_kind=?2;");
+        sqlite3_bind_text(stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+        const std::string_view cursor_kind = toString(kind);
+        sqlite3_bind_text(stmt.get(), 2, cursor_kind.data(), static_cast<int>(cursor_kind.size()), SQLITE_TRANSIENT);
 
         if (stmt.step() != SQLITE_ROW)
         {
@@ -293,61 +287,12 @@ namespace dcn::events
         return static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 0));
     }
 
-    bool SQLiteHotStore::saveNextLocalSeq(
-        const int chain_id,
-        const std::uint64_t next_seq,
-        const std::int64_t now_ms)
-    {
-        storage::sqlite::Statement stmt(
-            _write_db,
-            "INSERT INTO local_ingest_resume_state(chain_id, next_seq, updated_at_ms) "
-            "VALUES(?1, ?2, ?3) "
-            "ON CONFLICT(chain_id) DO UPDATE SET "
-            "next_seq=excluded.next_seq, updated_at_ms=excluded.updated_at_ms;");
-
-        sqlite3_bind_int(stmt.get(), 1, chain_id);
-        sqlite3_bind_int64(stmt.get(), 2, static_cast<sqlite3_int64>(next_seq));
-        sqlite3_bind_int64(stmt.get(), 3, static_cast<sqlite3_int64>(now_ms));
-
-        return stmt.step() == SQLITE_DONE;
-    }
-
-    std::vector<std::int64_t> SQLiteHotStore::loadReorgWindowBlocks(
-        const int chain_id,
-        const std::int64_t from_block,
-        const std::int64_t to_block) const
-    {
-        std::vector<std::int64_t> block_numbers;
-
-        storage::sqlite::Statement stmt(
-            _read_db,
-            "SELECT block_number "
-            "FROM reorg_window "
-            "WHERE chain_id=?1 AND block_number>=?2 AND block_number<=?3 "
-            "ORDER BY block_number ASC;");
-
-        sqlite3_bind_int(stmt.get(), 1, chain_id);
-        sqlite3_bind_int64(stmt.get(), 2, static_cast<sqlite3_int64>(from_block));
-        sqlite3_bind_int64(stmt.get(), 3, static_cast<sqlite3_int64>(to_block));
-
-        int rc = SQLITE_OK;
-        while ((rc = stmt.step()) == SQLITE_ROW)
-        {
-            block_numbers.push_back(static_cast<std::int64_t>(sqlite3_column_int64(stmt.get(), 0)));
-        }
-        if (rc != SQLITE_DONE)
-        {
-            throw std::runtime_error(sqlite3_errmsg(_read_db));
-        }
-
-        return block_numbers;
-    }
-
     bool SQLiteHotStore::ingestBatch(
-        const int chain_id,
+        const std::string & source_id,
+        const std::uint64_t chain_id,
         const std::vector<DecodedEvent>& events,
         const std::vector<ChainBlockInfo>& block_infos,
-        const std::int64_t next_from_block,
+        const std::uint64_t next_cursor,
         const std::int64_t now_ms)
     {
         std::vector<RawChainLog> raw_events;
@@ -359,23 +304,26 @@ namespace dcn::events
         }
 
         return ingestBatch(
+            source_id,
+            CursorKind::NEXT_BLOCK,
             chain_id,
             raw_events,
             events,
             block_infos,
-            next_from_block,
-            now_ms,
-            std::nullopt);
+            next_cursor,
+            now_ms);
     }
 
     bool SQLiteHotStore::ingestBatch(
-        const int chain_id,
+        const std::string & source_id,
+        const CursorKind kind,
+        const std::uint64_t chain_id,
         const std::vector<RawChainLog>& raw_events,
         const std::vector<DecodedEvent>& decoded_events,
         const std::vector<ChainBlockInfo>& block_infos,
-        const std::int64_t next_from_block,
+        const std::uint64_t next_cursor,
         const std::int64_t now_ms,
-        const std::optional<std::uint64_t> next_local_seq)
+        const std::optional<ScannedBlockRange> & scanned_range)
     {
         if (!storage::sqlite::exec(_write_db, "BEGIN IMMEDIATE TRANSACTION;"))
         {
@@ -393,32 +341,32 @@ namespace dcn::events
 
             storage::sqlite::Statement block_window_stmt(
                 _write_db,
-                "INSERT INTO reorg_window(chain_id, block_number, block_hash, parent_hash, seen_at_ms) "
-                "VALUES(?1, ?2, ?3, ?4, ?5) "
-                "ON CONFLICT(chain_id, block_number) DO UPDATE SET "
+                "INSERT INTO reorg_window(chain_id, block_number, block_hash, parent_hash, seen_at_ms, source_id) "
+                "VALUES(?1, ?2, ?3, ?4, ?5, ?6) "
+                "ON CONFLICT(source_id, block_number) DO UPDATE SET "
                 "block_hash=excluded.block_hash, parent_hash=excluded.parent_hash, seen_at_ms=excluded.seen_at_ms;");
 
             storage::sqlite::Statement select_reorg_removed_norm_stmt(
                 _write_db,
                 "SELECT block_hash, log_index "
                 "FROM normalized_events_hot "
-                "WHERE chain_id=?1 AND block_number=?2 AND block_hash<>?3 AND state!='removed';");
+                "WHERE chain_id=?1 AND block_number=?2 AND block_hash<>?3 AND source_id=?4 AND state!='removed';");
 
             storage::sqlite::Statement mark_reorg_removed_norm_stmt(
                 _write_db,
                 "UPDATE normalized_events_hot "
                 "SET state='removed', updated_at_ms=?1, change_seq=?2 "
-                "WHERE chain_id=?3 AND block_hash=?4 AND log_index=?5;");
+                "WHERE chain_id=?3 AND block_hash=?4 AND log_index=?5 AND source_id=?6;");
 
             storage::sqlite::Statement mark_reorg_removed_raw_stmt(
                 _write_db,
                 "UPDATE raw_events_hot "
                 "SET removed=1, state='removed', removed_at_ms=COALESCE(removed_at_ms, ?1), updated_at_ms=?2 "
-                "WHERE chain_id=?3 AND block_number=?4 AND block_hash<>?5 AND state!='removed';");
+                "WHERE chain_id=?3 AND block_number=?4 AND block_hash<>?5 AND source_id=?6 AND state!='removed';");
 
             for (const ChainBlockInfo& block_info : block_infos)
             {
-                sqlite3_bind_int(block_window_stmt.get(), 1, block_info.chain_id);
+                sqlite3_bind_int64(block_window_stmt.get(), 1, static_cast<sqlite3_int64>(block_info.chain_id));
                 sqlite3_bind_int64(block_window_stmt.get(), 2, static_cast<sqlite3_int64>(block_info.block_number));
                 sqlite3_bind_text(
                     block_window_stmt.get(),
@@ -433,6 +381,7 @@ namespace dcn::events
                     static_cast<int>(block_info.parent_hash.size()),
                     SQLITE_TRANSIENT);
                 sqlite3_bind_int64(block_window_stmt.get(), 5, static_cast<sqlite3_int64>(block_info.seen_at_ms));
+                sqlite3_bind_text(block_window_stmt.get(), 6, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
 
                 if (block_window_stmt.step() != SQLITE_DONE)
                 {
@@ -441,7 +390,7 @@ namespace dcn::events
                 sqlite3_reset(block_window_stmt.get());
                 sqlite3_clear_bindings(block_window_stmt.get());
 
-                sqlite3_bind_int(select_reorg_removed_norm_stmt.get(), 1, block_info.chain_id);
+                sqlite3_bind_int64(select_reorg_removed_norm_stmt.get(), 1, static_cast<sqlite3_int64>(block_info.chain_id));
                 sqlite3_bind_int64(
                     select_reorg_removed_norm_stmt.get(),
                     2,
@@ -452,6 +401,7 @@ namespace dcn::events
                     block_info.block_hash.c_str(),
                     static_cast<int>(block_info.block_hash.size()),
                     SQLITE_TRANSIENT);
+                sqlite3_bind_text(select_reorg_removed_norm_stmt.get(), 4, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
 
                 std::vector<std::pair<std::string, std::int64_t>> reorg_removed_keys;
                 {
@@ -476,7 +426,7 @@ namespace dcn::events
                 {
                     sqlite3_bind_int64(mark_reorg_removed_norm_stmt.get(), 1, static_cast<sqlite3_int64>(now_ms));
                     sqlite3_bind_int64(mark_reorg_removed_norm_stmt.get(), 2, static_cast<sqlite3_int64>(_nextChangeSeq()));
-                    sqlite3_bind_int(mark_reorg_removed_norm_stmt.get(), 3, block_info.chain_id);
+                    sqlite3_bind_int64(mark_reorg_removed_norm_stmt.get(), 3, static_cast<sqlite3_int64>(block_info.chain_id));
                     sqlite3_bind_text(
                         mark_reorg_removed_norm_stmt.get(),
                         4,
@@ -484,6 +434,7 @@ namespace dcn::events
                         static_cast<int>(bh.size()),
                         SQLITE_TRANSIENT);
                     sqlite3_bind_int64(mark_reorg_removed_norm_stmt.get(), 5, static_cast<sqlite3_int64>(li));
+                    sqlite3_bind_text(mark_reorg_removed_norm_stmt.get(), 6, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
 
                     if (mark_reorg_removed_norm_stmt.step() != SQLITE_DONE)
                     {
@@ -495,7 +446,7 @@ namespace dcn::events
 
                 sqlite3_bind_int64(mark_reorg_removed_raw_stmt.get(), 1, static_cast<sqlite3_int64>(now_ms));
                 sqlite3_bind_int64(mark_reorg_removed_raw_stmt.get(), 2, static_cast<sqlite3_int64>(now_ms));
-                sqlite3_bind_int(mark_reorg_removed_raw_stmt.get(), 3, block_info.chain_id);
+                sqlite3_bind_int64(mark_reorg_removed_raw_stmt.get(), 3, static_cast<sqlite3_int64>(block_info.chain_id));
                 sqlite3_bind_int64(
                     mark_reorg_removed_raw_stmt.get(),
                     4,
@@ -506,6 +457,7 @@ namespace dcn::events
                     block_info.block_hash.c_str(),
                     static_cast<int>(block_info.block_hash.size()),
                     SQLITE_TRANSIENT);
+                sqlite3_bind_text(mark_reorg_removed_raw_stmt.get(), 6, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
 
                 if (mark_reorg_removed_raw_stmt.step() != SQLITE_DONE)
                 {
@@ -520,20 +472,19 @@ namespace dcn::events
                 "INSERT INTO raw_events_hot("
                 "chain_id, block_hash, log_index, tx_hash, block_number, tx_index, block_time, "
                 "address, topic0, topic1, topic2, topic3, data_hex, removed, state, seen_at_ms, "
-                "updated_at_ms, removed_at_ms"
+                "updated_at_ms, removed_at_ms, source_id, chain_namespace"
                 ") VALUES("
                 "?1, ?2, ?3, ?4, ?5, ?6, ?7, "
-                "?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18"
+                "?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20"
                 ") "
-                "ON CONFLICT(chain_id, block_hash, log_index) DO UPDATE SET "
+                "ON CONFLICT(source_id, block_hash, log_index) DO UPDATE SET "
                 "tx_hash=excluded.tx_hash, block_number=excluded.block_number, tx_index=excluded.tx_index, "
                 "block_time=excluded.block_time, "
                 "address=excluded.address, topic0=excluded.topic0, topic1=excluded.topic1, "
                 "topic2=excluded.topic2, topic3=excluded.topic3, "
-                "data_hex=excluded.data_hex, removed=MAX(raw_events_hot.removed, excluded.removed), "
+                "data_hex=excluded.data_hex, removed=excluded.removed, "
                 "state=CASE "
                 "WHEN excluded.state='removed' THEN 'removed' "
-                "WHEN raw_events_hot.state='removed' THEN 'removed' "
                 "WHEN raw_events_hot.state='finalized' THEN 'finalized' "
                 "WHEN raw_events_hot.state='safe' AND excluded.state='observed' THEN 'safe' "
                 "ELSE excluded.state END, "
@@ -542,7 +493,7 @@ namespace dcn::events
                 "removed_at_ms=CASE "
                 "WHEN excluded.state='removed' OR excluded.removed=1 THEN "
                 "COALESCE(raw_events_hot.removed_at_ms, excluded.removed_at_ms) "
-                "ELSE raw_events_hot.removed_at_ms END "
+                "ELSE NULL END "
                 "WHERE raw_events_hot.tx_hash<>excluded.tx_hash "
                 "OR raw_events_hot.block_number<>excluded.block_number "
                 "OR raw_events_hot.tx_index<>excluded.tx_index "
@@ -553,10 +504,9 @@ namespace dcn::events
                 "OR raw_events_hot.topic2 IS NOT excluded.topic2 "
                 "OR raw_events_hot.topic3 IS NOT excluded.topic3 "
                 "OR raw_events_hot.data_hex<>excluded.data_hex "
-                "OR raw_events_hot.removed<>MAX(raw_events_hot.removed, excluded.removed) "
+                "OR raw_events_hot.removed<>excluded.removed "
                 "OR raw_events_hot.state<>CASE "
                 "WHEN excluded.state='removed' THEN 'removed' "
-                "WHEN raw_events_hot.state='removed' THEN 'removed' "
                 "WHEN raw_events_hot.state='finalized' THEN 'finalized' "
                 "WHEN raw_events_hot.state='safe' AND excluded.state='observed' THEN 'safe' "
                 "ELSE excluded.state END "
@@ -567,20 +517,23 @@ namespace dcn::events
                 "INSERT INTO normalized_events_hot("
                 "chain_id, block_hash, log_index, tx_hash, block_number, tx_index, block_time, "
                 "event_type, name, caller, owner, entity_address, args_count, format_hash, state, "
-                "seen_at_ms, updated_at_ms, change_seq"
+                "seen_at_ms, updated_at_ms, change_seq, content_hash, metadata_hash, runtime_code_hash, "
+                "entity_kind, old_owner, source_id, chain_namespace"
                 ") VALUES("
                 "?1, ?2, ?3, ?4, ?5, ?6, ?7, "
-                "?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18"
+                "?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, "
+                "?19, ?20, ?21, ?22, ?23, ?24, ?25"
                 ") "
-                "ON CONFLICT(chain_id, block_hash, log_index) DO UPDATE SET "
+                "ON CONFLICT(source_id, block_hash, log_index) DO UPDATE SET "
                 "tx_hash=excluded.tx_hash, block_number=excluded.block_number, tx_index=excluded.tx_index, "
                 "block_time=excluded.block_time, "
                 "event_type=excluded.event_type, name=excluded.name, caller=excluded.caller, owner=excluded.owner, "
                 "entity_address=excluded.entity_address, "
                 "args_count=excluded.args_count, format_hash=excluded.format_hash, "
+                "content_hash=excluded.content_hash, metadata_hash=excluded.metadata_hash, "
+                "runtime_code_hash=excluded.runtime_code_hash, entity_kind=excluded.entity_kind, old_owner=excluded.old_owner, "
                 "state=CASE "
                 "WHEN excluded.state='removed' THEN 'removed' "
-                "WHEN normalized_events_hot.state='removed' THEN 'removed' "
                 "WHEN normalized_events_hot.state='finalized' THEN 'finalized' "
                 "WHEN normalized_events_hot.state='safe' AND excluded.state='observed' THEN 'safe' "
                 "ELSE excluded.state END, "
@@ -598,9 +551,13 @@ namespace dcn::events
                 "OR normalized_events_hot.entity_address<>excluded.entity_address "
                 "OR normalized_events_hot.args_count IS NOT excluded.args_count "
                 "OR normalized_events_hot.format_hash IS NOT excluded.format_hash "
+                "OR normalized_events_hot.content_hash IS NOT excluded.content_hash "
+                "OR normalized_events_hot.metadata_hash IS NOT excluded.metadata_hash "
+                "OR normalized_events_hot.runtime_code_hash IS NOT excluded.runtime_code_hash "
+                "OR normalized_events_hot.entity_kind IS NOT excluded.entity_kind "
+                "OR normalized_events_hot.old_owner IS NOT excluded.old_owner "
                 "OR normalized_events_hot.state<>CASE "
                 "WHEN excluded.state='removed' THEN 'removed' "
-                "WHEN normalized_events_hot.state='removed' THEN 'removed' "
                 "WHEN normalized_events_hot.state='finalized' THEN 'finalized' "
                 "WHEN normalized_events_hot.state='safe' AND excluded.state='observed' THEN 'safe' "
                 "ELSE excluded.state END;");
@@ -608,10 +565,10 @@ namespace dcn::events
             storage::sqlite::Statement decode_failure_stmt(
                 _write_db,
                 "INSERT INTO decode_failures_hot("
-                "chain_id, block_hash, log_index, last_error, attempts, first_seen_at_ms, last_seen_at_ms, retryable, dead_letter"
+                "chain_id, block_hash, log_index, last_error, attempts, first_seen_at_ms, last_seen_at_ms, retryable, dead_letter, source_id"
                 ") VALUES("
-                "?1, ?2, ?3, ?4, 1, ?5, ?6, 1, 0"
-                ") ON CONFLICT(chain_id, block_hash, log_index) DO UPDATE SET "
+                "?1, ?2, ?3, ?4, 1, ?5, ?6, 1, 0, ?7"
+                ") ON CONFLICT(source_id, block_hash, log_index) DO UPDATE SET "
                 "last_error=excluded.last_error, "
                 "attempts=decode_failures_hot.attempts + 1, "
                 "last_seen_at_ms=excluded.last_seen_at_ms, "
@@ -620,13 +577,13 @@ namespace dcn::events
 
             storage::sqlite::Statement clear_decode_failure_stmt(
                 _write_db,
-                "DELETE FROM decode_failures_hot WHERE chain_id=?1 AND block_hash=?2 AND log_index=?3;");
+                "DELETE FROM decode_failures_hot WHERE chain_id=?1 AND block_hash=?2 AND log_index=?3 AND source_id=?4;");
 
             storage::sqlite::Statement force_removed_norm_stmt(
                 _write_db,
                 "UPDATE normalized_events_hot "
                 "SET state='removed', updated_at_ms=?1, change_seq=?5 "
-                "WHERE chain_id=?2 AND block_hash=?3 AND log_index=?4 AND state!='removed';");
+                "WHERE chain_id=?2 AND block_hash=?3 AND log_index=?4 AND source_id=?6 AND state!='removed';");
 
             for (const RawChainLog& raw_event : raw_events)
             {
@@ -650,7 +607,7 @@ namespace dcn::events
                 const std::optional<std::string> topic2 = raw_event.topics[2];
                 const std::optional<std::string> topic3 = raw_event.topics[3];
 
-                sqlite3_bind_int(raw_stmt.get(), 1, chain_id);
+                sqlite3_bind_int64(raw_stmt.get(), 1, static_cast<sqlite3_int64>(chain_id));
                 sqlite3_bind_text(
                     raw_stmt.get(),
                     2,
@@ -698,6 +655,8 @@ namespace dcn::events
                 sqlite3_bind_int64(raw_stmt.get(), 16, static_cast<sqlite3_int64>(raw_event.seen_at_ms));
                 sqlite3_bind_int64(raw_stmt.get(), 17, static_cast<sqlite3_int64>(now_ms));
                 _bindOptionalInt64(raw_stmt.get(), 18, removed_at);
+                sqlite3_bind_text(raw_stmt.get(), 19, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+                sqlite3_bind_text(raw_stmt.get(), 20, raw_event.chain_namespace.c_str(), static_cast<int>(raw_event.chain_namespace.size()), SQLITE_TRANSIENT);
 
                 if (raw_stmt.step() != SQLITE_DONE)
                 {
@@ -712,7 +671,7 @@ namespace dcn::events
                     if (incoming_removed)
                     {
                         sqlite3_bind_int64(force_removed_norm_stmt.get(), 1, static_cast<sqlite3_int64>(now_ms));
-                        sqlite3_bind_int(force_removed_norm_stmt.get(), 2, chain_id);
+                        sqlite3_bind_int64(force_removed_norm_stmt.get(), 2, static_cast<sqlite3_int64>(chain_id));
                         sqlite3_bind_text(
                             force_removed_norm_stmt.get(),
                             3,
@@ -727,6 +686,7 @@ namespace dcn::events
                             force_removed_norm_stmt.get(),
                             5,
                             static_cast<sqlite3_int64>(_nextChangeSeq()));
+                        sqlite3_bind_text(force_removed_norm_stmt.get(), 6, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
 
                         if (force_removed_norm_stmt.step() != SQLITE_DONE)
                         {
@@ -735,7 +695,7 @@ namespace dcn::events
                         sqlite3_reset(force_removed_norm_stmt.get());
                         sqlite3_clear_bindings(force_removed_norm_stmt.get());
 
-                        sqlite3_bind_int(clear_decode_failure_stmt.get(), 1, chain_id);
+                        sqlite3_bind_int64(clear_decode_failure_stmt.get(), 1, static_cast<sqlite3_int64>(chain_id));
                         sqlite3_bind_text(
                             clear_decode_failure_stmt.get(),
                             2,
@@ -746,6 +706,7 @@ namespace dcn::events
                             clear_decode_failure_stmt.get(),
                             3,
                             static_cast<sqlite3_int64>(raw_event.log_index));
+                        sqlite3_bind_text(clear_decode_failure_stmt.get(), 4, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
 
                         if (clear_decode_failure_stmt.step() != SQLITE_DONE)
                         {
@@ -756,7 +717,7 @@ namespace dcn::events
                         continue;
                     }
 
-                    sqlite3_bind_int(decode_failure_stmt.get(), 1, chain_id);
+                    sqlite3_bind_int64(decode_failure_stmt.get(), 1, static_cast<sqlite3_int64>(chain_id));
                     sqlite3_bind_text(
                         decode_failure_stmt.get(),
                         2,
@@ -782,6 +743,7 @@ namespace dcn::events
                         decode_failure_stmt.get(),
                         6,
                         static_cast<sqlite3_int64>(now_ms));
+                    sqlite3_bind_text(decode_failure_stmt.get(), 7, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
 
                     if (decode_failure_stmt.step() != SQLITE_DONE)
                     {
@@ -792,7 +754,7 @@ namespace dcn::events
                     continue;
                 }
 
-                sqlite3_bind_int(clear_decode_failure_stmt.get(), 1, chain_id);
+                sqlite3_bind_int64(clear_decode_failure_stmt.get(), 1, static_cast<sqlite3_int64>(chain_id));
                 sqlite3_bind_text(
                     clear_decode_failure_stmt.get(),
                     2,
@@ -803,6 +765,7 @@ namespace dcn::events
                     clear_decode_failure_stmt.get(),
                     3,
                     static_cast<sqlite3_int64>(raw_event.log_index));
+                sqlite3_bind_text(clear_decode_failure_stmt.get(), 4, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
 
                 if (clear_decode_failure_stmt.step() != SQLITE_DONE)
                 {
@@ -814,7 +777,7 @@ namespace dcn::events
                 const std::string event_type_str = toString(decoded->event_type);
                 const std::string state_str = effective_state;
 
-                sqlite3_bind_int(normalized_stmt.get(), 1, chain_id);
+                sqlite3_bind_int64(normalized_stmt.get(), 1, static_cast<sqlite3_int64>(chain_id));
                 sqlite3_bind_text(
                     normalized_stmt.get(),
                     2,
@@ -887,6 +850,18 @@ namespace dcn::events
                     static_cast<sqlite3_int64>(decoded->raw.seen_at_ms));
                 sqlite3_bind_int64(normalized_stmt.get(), 17, static_cast<sqlite3_int64>(now_ms));
                 sqlite3_bind_int64(normalized_stmt.get(), 18, static_cast<sqlite3_int64>(_nextChangeSeq()));
+                _bindOptionalText(normalized_stmt.get(), 19, decoded->content_hash);
+                _bindOptionalText(normalized_stmt.get(), 20, decoded->metadata_hash);
+                _bindOptionalText(normalized_stmt.get(), 21, decoded->runtime_code_hash);
+                _bindOptionalText(
+                    normalized_stmt.get(),
+                    22,
+                    decoded->entity_kind
+                        ? std::optional<std::string>(pt::entityKindName(*decoded->entity_kind))
+                        : std::nullopt);
+                _bindOptionalText(normalized_stmt.get(), 23, decoded->old_owner);
+                sqlite3_bind_text(normalized_stmt.get(), 24, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+                sqlite3_bind_text(normalized_stmt.get(), 25, decoded->raw.chain_namespace.c_str(), static_cast<int>(decoded->raw.chain_namespace.size()), SQLITE_TRANSIENT);
 
                 if (normalized_stmt.step() != SQLITE_DONE)
                 {
@@ -903,39 +878,27 @@ namespace dcn::events
                 }
             }
 
+            if(scanned_range.has_value() && scanned_range->to_block >= scanned_range->from_block)
+            {
+                _reconcileScannedRange(source_id, *scanned_range, raw_events, now_ms);
+            }
+
             storage::sqlite::Statement resume_stmt(
                 _write_db,
-                "INSERT INTO ingest_resume_state(chain_id, next_from_block, updated_at_ms) "
-                "VALUES(?1, ?2, ?3) "
-                "ON CONFLICT(chain_id) DO UPDATE SET "
-                "next_from_block=excluded.next_from_block, updated_at_ms=excluded.updated_at_ms;");
+                "INSERT INTO source_resume(source_id, cursor_kind, next_cursor, updated_at_ms) "
+                "VALUES(?1, ?2, ?3, ?4) "
+                "ON CONFLICT(source_id) DO UPDATE SET "
+                "cursor_kind=excluded.cursor_kind, next_cursor=excluded.next_cursor, updated_at_ms=excluded.updated_at_ms;");
 
-            sqlite3_bind_int(resume_stmt.get(), 1, chain_id);
-            sqlite3_bind_int64(resume_stmt.get(), 2, static_cast<sqlite3_int64>(next_from_block));
-            sqlite3_bind_int64(resume_stmt.get(), 3, static_cast<sqlite3_int64>(now_ms));
+            sqlite3_bind_text(resume_stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+            const std::string_view cursor_kind = toString(kind);
+            sqlite3_bind_text(resume_stmt.get(), 2, cursor_kind.data(), static_cast<int>(cursor_kind.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(resume_stmt.get(), 3, static_cast<sqlite3_int64>(next_cursor));
+            sqlite3_bind_int64(resume_stmt.get(), 4, static_cast<sqlite3_int64>(now_ms));
 
             if (resume_stmt.step() != SQLITE_DONE)
             {
                 throw std::runtime_error(sqlite3_errmsg(_write_db));
-            }
-
-            if (next_local_seq.has_value())
-            {
-                storage::sqlite::Statement local_resume_stmt(
-                    _write_db,
-                    "INSERT INTO local_ingest_resume_state(chain_id, next_seq, updated_at_ms) "
-                    "VALUES(?1, ?2, ?3) "
-                    "ON CONFLICT(chain_id) DO UPDATE SET "
-                    "next_seq=excluded.next_seq, updated_at_ms=excluded.updated_at_ms;");
-
-                sqlite3_bind_int(local_resume_stmt.get(), 1, chain_id);
-                sqlite3_bind_int64(local_resume_stmt.get(), 2, static_cast<sqlite3_int64>(*next_local_seq));
-                sqlite3_bind_int64(local_resume_stmt.get(), 3, static_cast<sqlite3_int64>(now_ms));
-
-                if (local_resume_stmt.step() != SQLITE_DONE)
-                {
-                    throw std::runtime_error(sqlite3_errmsg(_write_db));
-                }
             }
 
             if (!storage::sqlite::exec(_write_db, "COMMIT;"))
@@ -953,15 +916,153 @@ namespace dcn::events
         }
     }
 
+    void SQLiteHotStore::_reconcileScannedRange(
+        const std::string & source_id,
+        const ScannedBlockRange & range,
+        const std::vector<RawChainLog> & returned_logs,
+        const std::int64_t now_ms)
+    {
+        // The caller scanned this block span completely, so anything still stored as
+        // observed or safe inside it that the scan did not return no longer exists on
+        // the canonical chain. This is the only check that catches a replacement block
+        // holding no PT event at all: comparing block hashes only covers blocks the
+        // provider actually returned. Finalized rows are never touched here.
+        if(!storage::sqlite::exec(_write_db, "DELETE FROM scan_generation;"))
+        {
+            throw std::runtime_error("failed to reset scan generation table");
+        }
+
+        {
+            storage::sqlite::Statement insert_key_stmt(
+                _write_db,
+                "INSERT OR IGNORE INTO scan_generation(block_hash, log_index) VALUES(?1, ?2);");
+
+            for(const RawChainLog & log : returned_logs)
+            {
+                sqlite3_bind_text(
+                    insert_key_stmt.get(), 1, log.block_hash.c_str(), static_cast<int>(log.block_hash.size()),
+                    SQLITE_TRANSIENT);
+                sqlite3_bind_int64(insert_key_stmt.get(), 2, static_cast<sqlite3_int64>(log.log_index));
+
+                if(insert_key_stmt.step() != SQLITE_DONE)
+                {
+                    throw std::runtime_error(sqlite3_errmsg(_write_db));
+                }
+                sqlite3_reset(insert_key_stmt.get());
+                sqlite3_clear_bindings(insert_key_stmt.get());
+            }
+        }
+
+        std::vector<std::pair<std::string, std::int64_t>> disappeared;
+        {
+            storage::sqlite::Statement select_stmt(
+                _write_db,
+                "SELECT block_hash, log_index FROM normalized_events_hot "
+                "WHERE source_id=?1 AND block_number BETWEEN ?2 AND ?3 "
+                "AND state IN ('observed','safe') "
+                "AND NOT EXISTS (SELECT 1 FROM scan_generation g "
+                "WHERE g.block_hash=normalized_events_hot.block_hash "
+                "AND g.log_index=normalized_events_hot.log_index);");
+
+            sqlite3_bind_text(select_stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(select_stmt.get(), 2, static_cast<sqlite3_int64>(range.from_block));
+            sqlite3_bind_int64(select_stmt.get(), 3, static_cast<sqlite3_int64>(range.to_block));
+
+            int rc = SQLITE_OK;
+            while((rc = select_stmt.step()) == SQLITE_ROW)
+            {
+                disappeared.emplace_back(
+                    reinterpret_cast<const char *>(sqlite3_column_text(select_stmt.get(), 0)),
+                    static_cast<std::int64_t>(sqlite3_column_int64(select_stmt.get(), 1)));
+            }
+            if(rc != SQLITE_DONE)
+            {
+                throw std::runtime_error(sqlite3_errmsg(_write_db));
+            }
+        }
+
+        // Every removal gets its own change_seq so projectors see the reversal as an
+        // ordered delta rather than having to diff state.
+        storage::sqlite::Statement remove_norm_stmt(
+            _write_db,
+            "UPDATE normalized_events_hot SET state='removed', updated_at_ms=?1, change_seq=?2 "
+            "WHERE source_id=?3 AND block_hash=?4 AND log_index=?5;");
+
+        for(const auto & [block_hash, log_index] : disappeared)
+        {
+            sqlite3_bind_int64(remove_norm_stmt.get(), 1, static_cast<sqlite3_int64>(now_ms));
+            sqlite3_bind_int64(remove_norm_stmt.get(), 2, static_cast<sqlite3_int64>(_nextChangeSeq()));
+            sqlite3_bind_text(remove_norm_stmt.get(), 3, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(remove_norm_stmt.get(), 4, block_hash.c_str(), static_cast<int>(block_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(remove_norm_stmt.get(), 5, static_cast<sqlite3_int64>(log_index));
+
+            if(remove_norm_stmt.step() != SQLITE_DONE)
+            {
+                throw std::runtime_error(sqlite3_errmsg(_write_db));
+            }
+            sqlite3_reset(remove_norm_stmt.get());
+            sqlite3_clear_bindings(remove_norm_stmt.get());
+        }
+
+        storage::sqlite::Statement remove_raw_stmt(
+            _write_db,
+            "UPDATE raw_events_hot SET removed=1, state='removed', "
+            "removed_at_ms=COALESCE(removed_at_ms, ?1), updated_at_ms=?1 "
+            "WHERE source_id=?2 AND block_number BETWEEN ?3 AND ?4 "
+            "AND state IN ('observed','safe') "
+            "AND NOT EXISTS (SELECT 1 FROM scan_generation g "
+            "WHERE g.block_hash=raw_events_hot.block_hash AND g.log_index=raw_events_hot.log_index);");
+
+        sqlite3_bind_int64(remove_raw_stmt.get(), 1, static_cast<sqlite3_int64>(now_ms));
+        sqlite3_bind_text(remove_raw_stmt.get(), 2, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(remove_raw_stmt.get(), 3, static_cast<sqlite3_int64>(range.from_block));
+        sqlite3_bind_int64(remove_raw_stmt.get(), 4, static_cast<sqlite3_int64>(range.to_block));
+
+        if(remove_raw_stmt.step() != SQLITE_DONE)
+        {
+            throw std::runtime_error(sqlite3_errmsg(_write_db));
+        }
+
+        // Blocks in the scanned span that no longer hold any indexed log must not keep
+        // a stale header in the reorg window.
+        storage::sqlite::Statement prune_window_stmt(
+            _write_db,
+            "DELETE FROM reorg_window WHERE source_id=?1 AND block_number BETWEEN ?2 AND ?3 "
+            "AND NOT EXISTS (SELECT 1 FROM raw_events_hot r "
+            "WHERE r.source_id=reorg_window.source_id AND r.block_hash=reorg_window.block_hash "
+            "AND r.state!='removed');");
+
+        sqlite3_bind_text(prune_window_stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(prune_window_stmt.get(), 2, static_cast<sqlite3_int64>(range.from_block));
+        sqlite3_bind_int64(prune_window_stmt.get(), 3, static_cast<sqlite3_int64>(range.to_block));
+
+        if(prune_window_stmt.step() != SQLITE_DONE)
+        {
+            throw std::runtime_error(sqlite3_errmsg(_write_db));
+        }
+
+        if(!disappeared.empty())
+        {
+            spdlog::info(
+                "Events reorg reconciliation removed {} logs for source={} in blocks [{}, {}]",
+                disappeared.size(),
+                source_id,
+                range.from_block,
+                range.to_block);
+        }
+    }
+
     bool SQLiteHotStore::applyFinality(
-        const int chain_id,
+        const std::string & source_id,
+        const std::uint64_t chain_id,
         const FinalityHeights& heights,
         const std::int64_t now_ms,
         const std::size_t reorg_window_blocks)
     {
-        const std::int64_t clamped_head = std::max<std::int64_t>(0, heights.head);
-        const std::int64_t clamped_safe = std::clamp<std::int64_t>(heights.safe, 0, clamped_head);
-        const std::int64_t clamped_finalized = std::clamp<std::int64_t>(heights.finalized, 0, clamped_safe);
+        // -1 means "no block yet": nothing at or below it is promoted.
+        const std::int64_t clamped_head = std::max<std::int64_t>(-1, heights.head);
+        const std::int64_t clamped_safe = std::clamp<std::int64_t>(heights.safe, -1, clamped_head);
+        const std::int64_t clamped_finalized = std::clamp<std::int64_t>(heights.finalized, -1, clamped_safe);
 
         if (!storage::sqlite::exec(_write_db, "BEGIN IMMEDIATE TRANSACTION;"))
         {
@@ -973,13 +1074,14 @@ namespace dcn::events
             std::int64_t effective_head = clamped_head;
             std::int64_t effective_safe = clamped_safe;
             std::int64_t effective_finalized = clamped_finalized;
+            std::string effective_finalized_hash = heights.finalized_hash;
 
             storage::sqlite::Statement existing_finality_stmt(
                 _write_db,
-                "SELECT head_block, safe_block, finalized_block "
-                "FROM finality_state WHERE chain_id=?1;");
+                "SELECT head_block, safe_block, finalized_block, finalized_hash "
+                "FROM finality_state WHERE source_id=?1;");
 
-            sqlite3_bind_int(existing_finality_stmt.get(), 1, chain_id);
+            sqlite3_bind_text(existing_finality_stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
             if(existing_finality_stmt.step() == SQLITE_ROW)
             {
                 const std::int64_t previous_head =
@@ -991,24 +1093,34 @@ namespace dcn::events
 
                 effective_head = std::max(previous_head, clamped_head);
                 effective_safe = std::max(previous_safe, clamped_safe);
-                effective_safe = std::clamp<std::int64_t>(effective_safe, 0, effective_head);
+                effective_safe = std::clamp<std::int64_t>(effective_safe, -1, effective_head);
                 effective_finalized = std::max(previous_finalized, clamped_finalized);
-                effective_finalized = std::clamp<std::int64_t>(effective_finalized, 0, effective_safe);
+                effective_finalized = std::clamp<std::int64_t>(effective_finalized, -1, effective_safe);
+
+                // The anchor hash belongs to the finalized height it was reported with.
+                if(effective_finalized != clamped_finalized)
+                {
+                    effective_finalized_hash = _columnTextOptional(existing_finality_stmt.get(), 3).value_or("");
+                }
             }
 
             storage::sqlite::Statement finality_stmt(
                 _write_db,
-                "INSERT INTO finality_state(chain_id, head_block, safe_block, finalized_block, updated_at_ms) "
-                "VALUES(?1, ?2, ?3, ?4, ?5) "
-                "ON CONFLICT(chain_id) DO UPDATE SET "
+                "INSERT INTO finality_state(source_id, chain_id, head_block, safe_block, finalized_block, finalized_hash, updated_at_ms) "
+                "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7) "
+                "ON CONFLICT(source_id) DO UPDATE SET "
                 "head_block=excluded.head_block, safe_block=excluded.safe_block, finalized_block=excluded.finalized_block, "
-                "updated_at_ms=excluded.updated_at_ms;");
+                "finalized_hash=excluded.finalized_hash, updated_at_ms=excluded.updated_at_ms;");
 
-            sqlite3_bind_int(finality_stmt.get(), 1, chain_id);
-            sqlite3_bind_int64(finality_stmt.get(), 2, static_cast<sqlite3_int64>(effective_head));
-            sqlite3_bind_int64(finality_stmt.get(), 3, static_cast<sqlite3_int64>(effective_safe));
-            sqlite3_bind_int64(finality_stmt.get(), 4, static_cast<sqlite3_int64>(effective_finalized));
-            sqlite3_bind_int64(finality_stmt.get(), 5, static_cast<sqlite3_int64>(now_ms));
+            sqlite3_bind_text(finality_stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(finality_stmt.get(), 2, static_cast<sqlite3_int64>(chain_id));
+            sqlite3_bind_int64(finality_stmt.get(), 3, static_cast<sqlite3_int64>(effective_head));
+            sqlite3_bind_int64(finality_stmt.get(), 4, static_cast<sqlite3_int64>(effective_safe));
+            sqlite3_bind_int64(finality_stmt.get(), 5, static_cast<sqlite3_int64>(effective_finalized));
+            sqlite3_bind_text(
+                finality_stmt.get(), 6, effective_finalized_hash.c_str(),
+                static_cast<int>(effective_finalized_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(finality_stmt.get(), 7, static_cast<sqlite3_int64>(now_ms));
 
             if (finality_stmt.step() != SQLITE_DONE)
             {
@@ -1020,9 +1132,9 @@ namespace dcn::events
                     _write_db,
                     "SELECT block_hash, log_index "
                     "FROM normalized_events_hot "
-                    "WHERE chain_id=?1 AND state='observed' AND block_number <= ?2;");
+                    "WHERE source_id=?1 AND state='observed' AND block_number <= ?2;");
 
-                sqlite3_bind_int(select_observed_to_safe.get(), 1, chain_id);
+                sqlite3_bind_text(select_observed_to_safe.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
                 sqlite3_bind_int64(select_observed_to_safe.get(), 2, static_cast<sqlite3_int64>(effective_safe));
 
                 std::vector<std::pair<std::string, std::int64_t>> obs_safe_keys;
@@ -1046,13 +1158,13 @@ namespace dcn::events
                     _write_db,
                     "UPDATE normalized_events_hot "
                     "SET state='safe', updated_at_ms=?1, change_seq=?2 "
-                    "WHERE chain_id=?3 AND block_hash=?4 AND log_index=?5;");
+                    "WHERE source_id=?3 AND block_hash=?4 AND log_index=?5;");
 
                 for (const auto& [bh, li] : obs_safe_keys)
                 {
                     sqlite3_bind_int64(update_observed_to_safe_norm.get(), 1, static_cast<sqlite3_int64>(now_ms));
                     sqlite3_bind_int64(update_observed_to_safe_norm.get(), 2, static_cast<sqlite3_int64>(_nextChangeSeq()));
-                    sqlite3_bind_int(update_observed_to_safe_norm.get(), 3, chain_id);
+                    sqlite3_bind_text(update_observed_to_safe_norm.get(), 3, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
                     sqlite3_bind_text(
                         update_observed_to_safe_norm.get(),
                         4,
@@ -1073,10 +1185,10 @@ namespace dcn::events
             storage::sqlite::Statement update_observed_to_safe_raw(
                 _write_db,
                 "UPDATE raw_events_hot SET state='safe', updated_at_ms=?1 "
-                "WHERE chain_id=?2 AND state='observed' AND block_number <= ?3;");
+                "WHERE source_id=?2 AND state='observed' AND block_number <= ?3;");
 
             sqlite3_bind_int64(update_observed_to_safe_raw.get(), 1, static_cast<sqlite3_int64>(now_ms));
-            sqlite3_bind_int(update_observed_to_safe_raw.get(), 2, chain_id);
+            sqlite3_bind_text(update_observed_to_safe_raw.get(), 2, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
             sqlite3_bind_int64(update_observed_to_safe_raw.get(), 3, static_cast<sqlite3_int64>(effective_safe));
 
             if (update_observed_to_safe_raw.step() != SQLITE_DONE)
@@ -1089,9 +1201,9 @@ namespace dcn::events
                     _write_db,
                     "SELECT block_hash, log_index "
                     "FROM normalized_events_hot "
-                    "WHERE chain_id=?1 AND state='safe' AND block_number <= ?2;");
+                    "WHERE source_id=?1 AND state='safe' AND block_number <= ?2;");
 
-                sqlite3_bind_int(select_safe_to_finalized.get(), 1, chain_id);
+                sqlite3_bind_text(select_safe_to_finalized.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
                 sqlite3_bind_int64(select_safe_to_finalized.get(), 2, static_cast<sqlite3_int64>(effective_finalized));
 
                 std::vector<std::pair<std::string, std::int64_t>> safe_final_keys;
@@ -1115,13 +1227,13 @@ namespace dcn::events
                     _write_db,
                     "UPDATE normalized_events_hot "
                     "SET state='finalized', updated_at_ms=?1, change_seq=?2 "
-                    "WHERE chain_id=?3 AND block_hash=?4 AND log_index=?5;");
+                    "WHERE source_id=?3 AND block_hash=?4 AND log_index=?5;");
 
                 for (const auto& [bh, li] : safe_final_keys)
                 {
                     sqlite3_bind_int64(update_safe_to_finalized_norm.get(), 1, static_cast<sqlite3_int64>(now_ms));
                     sqlite3_bind_int64(update_safe_to_finalized_norm.get(), 2, static_cast<sqlite3_int64>(_nextChangeSeq()));
-                    sqlite3_bind_int(update_safe_to_finalized_norm.get(), 3, chain_id);
+                    sqlite3_bind_text(update_safe_to_finalized_norm.get(), 3, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
                     sqlite3_bind_text(
                         update_safe_to_finalized_norm.get(),
                         4,
@@ -1142,10 +1254,10 @@ namespace dcn::events
             storage::sqlite::Statement update_safe_to_finalized_raw(
                 _write_db,
                 "UPDATE raw_events_hot SET state='finalized', updated_at_ms=?1 "
-                "WHERE chain_id=?2 AND state='safe' AND block_number <= ?3;");
+                "WHERE source_id=?2 AND state='safe' AND block_number <= ?3;");
 
             sqlite3_bind_int64(update_safe_to_finalized_raw.get(), 1, static_cast<sqlite3_int64>(now_ms));
-            sqlite3_bind_int(update_safe_to_finalized_raw.get(), 2, chain_id);
+            sqlite3_bind_text(update_safe_to_finalized_raw.get(), 2, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
             sqlite3_bind_int64(update_safe_to_finalized_raw.get(), 3, static_cast<sqlite3_int64>(effective_finalized));
 
             if (update_safe_to_finalized_raw.step() != SQLITE_DONE)
@@ -1160,9 +1272,9 @@ namespace dcn::events
 
             storage::sqlite::Statement prune_reorg_stmt(
                 _write_db,
-                "DELETE FROM reorg_window WHERE chain_id=?1 AND block_number < ?2;");
+                "DELETE FROM reorg_window WHERE source_id=?1 AND block_number < ?2;");
 
-            sqlite3_bind_int(prune_reorg_stmt.get(), 1, chain_id);
+            sqlite3_bind_text(prune_reorg_stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
             sqlite3_bind_int64(prune_reorg_stmt.get(), 2, static_cast<sqlite3_int64>(floor));
 
             if (prune_reorg_stmt.step() != SQLITE_DONE)
@@ -1186,6 +1298,7 @@ namespace dcn::events
     }
 
     std::size_t SQLiteHotStore::pruneConsumedRaw(
+        const std::string & source_id,
         const std::int64_t watermark,
         const std::int64_t finalized_floor_block,
         const std::size_t batch_limit)
@@ -1196,19 +1309,20 @@ namespace dcn::events
         {
             storage::sqlite::Statement select_keys(
                 _write_db,
-                "SELECT chain_id, block_hash, log_index "
+                "SELECT block_hash, log_index "
                 "FROM normalized_events_hot "
-                "WHERE change_seq <= ?1 AND state IN ('finalized','removed') AND block_number <= ?2 "
+                "WHERE source_id=?1 AND change_seq <= ?2 AND state IN ('finalized','removed') AND block_number <= ?3 "
                 "AND dead_letter=0 "
-                "LIMIT ?3;");
+                "LIMIT ?4;");
 
             while (true)
             {
-                sqlite3_bind_int64(select_keys.get(), 1, static_cast<sqlite3_int64>(watermark));
-                sqlite3_bind_int64(select_keys.get(), 2, static_cast<sqlite3_int64>(finalized_floor_block));
-                sqlite3_bind_int64(select_keys.get(), 3, static_cast<sqlite3_int64>(batch_limit));
+                sqlite3_bind_text(select_keys.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+                sqlite3_bind_int64(select_keys.get(), 2, static_cast<sqlite3_int64>(watermark));
+                sqlite3_bind_int64(select_keys.get(), 3, static_cast<sqlite3_int64>(finalized_floor_block));
+                sqlite3_bind_int64(select_keys.get(), 4, static_cast<sqlite3_int64>(batch_limit));
 
-                struct PruneKey { int chain_id; std::string block_hash; std::int64_t log_index; };
+                struct PruneKey { std::string block_hash; std::int64_t log_index; };
                 std::vector<PruneKey> keys;
                 keys.reserve(batch_limit);
 
@@ -1216,9 +1330,8 @@ namespace dcn::events
                 while ((rc = select_keys.step()) == SQLITE_ROW)
                 {
                     PruneKey key{};
-                    key.chain_id = sqlite3_column_int(select_keys.get(), 0);
-                    key.block_hash = reinterpret_cast<const char*>(sqlite3_column_text(select_keys.get(), 1));
-                    key.log_index = static_cast<std::int64_t>(sqlite3_column_int64(select_keys.get(), 2));
+                    key.block_hash = reinterpret_cast<const char*>(sqlite3_column_text(select_keys.get(), 0));
+                    key.log_index = static_cast<std::int64_t>(sqlite3_column_int64(select_keys.get(), 1));
                     keys.push_back(std::move(key));
                 }
                 if (rc != SQLITE_DONE)
@@ -1242,14 +1355,14 @@ namespace dcn::events
                 {
                     storage::sqlite::Statement del_norm(
                         _write_db,
-                        "DELETE FROM normalized_events_hot WHERE chain_id=?1 AND block_hash=?2 AND log_index=?3;");
+                        "DELETE FROM normalized_events_hot WHERE source_id=?1 AND block_hash=?2 AND log_index=?3;");
                     storage::sqlite::Statement del_raw(
                         _write_db,
-                        "DELETE FROM raw_events_hot WHERE chain_id=?1 AND block_hash=?2 AND log_index=?3;");
+                        "DELETE FROM raw_events_hot WHERE source_id=?1 AND block_hash=?2 AND log_index=?3;");
 
                     for (const auto& key : keys)
                     {
-                        sqlite3_bind_int(del_norm.get(), 1, key.chain_id);
+                        sqlite3_bind_text(del_norm.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
                         sqlite3_bind_text(
                             del_norm.get(), 2, key.block_hash.c_str(),
                             static_cast<int>(key.block_hash.size()), SQLITE_TRANSIENT);
@@ -1261,7 +1374,7 @@ namespace dcn::events
                         sqlite3_reset(del_norm.get());
                         sqlite3_clear_bindings(del_norm.get());
 
-                        sqlite3_bind_int(del_raw.get(), 1, key.chain_id);
+                        sqlite3_bind_text(del_raw.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
                         sqlite3_bind_text(
                             del_raw.get(), 2, key.block_hash.c_str(),
                             static_cast<int>(key.block_hash.size()), SQLITE_TRANSIENT);
@@ -1308,12 +1421,12 @@ namespace dcn::events
         return total_pruned;
     }
 
-    std::int64_t SQLiteHotStore::loadHeadBlock(const int chain_id)
+    std::int64_t SQLiteHotStore::loadHeadBlock(const std::string & source_id)
     {
         storage::sqlite::Statement stmt(
             _write_db,
-            "SELECT head_block FROM finality_state WHERE chain_id=?1;");
-        sqlite3_bind_int(stmt.get(), 1, chain_id);
+            "SELECT head_block FROM finality_state WHERE source_id=?1;");
+        sqlite3_bind_text(stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
         if (stmt.step() == SQLITE_ROW)
         {
             return static_cast<std::int64_t>(sqlite3_column_int64(stmt.get(), 0));
@@ -1321,11 +1434,28 @@ namespace dcn::events
         return 0;
     }
 
+    FinalityCheckpoint SQLiteHotStore::loadFinalityCheckpoint(const std::string & source_id)
+    {
+        storage::sqlite::Statement stmt(
+            _write_db,
+            "SELECT finalized_block, finalized_hash FROM finality_state WHERE source_id=?1;");
+        sqlite3_bind_text(stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+        if (stmt.step() != SQLITE_ROW)
+        {
+            return FinalityCheckpoint{};
+        }
+        return FinalityCheckpoint{
+            .finalized_block = static_cast<std::int64_t>(sqlite3_column_int64(stmt.get(), 0)),
+            .finalized_hash = _columnTextOptional(stmt.get(), 1).value_or("")};
+    }
+
     bool SQLiteHotStore::_initializeHotSchema()
     {
         const bool schema_ok =
                 storage::sqlite::exec(_write_db,
                     "CREATE TABLE IF NOT EXISTS raw_events_hot ("
+                    "source_id TEXT NOT NULL,"
+                    "chain_namespace TEXT NOT NULL,"
                     "chain_id INTEGER NOT NULL,"
                     "block_hash TEXT NOT NULL,"
                     "log_index INTEGER NOT NULL,"
@@ -1344,10 +1474,12 @@ namespace dcn::events
                     "seen_at_ms INTEGER NOT NULL,"
                     "updated_at_ms INTEGER NOT NULL,"
                     "removed_at_ms INTEGER,"
-                    "PRIMARY KEY(chain_id, block_hash, log_index)"
+                    "PRIMARY KEY(source_id, block_hash, log_index)"
                     ");") &&
                 storage::sqlite::exec(_write_db,
                      "CREATE TABLE IF NOT EXISTS normalized_events_hot ("
+                    "source_id TEXT NOT NULL,"
+                    "chain_namespace TEXT NOT NULL,"
                     "chain_id INTEGER NOT NULL,"
                     "block_hash TEXT NOT NULL,"
                     "log_index INTEGER NOT NULL,"
@@ -1362,15 +1494,21 @@ namespace dcn::events
                     "entity_address TEXT NOT NULL,"
                     "args_count INTEGER,"
                     "format_hash TEXT,"
+                    "content_hash TEXT,"
+                    "metadata_hash TEXT,"
+                    "runtime_code_hash TEXT,"
+                    "entity_kind TEXT,"
+                    "old_owner TEXT,"
                     "state TEXT NOT NULL,"
                     "seen_at_ms INTEGER NOT NULL,"
                     "updated_at_ms INTEGER NOT NULL,"
                      "change_seq INTEGER NOT NULL DEFAULT 0,"
                      "dead_letter INTEGER NOT NULL DEFAULT 0,"
-                     "PRIMARY KEY(chain_id, block_hash, log_index)"
+                     "PRIMARY KEY(source_id, block_hash, log_index)"
                      ");") &&
                storage::sqlite::exec(_write_db,
                     "CREATE TABLE IF NOT EXISTS decode_failures_hot ("
+                    "source_id TEXT NOT NULL,"
                     "chain_id INTEGER NOT NULL,"
                     "block_hash TEXT NOT NULL,"
                     "log_index INTEGER NOT NULL,"
@@ -1380,36 +1518,34 @@ namespace dcn::events
                     "last_seen_at_ms INTEGER NOT NULL,"
                     "retryable INTEGER NOT NULL DEFAULT 1,"
                     "dead_letter INTEGER NOT NULL DEFAULT 0,"
-                    "PRIMARY KEY(chain_id, block_hash, log_index)"
+                    "PRIMARY KEY(source_id, block_hash, log_index)"
                     ");") &&
                storage::sqlite::exec(_write_db,
-                    "CREATE TABLE IF NOT EXISTS ingest_resume_state ("
-                    "chain_id INTEGER PRIMARY KEY,"
-                    "next_from_block INTEGER NOT NULL,"
-                    "updated_at_ms INTEGER NOT NULL"
-                    ");") &&
-               storage::sqlite::exec(_write_db,
-                    "CREATE TABLE IF NOT EXISTS local_ingest_resume_state ("
-                    "chain_id INTEGER PRIMARY KEY,"
-                    "next_seq INTEGER NOT NULL,"
+                    "CREATE TABLE IF NOT EXISTS source_resume ("
+                    "source_id TEXT PRIMARY KEY,"
+                    "cursor_kind TEXT NOT NULL CHECK(cursor_kind IN ('local_sequence','next_block')),"
+                    "next_cursor INTEGER NOT NULL,"
                     "updated_at_ms INTEGER NOT NULL"
                     ");") &&
                storage::sqlite::exec(_write_db,
                     "CREATE TABLE IF NOT EXISTS finality_state ("
-                    "chain_id INTEGER PRIMARY KEY,"
+                    "source_id TEXT PRIMARY KEY,"
+                    "chain_id INTEGER NOT NULL,"
                     "head_block INTEGER NOT NULL,"
                     "safe_block INTEGER NOT NULL,"
                     "finalized_block INTEGER NOT NULL,"
+                    "finalized_hash TEXT NOT NULL DEFAULT '',"
                     "updated_at_ms INTEGER NOT NULL"
                     ");") &&
                storage::sqlite::exec(_write_db,
                     "CREATE TABLE IF NOT EXISTS reorg_window ("
+                    "source_id TEXT NOT NULL,"
                     "chain_id INTEGER NOT NULL,"
                     "block_number INTEGER NOT NULL,"
                     "block_hash TEXT NOT NULL,"
                     "parent_hash TEXT,"
                     "seen_at_ms INTEGER NOT NULL,"
-                    "PRIMARY KEY(chain_id, block_number)"
+                    "PRIMARY KEY(source_id, block_number)"
                     ");") &&
                storage::sqlite::exec(_write_db,
                     "CREATE TABLE IF NOT EXISTS change_seq_state ("
@@ -1419,16 +1555,16 @@ namespace dcn::events
                storage::sqlite::exec(_write_db,
                     "INSERT OR IGNORE INTO change_seq_state(singleton, next_seq) VALUES(1, 1);") &&
                storage::sqlite::exec(_write_db,
-                    "CREATE INDEX IF NOT EXISTS idx_raw_chain_tx_log ON raw_events_hot(chain_id, tx_hash, log_index);") &&
-               storage::sqlite::exec(_write_db, "CREATE INDEX IF NOT EXISTS idx_raw_block ON raw_events_hot(chain_id, block_number);") &&
+                    "CREATE INDEX IF NOT EXISTS idx_raw_source_tx_log ON raw_events_hot(source_id, tx_hash, log_index);") &&
+               storage::sqlite::exec(_write_db, "CREATE INDEX IF NOT EXISTS idx_raw_source_state_block ON raw_events_hot(source_id, state, block_number);") &&
                storage::sqlite::exec(_write_db,
-                    "CREATE INDEX IF NOT EXISTS idx_norm_chain_tx_log ON normalized_events_hot(chain_id, tx_hash, "
+                    "CREATE INDEX IF NOT EXISTS idx_norm_source_tx_log ON normalized_events_hot(source_id, tx_hash, "
                     "log_index);") &&
                storage::sqlite::exec(_write_db,
-                    "CREATE INDEX IF NOT EXISTS idx_norm_chain_block ON normalized_events_hot(chain_id, block_number);") &&
+                    "CREATE INDEX IF NOT EXISTS idx_norm_source_state_block ON normalized_events_hot(source_id, state, block_number);") &&
                storage::sqlite::exec(_write_db,
                     "CREATE INDEX IF NOT EXISTS idx_decode_failures_retry "
-                    "ON decode_failures_hot(chain_id, dead_letter, retryable, last_seen_at_ms);") &&
+                    "ON decode_failures_hot(source_id, dead_letter, retryable, last_seen_at_ms);") &&
                storage::sqlite::exec(_write_db,
                    "CREATE INDEX IF NOT EXISTS idx_norm_change_seq ON normalized_events_hot(change_seq);");
 
@@ -1437,24 +1573,21 @@ namespace dcn::events
             return false;
         }
 
-        // dead_letter is declared in the CREATE TABLE for fresh databases; databases
-        // whose normalized_events_hot predates the column need it added here.
-        if (!_columnExists(_write_db, "normalized_events_hot", "dead_letter"))
-        {
-            if (!storage::sqlite::exec(
-                    _write_db,
-                    "ALTER TABLE normalized_events_hot ADD COLUMN dead_letter INTEGER NOT NULL DEFAULT 0;"))
-            {
-                return false;
-            }
-        }
-
-        // Partial index so the periodic dead-letter sweep never scans the full hot table.
-        // Created after the column is guaranteed to exist.
         if (!storage::sqlite::exec(
                 _write_db,
                 "CREATE INDEX IF NOT EXISTS idx_norm_dead_letter "
                 "ON normalized_events_hot(change_seq) WHERE dead_letter<>0;"))
+        {
+            return false;
+        }
+
+        // Scratch set of the log keys one range scan returned, used by
+        // _reconcileScannedRange. Connection-scoped, so it never touches the hot DB file.
+        if (!storage::sqlite::exec(
+                _write_db,
+                "CREATE TEMP TABLE IF NOT EXISTS scan_generation("
+                "block_hash TEXT NOT NULL, log_index INTEGER NOT NULL, "
+                "PRIMARY KEY(block_hash, log_index));"))
         {
             return false;
         }
@@ -1490,7 +1623,7 @@ namespace dcn::events
             std::format(
                 "SELECT {}"
                 "FROM normalized_events_hot n "
-                "JOIN raw_events_hot r ON r.chain_id=n.chain_id AND r.block_hash=n.block_hash AND r.log_index=n.log_index "
+                "JOIN raw_events_hot r ON r.source_id=n.source_id AND r.block_hash=n.block_hash AND r.log_index=n.log_index "
                 "WHERE n.change_seq > ?1 ORDER BY n.change_seq ASC LIMIT ?2;",
                 CHANGE_RECORD_COLUMNS).c_str());
 
@@ -1524,7 +1657,7 @@ namespace dcn::events
             std::format(
                 "SELECT {}"
                 "FROM normalized_events_hot n "
-                "JOIN raw_events_hot r ON r.chain_id=n.chain_id AND r.block_hash=n.block_hash AND r.log_index=n.log_index "
+                "JOIN raw_events_hot r ON r.source_id=n.source_id AND r.block_hash=n.block_hash AND r.log_index=n.log_index "
                 "WHERE n.dead_letter<>0 AND (n.dead_letter & ?1)<>0 "
                 "ORDER BY n.change_seq ASC LIMIT ?2;",
                 CHANGE_RECORD_COLUMNS).c_str());
@@ -1549,7 +1682,7 @@ namespace dcn::events
 
     bool SQLiteHotStore::markDeadLetter(
         const int projector_bit,
-        const int chain_id,
+        const std::string & source_id,
         const std::string & block_hash,
         const std::int64_t log_index)
     {
@@ -1558,10 +1691,10 @@ namespace dcn::events
             storage::sqlite::Statement stmt(
                 _write_db,
                 "UPDATE normalized_events_hot SET dead_letter = dead_letter | ?1 "
-                "WHERE chain_id=?2 AND block_hash=?3 AND log_index=?4;");
+                "WHERE source_id=?2 AND block_hash=?3 AND log_index=?4;");
 
             sqlite3_bind_int(stmt.get(), 1, projector_bit);
-            sqlite3_bind_int(stmt.get(), 2, chain_id);
+            sqlite3_bind_text(stmt.get(), 2, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt.get(), 3, block_hash.c_str(), static_cast<int>(block_hash.size()), SQLITE_TRANSIENT);
             sqlite3_bind_int64(stmt.get(), 4, static_cast<sqlite3_int64>(log_index));
 
@@ -1584,7 +1717,7 @@ namespace dcn::events
 
     bool SQLiteHotStore::clearDeadLetter(
         const int projector_bit,
-        const int chain_id,
+        const std::string & source_id,
         const std::string & block_hash,
         const std::int64_t log_index)
     {
@@ -1593,10 +1726,10 @@ namespace dcn::events
             storage::sqlite::Statement stmt(
                 _write_db,
                 "UPDATE normalized_events_hot SET dead_letter = dead_letter & ~?1 "
-                "WHERE chain_id=?2 AND block_hash=?3 AND log_index=?4;");
+                "WHERE source_id=?2 AND block_hash=?3 AND log_index=?4;");
 
             sqlite3_bind_int(stmt.get(), 1, projector_bit);
-            sqlite3_bind_int(stmt.get(), 2, chain_id);
+            sqlite3_bind_text(stmt.get(), 2, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt.get(), 3, block_hash.c_str(), static_cast<int>(block_hash.size()), SQLITE_TRANSIENT);
             sqlite3_bind_int64(stmt.get(), 4, static_cast<sqlite3_int64>(log_index));
 

@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <sqlite3.h>
@@ -29,7 +30,7 @@ namespace dcn::tests::events_harness
 {
     using json = nlohmann::json;
 
-    constexpr int CHAIN_ID = 1;
+    constexpr std::uint64_t CHAIN_ID = 1;
 
     template<class AwaitableT>
     auto runAwaitable(asio::io_context & io_context, AwaitableT awaitable)
@@ -53,8 +54,24 @@ namespace dcn::tests::events_harness
         std::filesystem::path feed_db;
         std::filesystem::path feed_archive_root;
 
+        TempEventsPaths() = default;
+
+        // Owns `root`: a moved-from value (such as a returned local the compiler did
+        // not elide) must not remove the directory its successor uses.
+        TempEventsPaths(TempEventsPaths && other) noexcept
+            : root(std::exchange(other.root, {}))
+            , hot_db(std::move(other.hot_db))
+            , feed_db(std::move(other.feed_db))
+            , feed_archive_root(std::move(other.feed_archive_root))
+        {
+        }
+        TempEventsPaths(const TempEventsPaths &) = delete;
+        TempEventsPaths & operator=(const TempEventsPaths &) = delete;
+        TempEventsPaths & operator=(TempEventsPaths &&) = delete;
+
         ~TempEventsPaths()
         {
+            if(root.empty()) return;
             std::error_code ec;
             std::filesystem::remove_all(root, ec);
         }
@@ -291,28 +308,91 @@ namespace dcn::tests::events_harness
         return std::string("0x") + evmc::hex(evmc::bytes_view{bytes.data(), bytes.size()});
     }
 
+    // ABI payload for {Transformation,Condition}Added
+    // (address caller, string name, address entityAddr, address owner, uint32 argsCount,
+    //  bytes32 contentHash, bytes32 metadataHash, bytes32 runtimeCodeHash)
     inline std::string encodeSimpleAddedEventDataV2(
         const chain::Address & caller,
         const std::string & name,
         const chain::Address & entity_address,
         const chain::Address & owner,
-        const std::uint32_t count)
+        const std::uint32_t count,
+        const std::uint8_t content_hash_fill = 0,
+        const std::uint8_t metadata_hash_fill = 0,
+        const std::uint8_t runtime_code_hash_fill = 0)
     {
         std::vector<std::uint8_t> out;
-        const auto name_tail = encodeStringTail(name);
+        const auto append = [&out](const std::vector<std::uint8_t> & word)
+        {
+            out.insert(out.end(), word.begin(), word.end());
+        };
 
-        const auto caller_word = encodeAddressWord(caller);
-        const auto name_offset_word = encodeUint256Word(160);
-        const auto entity_word = encodeAddressWord(entity_address);
-        const auto owner_word = encodeAddressWord(owner);
-        const auto count_word = encodeUint256Word(count);
+        append(encodeAddressWord(caller));
+        append(encodeUint256Word(8 * 32));
+        append(encodeAddressWord(entity_address));
+        append(encodeAddressWord(owner));
+        append(encodeUint256Word(count));
+        append(std::vector<std::uint8_t>(32, content_hash_fill));
+        append(std::vector<std::uint8_t>(32, metadata_hash_fill));
+        append(std::vector<std::uint8_t>(32, runtime_code_hash_fill));
+        append(encodeStringTail(name));
 
-        out.insert(out.end(), caller_word.begin(), caller_word.end());
-        out.insert(out.end(), name_offset_word.begin(), name_offset_word.end());
-        out.insert(out.end(), entity_word.begin(), entity_word.end());
-        out.insert(out.end(), owner_word.begin(), owner_word.end());
-        out.insert(out.end(), count_word.begin(), count_word.end());
-        out.insert(out.end(), name_tail.begin(), name_tail.end());
+        return toHexPrefixed(std::span<const std::uint8_t>(out.data(), out.size()));
+    }
+
+    inline std::vector<std::uint8_t> encodeBytes32Word(const std::uint8_t fill)
+    {
+        return std::vector<std::uint8_t>(32, fill);
+    }
+
+    // ABI payload for {Transformation,Condition,Connector}Removed
+    // (address caller, address owner, string name, address entityAddr, bytes32 contentHash, bytes32 metadataHash)
+    inline std::string encodeRemovedEventData(
+        const chain::Address & caller,
+        const chain::Address & owner,
+        const std::string & name,
+        const chain::Address & entity_address,
+        const std::uint8_t content_hash_fill,
+        const std::uint8_t metadata_hash_fill)
+    {
+        std::vector<std::uint8_t> out;
+        const auto append = [&out](const std::vector<std::uint8_t> & word)
+        {
+            out.insert(out.end(), word.begin(), word.end());
+        };
+
+        append(encodeAddressWord(caller));
+        append(encodeAddressWord(owner));
+        append(encodeUint256Word(6 * 32));
+        append(encodeAddressWord(entity_address));
+        append(encodeBytes32Word(content_hash_fill));
+        append(encodeBytes32Word(metadata_hash_fill));
+        append(encodeStringTail(name));
+
+        return toHexPrefixed(std::span<const std::uint8_t>(out.data(), out.size()));
+    }
+
+    // ABI payload for EntityOwnerChanged
+    // (uint8 kind, string name, address entityAddr, address oldOwner, address newOwner)
+    inline std::string encodeOwnerChangedEventData(
+        const std::uint8_t kind,
+        const std::string & name,
+        const chain::Address & entity_address,
+        const chain::Address & old_owner,
+        const chain::Address & new_owner)
+    {
+        std::vector<std::uint8_t> out;
+        const auto append = [&out](const std::vector<std::uint8_t> & word)
+        {
+            out.insert(out.end(), word.begin(), word.end());
+        };
+
+        append(encodeUint256Word(kind));
+        append(encodeUint256Word(5 * 32));
+        append(encodeAddressWord(entity_address));
+        append(encodeAddressWord(old_owner));
+        append(encodeAddressWord(new_owner));
+        append(encodeStringTail(name));
 
         return toHexPrefixed(std::span<const std::uint8_t>(out.data(), out.size()));
     }
@@ -364,7 +444,7 @@ namespace dcn::tests::events_harness
             log_index,
             hexBytes(block_hash_byte, 32),
             hexBytes(tx_hash_byte, 32),
-            topicForEvent("TransformationAdded(address,string,address,address,uint32)"),
+            topicForEvent("TransformationAdded(address,string,address,address,uint32,bytes32,bytes32,bytes32)"),
             "0x00",
             state == events::EventState::REMOVED,
             block_time,
@@ -406,20 +486,20 @@ namespace dcn::tests::events_harness
     inline bool awaitIngestBatch(
         asio::io_context & io_context,
         events::SQLiteHotStore & store,
-        const int chain_id,
+        const std::uint64_t chain_id,
         const std::vector<events::DecodedEvent> & events,
         const std::vector<events::ChainBlockInfo> & block_infos,
         const std::int64_t next_from_block,
         const std::int64_t now_ms)
     {
         (void)io_context;
-        return store.ingestBatch(chain_id, events, block_infos, next_from_block, now_ms);
+        return store.ingestBatch("local", chain_id, events, block_infos, next_from_block, now_ms);
     }
 
     inline bool awaitIngestBatch(
         asio::io_context & io_context,
         events::SQLiteHotStore & store,
-        const int chain_id,
+        const std::uint64_t chain_id,
         const std::vector<events::RawChainLog> & raw_events,
         const std::vector<events::DecodedEvent> & decoded_events,
         const std::vector<events::ChainBlockInfo> & block_infos,
@@ -428,25 +508,33 @@ namespace dcn::tests::events_harness
         const std::optional<std::uint64_t> next_local_seq = std::nullopt)
     {
         (void)io_context;
-        return store.ingestBatch(chain_id, raw_events, decoded_events, block_infos, next_from_block, now_ms, next_local_seq);
+        return store.ingestBatch(
+            "local",
+            next_local_seq ? events::CursorKind::LOCAL_SEQUENCE : events::CursorKind::NEXT_BLOCK,
+            chain_id,
+            raw_events,
+            decoded_events,
+            block_infos,
+            next_local_seq.value_or(static_cast<std::uint64_t>(next_from_block)),
+            now_ms);
     }
 
     inline bool awaitApplyFinality(
         asio::io_context & io_context,
         events::SQLiteHotStore & store,
-        const int chain_id,
+        const std::uint64_t chain_id,
         const events::FinalityHeights & heights,
         const std::int64_t now_ms,
         const std::size_t reorg_window_blocks)
     {
         (void)io_context;
-        return store.applyFinality(chain_id, heights, now_ms, reorg_window_blocks);
+        return store.applyFinality("local", chain_id, heights, now_ms, reorg_window_blocks);
     }
 
     inline bool awaitApplyFinality(
         asio::io_context & io_context,
         events::SQLiteHotStore & store,
-        const int chain_id,
+        const std::uint64_t chain_id,
         const std::int64_t head,
         const std::int64_t safe,
         const std::int64_t finalized,
@@ -455,6 +543,41 @@ namespace dcn::tests::events_harness
     {
         (void)io_context;
         return store.applyFinality(
+            "local",
+            chain_id,
+            events::FinalityHeights{head, safe, finalized},
+            now_ms,
+            reorg_window_blocks);
+    }
+
+    inline bool awaitIngestBatchForSource(
+        asio::io_context & io_context,
+        events::SQLiteHotStore & store,
+        const std::string & source_id,
+        const std::vector<events::DecodedEvent> & events,
+        const std::vector<events::ChainBlockInfo> & block_infos,
+        const std::uint64_t next_cursor,
+        const std::int64_t now_ms,
+        const std::uint64_t chain_id = CHAIN_ID)
+    {
+        (void)io_context;
+        return store.ingestBatch(source_id, chain_id, events, block_infos, next_cursor, now_ms);
+    }
+
+    inline bool awaitApplyFinalityForSource(
+        asio::io_context & io_context,
+        events::SQLiteHotStore & store,
+        const std::string & source_id,
+        const std::int64_t head,
+        const std::int64_t safe,
+        const std::int64_t finalized,
+        const std::int64_t now_ms,
+        const std::uint64_t chain_id = CHAIN_ID,
+        const std::size_t reorg_window_blocks = 2048)
+    {
+        (void)io_context;
+        return store.applyFinality(
+            source_id,
             chain_id,
             events::FinalityHeights{head, safe, finalized},
             now_ms,
@@ -476,40 +599,20 @@ namespace dcn::tests::events_harness
     inline bool awaitRunArchiveCycle(
         asio::io_context & io_context,
         feed::Feed & feed,
-        const int chain_id,
         const std::size_t hot_window_days,
         const std::int64_t now_ms)
     {
-        return runAwaitable(io_context, feed.runArchiveCycle(chain_id, hot_window_days, now_ms));
+        return runAwaitable(io_context, feed.runArchiveCycle(hot_window_days, now_ms));
     }
 
-    inline std::optional<std::int64_t> awaitLoadNextFromBlock(
+    inline std::optional<std::uint64_t> awaitLoadNextCursor(
         asio::io_context & io_context,
         events::SQLiteHotStore & store,
-        const int chain_id)
+        const events::CursorKind cursor_kind = events::CursorKind::NEXT_BLOCK,
+        const std::string & source_id = "local")
     {
         (void)io_context;
-        return store.loadNextFromBlock(chain_id);
-    }
-
-    inline std::optional<std::uint64_t> awaitLoadNextLocalSeq(
-        asio::io_context & io_context,
-        events::SQLiteHotStore & store,
-        const int chain_id)
-    {
-        (void)io_context;
-        return store.loadNextLocalSeq(chain_id);
-    }
-
-    inline bool awaitSaveNextLocalSeq(
-        asio::io_context & io_context,
-        events::SQLiteHotStore & store,
-        const int chain_id,
-        const std::uint64_t next_seq,
-        const std::int64_t now_ms)
-    {
-        (void)io_context;
-        return store.saveNextLocalSeq(chain_id, next_seq, now_ms);
+        return store.loadNextCursor(source_id, cursor_kind);
     }
 
     inline storage::sqlite::WalCheckpointStats awaitCheckpointWalPassive(

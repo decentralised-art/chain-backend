@@ -94,6 +94,9 @@ namespace dcn::pt
         std::map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> static_ri;
         // Per-dimension transformation defs, reconstructed from the log (key = dim id, value ordered as emitted).
         std::map<std::uint32_t, std::vector<TransformationDef>> transformations;
+        evmc::bytes32 content_hash{};
+        evmc::bytes32 metadata_hash{};
+        evmc::bytes32 runtime_code_hash{};
     };
 
     std::optional<ConnectorAddedEvent> decodeConnectorAddedEvent(

@@ -1,5 +1,7 @@
 #include "chain.hpp"
 
+#include <algorithm>
+
 #include "crypto.hpp"
 
 namespace dcn::chain
@@ -51,36 +53,10 @@ namespace dcn::chain
     }
 
 
-    std::uint32_t readUint32Padded(const std::vector<uint8_t>& bytes, std::size_t offset) {
-        // Read last 4 bytes of 32-byte ABI word
-        assert(offset + 32 <= bytes.size());
-        uint32_t value = 0;
-        for (int i = 28; i < 32; ++i) {
-            value = (value << 8) | bytes[offset + i];
-        }
-        return value;
-    }
-
-    std::uint32_t readUint32(const std::vector<std::uint8_t> & bytes, std::size_t offset) {
-        std::uint32_t value = 0;
-        for (std::size_t i = 0; i < 4; ++i) {
-            value <<= 8;
-            value |= bytes[offset + i];
-        }
-        return value;
-    }
-
-    std::uint64_t readOffset(const std::vector<std::uint8_t> & bytes, std::size_t offset) {
-        std::size_t return_offset = 0;
-        for (int i = 0; i < 32; ++i)
-            return_offset = (return_offset << 8) | bytes[offset + i];
-        return_offset += 32;
-        return return_offset;
-    }
-
     std::optional<std::size_t> readWordAsSizeT(const std::uint8_t* data, std::size_t data_size, std::size_t offset)
     {
-        if(data == nullptr || offset + 32 > data_size)
+        // Offsets come from untrusted ABI data; `offset + 32` could wrap around.
+        if(data == nullptr || offset > data_size || data_size - offset < 32)
         {
             return std::nullopt;
         }
@@ -166,7 +142,7 @@ namespace dcn::chain
         for(std::size_t i = 0; i < length; ++i)
         {
             const auto rel_offset_res = readWordAsSizeT(data, data_size, head_start + i * 32);
-            if(!rel_offset_res)
+            if(!rel_offset_res || *rel_offset_res > data_size - head_start)
             {
                 return std::nullopt;
             }
@@ -296,4 +272,19 @@ namespace dcn::chain
         return out;
     }
 
+    std::optional<std::string> decodeRevertReason(const std::span<const std::uint8_t> revert_data)
+    {
+        static const std::vector<std::uint8_t> ERROR_SELECTOR = constructSelector("Error(string)");
+        if(revert_data.size() < ERROR_SELECTOR.size()
+           || !std::equal(ERROR_SELECTOR.begin(), ERROR_SELECTOR.end(), revert_data.begin()))
+        {
+            return std::nullopt;
+        }
+
+        const std::uint8_t * payload = revert_data.data() + ERROR_SELECTOR.size();
+        const std::size_t payload_size = revert_data.size() - ERROR_SELECTOR.size();
+        const auto reason_offset = readWordAsSizeT(payload, payload_size, 0);
+        if(!reason_offset) return std::nullopt;
+        return decodeAbiString(payload, payload_size, *reason_offset);
+    }
 }

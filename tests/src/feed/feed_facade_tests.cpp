@@ -12,7 +12,7 @@ TEST_F(UnitTest, Feed_Facade_ApplyChangeThenQueryViaStrand)
 {
     const auto paths = makeTempEventsPaths("feed_facade");
     asio::io_context io;
-    dcn::feed::Feed feed(io, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    dcn::feed::Feed feed(io, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     dcn::events::ChangeRecord row;
     row.chain_id = CHAIN_ID;

@@ -73,7 +73,7 @@ namespace dcn::feed
                 // chain event data is lost.
                 co_await async::ensureOnStrand(_write_strand);
                 if(!_store.markDeadLetter(
-                    events::FEED_DEAD_LETTER_BIT, row.chain_id, row.block_hash, row.log_index))
+                    events::FEED_DEAD_LETTER_BIT, row.source_id, row.block_hash, row.log_index))
                 {
                     // The quarantine could not be made durable; advancing now would let
                     // pruning delete the row, so keep the cursor parked and retry.
@@ -146,7 +146,7 @@ namespace dcn::feed
 
             co_await async::ensureOnStrand(_write_strand);
             if(_store.clearDeadLetter(
-                events::FEED_DEAD_LETTER_BIT, row.chain_id, row.block_hash, row.log_index))
+                events::FEED_DEAD_LETTER_BIT, row.source_id, row.block_hash, row.log_index))
             {
                 spdlog::info("FeedProjector: dead-lettered change_seq={} resolved "
                     "(block={} log_index={} event_type='{}')",

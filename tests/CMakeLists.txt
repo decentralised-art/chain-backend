@@ -101,6 +101,8 @@ add_executable("${UNIT_TEST_TARGET}"
     "src/pt/execute.cpp"
     "src/pt/initial_deployment.cpp"
     "src/pt/deploy_entities.cpp"
+    "src/pt/publication.cpp"
+    "src/pt/artifact.cpp"
     "src/pt/format.cpp"
     "src/api_format.cpp"
     "src/api_formats.cpp"
@@ -110,6 +112,14 @@ add_executable("${UNIT_TEST_TARGET}"
     "src/db_first_runtime.cpp"
     "src/pt/proxy_upgrade.cpp"
     "src/registry.cpp"
+    "src/registry_store_schema.cpp"
+    "src/api_publish.cpp"
+    "src/chain_abi.cpp"
+    "src/native_process.cpp"
+    "src/evm_storage.cpp"
+
+    # --- rpc module test files ---
+    "src/rpc/http_transport_tests.cpp"
 
     # --- events module test files ---
     "src/events/decoder_tests.cpp"
@@ -123,8 +133,13 @@ add_executable("${UNIT_TEST_TARGET}"
     "src/events/concurrency_backpressure_tests.cpp"
     "src/events/maintenance_wal_integrity_tests.cpp"
     "src/events/source_adapter_tests.cpp"
+    "src/events/rpc_source_tests.cpp"
     "src/events/registry_projection_tests.cpp"
+    "src/events/registry_source_precedence_tests.cpp"
     "src/events/registry_e2e_tests.cpp"
+
+    # --- publish module test files ---
+    "src/publish/publish_tests.cpp"
 
     # --- feed module test files ---
     "src/feed/feed_store_tests.cpp"

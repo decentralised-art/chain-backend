@@ -9,7 +9,7 @@ namespace dcn::events
     {
     }
 
-    EventShardId MonthlyEventShardRouter::shardForFinalizedBlockTime(const int chain_id, const std::int64_t unix_seconds) const
+    EventShardId MonthlyEventShardRouter::shardForFinalizedBlockTime(const std::uint64_t chain_id, const std::int64_t unix_seconds) const
     {
         std::time_t tt = static_cast<std::time_t>(unix_seconds);
         std::tm tm_utc{};

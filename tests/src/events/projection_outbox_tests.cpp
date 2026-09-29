@@ -13,7 +13,7 @@ TEST_F(UnitTest, Events_Projector_TwoStage_IngestDoesNotPublishBeforeProjection)
     const auto paths = makeTempEventsPaths("project_two_stage");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(60, 0, 1, 0xB0, 0xD0, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'000'500);
     const events::ChainBlockInfo block = makeBlockInfo(60, event.raw.block_hash, hexBytes(0x91, 32), 1'700'000'500, 1'700'000'501'000);
@@ -28,7 +28,7 @@ TEST_F(UnitTest, Events_Projector_ProjectBatch_WritesFeedAndOutboxAndClearsJobs)
     const auto paths = makeTempEventsPaths("project_batch");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(61, 1, 2, 0xB1, 0xD1, events::EventType::TRANSFORMATION_ADDED, events::EventState::OBSERVED, 1'700'000'510);
     const events::ChainBlockInfo block = makeBlockInfo(61, event.raw.block_hash, hexBytes(0x90, 32), 1'700'000'510, 1'700'000'511'000);
@@ -52,7 +52,7 @@ TEST_F(UnitTest, Events_Projector_RepeatedRuns_AreIdempotentWithoutNewJobs)
     const auto paths = makeTempEventsPaths("project_idempotent");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(62, 1, 3, 0xB2, 0xD2, events::EventType::CONDITION_ADDED, events::EventState::OBSERVED, 1'700'000'520);
     const events::ChainBlockInfo block = makeBlockInfo(62, event.raw.block_hash, hexBytes(0x8F, 32), 1'700'000'520, 1'700'000'521'000);
@@ -71,7 +71,7 @@ TEST_F(UnitTest, Events_Projector_RequeuedNoopJobs_AreFullyDrainedAcrossBatches)
     const auto paths = makeTempEventsPaths("project_requeued_noop_jobs");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     std::vector<events::DecodedEvent> events_batch;
     std::vector<events::ChainBlockInfo> blocks_batch;
@@ -125,7 +125,7 @@ TEST_F(UnitTest, Events_Projector_RestartAfterDurableIngest_ProjectsPendingJobs)
     {
         asio::io_context store_io_context;
         events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-        feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+        feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
         EXPECT_EQ(projectAll(store_io_context, store, feed_obj, 1'700'000'532'000), 1u);
     }
 
@@ -138,7 +138,7 @@ TEST_F(UnitTest, Events_Projector_FinalityTransition_EmitsUpdateOutboxItem)
     const auto paths = makeTempEventsPaths("project_finality_update");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(64, 0, 1, 0xB4, 0xD4, events::EventType::TRANSFORMATION_ADDED, events::EventState::OBSERVED, 1'700'000'540);
     const events::ChainBlockInfo block = makeBlockInfo(64, event.raw.block_hash, hexBytes(0x8D, 32), 1'700'000'540, 1'700'000'541'000);
@@ -171,7 +171,7 @@ TEST_F(UnitTest, Events_Projector_DuplicateJob_DoesNotResetFeedExportedFlag)
     const auto paths = makeTempEventsPaths("project_duplicate_job_preserves_exported");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
         140,
@@ -199,7 +199,7 @@ TEST_F(UnitTest, Events_Projector_DuplicateJob_DoesNotResetFeedExportedFlag)
     ASSERT_TRUE(awaitApplyFinality(store_io_context, store, CHAIN_ID, heights, 1'700'020'000'400, 2048));
     EXPECT_EQ(projectAll(store_io_context, store, feed_obj, 1'700'020'000'500), 1u);
 
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 36500, 1'700'020'010'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 36500, 1'700'020'010'000));
 
     {
         // Simulate re-projection by resetting feed_cursor to 0, then re-projecting.
@@ -222,7 +222,7 @@ TEST_F(UnitTest, Events_Projector_StreamSeq_RemainsMonotonicAcrossPruneAndRestar
     {
         asio::io_context store_io_context;
         events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-        feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 10, CHAIN_ID);
+        feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 10);
         const events::DecodedEvent first =
             makeDecodedEvent(90, 0, 1, 0xC8, 0xE8, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'000'900);
         const events::ChainBlockInfo first_block =
@@ -238,7 +238,7 @@ TEST_F(UnitTest, Events_Projector_StreamSeq_RemainsMonotonicAcrossPruneAndRestar
     {
         asio::io_context restarted_io_context;
         events::SQLiteHotStore restarted(paths.hot_db, CHAIN_ID);
-        feed::Feed feed_obj(restarted_io_context, paths.feed_db, paths.feed_archive_root, 10, CHAIN_ID);
+        feed::Feed feed_obj(restarted_io_context, paths.feed_db, paths.feed_archive_root, 10);
         const events::DecodedEvent second = makeDecodedEvent(
             91,
             0,
@@ -270,7 +270,7 @@ TEST_F(UnitTest, Events_Projector_ReplayedLocalEmission_DeduplicatesByTypeNameOw
     const auto paths = makeTempEventsPaths("project_replayed_local_dedup");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     events::DecodedEvent first = makeDecodedEvent(
         300,
@@ -357,7 +357,7 @@ TEST_F(UnitTest, Events_Projector_OrphanJobs_AreCleanedBeforeProjection)
     const auto paths = makeTempEventsPaths("project_orphan_cleanup");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     // With no ingested events, projectBatch must return 0.
     EXPECT_EQ(awaitProjectBatch(store_io_context, store, feed_obj, 64, 1'700'000'000'500), 0u);
@@ -414,7 +414,7 @@ TEST_F(UnitTest, Events_FeedProjector_ConsumesChangelogAndAdvancesCursor)
     const auto paths = makeTempEventsPaths("feed_changelog");
     asio::io_context io;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(io, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(io, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
     auto strand = asio::make_strand(io);
     feed::FeedProjector proj(store, feed_obj, strand);
     auto ev = makeDecodedEvent(60,0,1,0xB0,0xD0, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'000'500);
@@ -434,7 +434,7 @@ TEST_F(UnitTest, Events_FeedProjector_OutboxMaintenance_PrunesOldRowsAndAdvances
     asio::io_context io;
     // retention = 10 ms — any row older than 10 ms is pruned
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(io, paths.feed_db, paths.feed_archive_root, 10, CHAIN_ID);
+    feed::Feed feed_obj(io, paths.feed_db, paths.feed_archive_root, 10);
     auto strand = asio::make_strand(io);
     feed::FeedProjector proj(store, feed_obj, strand);
 

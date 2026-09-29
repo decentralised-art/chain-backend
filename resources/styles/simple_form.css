@@ -382,6 +382,18 @@ h3 {
     line-height: 1.35;
 }
 
+.publish-status {
+    margin: 0.2rem 0 0.6rem;
+    color: var(--ink-soft);
+    font-size: 0.85rem;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+.publish-status.is-error {
+    color: #b42318;
+}
+
 label {
     display: block;
     width: 100%;

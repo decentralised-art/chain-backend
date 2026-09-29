@@ -20,7 +20,7 @@ namespace dcn::feed
 
     struct CursorKey
     {
-        int chain_id = 1;
+        std::uint64_t chain_id = 1;
         std::string chain_namespace = "local";
         std::int64_t created_at_ms = 0;
         std::int64_t block_number = 0;

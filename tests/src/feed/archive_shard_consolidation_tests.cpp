@@ -67,13 +67,13 @@ TEST_F(UnitTest, Feed_ArchiveShard_ExportProducesSingleFileNoWalShm)
     const auto paths = makeTempEventsPaths("archive_shard_single_file");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
         500, 0, 1, 0xC0, 0x50, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'001'000);
     finalizeAndProject(store_io_context, store, feed_obj, event, 1'700'001'000'200);
 
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 36500, 1'700'001'100'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 36500, 1'700'001'100'000));
 
     const std::filesystem::path shard = readyShardPath(paths.feed_db);
     expectSingleFileShard(shard);
@@ -89,13 +89,13 @@ TEST_F(UnitTest, Feed_ArchiveShard_ReExportKeepsSingleFile)
     const auto paths = makeTempEventsPaths("archive_shard_reexport");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
         510, 0, 1, 0xC1, 0x51, events::EventType::TRANSFORMATION_ADDED, events::EventState::OBSERVED, 1'700'001'000);
     finalizeAndProject(store_io_context, store, feed_obj, event, 1'700'001'000'200);
 
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 36500, 1'700'001'100'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 36500, 1'700'001'100'000));
     const std::filesystem::path shard = readyShardPath(paths.feed_db);
     expectSingleFileShard(shard);
 
@@ -104,7 +104,7 @@ TEST_F(UnitTest, Feed_ArchiveShard_ReExportKeepsSingleFile)
         SqliteWritable fdb(paths.feed_db);
         fdb.exec("UPDATE feed_items_hot SET exported=0 WHERE chain_id=1;");
     }
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 36500, 1'700'001'200'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 36500, 1'700'001'200'000));
 
     expectSingleFileShard(shard);
     {
@@ -122,13 +122,13 @@ TEST_F(UnitTest, Feed_ArchiveShard_ReadAsSoleSourceLeavesNoSidecars)
     const auto paths = makeTempEventsPaths("archive_shard_read_sole_source");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
         520, 0, 1, 0xC2, 0x52, events::EventType::CONDITION_ADDED, events::EventState::OBSERVED, 1'700'001'000);
     finalizeAndProject(store_io_context, store, feed_obj, event, 1'700'001'000'200);
 
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 36500, 1'700'001'100'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 36500, 1'700'001'100'000));
     const std::filesystem::path shard = readyShardPath(paths.feed_db);
     expectSingleFileShard(shard);
 

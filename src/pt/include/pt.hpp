@@ -10,6 +10,8 @@
 #include "condition.hpp"
 #include "execute.hpp"
 #include "particles.hpp"
+#include "publication.hpp"
+#include "artifact.hpp"
 #include "error.hpp"
 #include "crypto.hpp"
 

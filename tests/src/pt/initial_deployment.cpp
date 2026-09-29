@@ -1,11 +1,14 @@
 #include "unit-tests.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <format>
 #include <future>
 #include <mutex>
 #include <ranges>
+#include <string_view>
+#include <vector>
 
 #ifndef DECENTRALISED_ART_TEST_BINARY_DIR
     #error "DECENTRALISED_ART_TEST_BINARY_DIR is not defined"
@@ -24,6 +27,15 @@ using namespace dcn::tests;
 
 namespace
 {
+    template<class AwaitableT>
+    auto runAwaitable(asio::io_context & io_context, AwaitableT awaitable)
+    {
+        auto future = asio::co_spawn(io_context, std::move(awaitable), asio::use_future);
+        io_context.restart();
+        io_context.run();
+        return future.get();
+    }
+
     struct PTBootstrapSnapshot
     {
         bool success = false;
@@ -33,6 +45,13 @@ namespace
         chain::Address runner_address{};
         chain::Address registry_owner{};
         chain::Address runner_owner{};
+        chain::Address runner_registry{};
+        std::vector<std::uint8_t> registry_protocol_id;
+        std::vector<std::uint8_t> runner_protocol_id;
+        std::uint64_t registry_protocol_version = 0;
+        std::uint64_t runner_protocol_version = 0;
+        bool registry_rejected_zero_owner = false;
+        bool runner_rejected_zero_owner = false;
     };
 
     bool isZeroAddress(const chain::Address & address)
@@ -130,6 +149,66 @@ namespace
 
             snapshot.registry_owner = registry_owner_address_res.value();
             snapshot.runner_owner = runner_owner_address_res.value();
+
+            const auto call = [&](const chain::Address & address, const std::string & signature)
+            {
+                return runAwaitable(io_context, evm.execute(
+                    expectedGenesisAddress(),
+                    address,
+                    chain::constructSelector(signature),
+                    evm::DEFAULT_GAS_LIMIT,
+                    0));
+            };
+
+            const auto registry_id = call(snapshot.registry_address, "protocolId()");
+            const auto runner_id = call(snapshot.runner_address, "protocolId()");
+            const auto registry_version = call(snapshot.registry_address, "protocolVersion()");
+            const auto runner_version = call(snapshot.runner_address, "protocolVersion()");
+            const auto runner_registry = call(snapshot.runner_address, "registry()");
+            if(!registry_id || !runner_id || !registry_version || !runner_version || !runner_registry)
+            {
+                snapshot.error_message = "Failed to read PT protocol identity";
+                return snapshot;
+            }
+            if(registry_id->size() != 32 || runner_id->size() != 32 ||
+                registry_version->size() != 32 || runner_version->size() != 32 ||
+                runner_registry->size() != 32)
+            {
+                snapshot.error_message = "Invalid PT protocol identity response";
+                return snapshot;
+            }
+
+            const auto runner_registry_address = chain::readAddressWord(*runner_registry);
+            if(!runner_registry_address)
+            {
+                snapshot.error_message = "Failed to decode runner registry address";
+                return snapshot;
+            }
+
+            snapshot.registry_protocol_id = *registry_id;
+            snapshot.runner_protocol_id = *runner_id;
+            snapshot.registry_protocol_version = chain::readUint256(*registry_version, 0);
+            snapshot.runner_protocol_version = chain::readUint256(*runner_version, 0);
+            snapshot.runner_registry = *runner_registry_address;
+
+            std::vector<std::uint8_t> change_owner_input = chain::constructSelector("changeOwner(address)");
+            change_owner_input.resize(change_owner_input.size() + 32, 0);
+            const auto registry_zero_owner = runAwaitable(io_context, evm.execute(
+                expectedGenesisAddress(),
+                snapshot.registry_address,
+                change_owner_input,
+                evm::DEFAULT_GAS_LIMIT,
+                0));
+            const auto runner_zero_owner = runAwaitable(io_context, evm.execute(
+                expectedGenesisAddress(),
+                snapshot.runner_address,
+                std::move(change_owner_input),
+                evm::DEFAULT_GAS_LIMIT,
+                0));
+            snapshot.registry_rejected_zero_owner = !registry_zero_owner &&
+                registry_zero_owner.error().kind == chain::ExecuteError::Kind::TRANSACTION_REVERTED;
+            snapshot.runner_rejected_zero_owner = !runner_zero_owner &&
+                runner_zero_owner.error().kind == chain::ExecuteError::Kind::TRANSACTION_REVERTED;
             snapshot.success = true;
         }
         catch(const std::exception & e)
@@ -171,4 +250,34 @@ TEST_F(UnitTest, PT_InitialDeployment_SetsGenesisOwnerForCoreContracts)
     const auto expected_owner = expectedGenesisAddress();
     EXPECT_EQ(snapshot.registry_owner, expected_owner);
     EXPECT_EQ(snapshot.runner_owner, expected_owner);
+}
+
+TEST_F(UnitTest, PT_InitialDeployment_ExposesMatchingProtocolIdentity)
+{
+    const auto & snapshot = getPTBootstrapSnapshot();
+    ASSERT_TRUE(snapshot.success) << snapshot.error_message;
+    ASSERT_EQ(snapshot.registry_protocol_id.size(), 32u);
+    EXPECT_EQ(snapshot.registry_protocol_id, snapshot.runner_protocol_id);
+
+    evmc::bytes32 expected_id{};
+    constexpr std::string_view protocol_name = "hypermusic.pt";
+    crypto::Keccak256::getHash(
+        reinterpret_cast<const std::uint8_t*>(protocol_name.data()),
+        protocol_name.size(),
+        expected_id.bytes);
+    EXPECT_TRUE(std::equal(
+        snapshot.registry_protocol_id.begin(),
+        snapshot.registry_protocol_id.end(),
+        expected_id.bytes));
+    EXPECT_EQ(snapshot.registry_protocol_version, 1u);
+    EXPECT_EQ(snapshot.registry_protocol_version, snapshot.runner_protocol_version);
+    EXPECT_EQ(snapshot.runner_registry, snapshot.registry_address);
+}
+
+TEST_F(UnitTest, PT_OwnableBase_RejectsZeroOwner)
+{
+    const auto & snapshot = getPTBootstrapSnapshot();
+    ASSERT_TRUE(snapshot.success) << snapshot.error_message;
+    EXPECT_TRUE(snapshot.registry_rejected_zero_owner);
+    EXPECT_TRUE(snapshot.runner_rejected_zero_owner);
 }

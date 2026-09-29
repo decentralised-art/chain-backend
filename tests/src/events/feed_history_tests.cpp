@@ -14,30 +14,37 @@ namespace
         events::SQLiteHotStore & store,
         feed::Feed & feed,
         const events::DecodedEvent & event,
-        const std::int64_t now_ms)
+        const std::int64_t now_ms,
+        const std::string & source_id = "local",
+        const std::uint64_t chain_id = CHAIN_ID)
     {
-        const events::ChainBlockInfo block = makeBlockInfo(
+        events::ChainBlockInfo block = makeBlockInfo(
             event.raw.block_number,
             event.raw.block_hash,
             hexBytes(0x70, 32),
             event.raw.block_time.value_or(0),
             now_ms - 30);
-        ASSERT_TRUE(awaitIngestBatch(
+        block.chain_id = chain_id;
+        ASSERT_TRUE(awaitIngestBatchForSource(
             store_io_context,
             store,
-            CHAIN_ID,
+            source_id,
             {event},
             {block},
-            event.raw.block_number + 1,
-            now_ms - 20));
+            static_cast<std::uint64_t>(event.raw.block_number + 1),
+            now_ms - 20,
+            chain_id));
         EXPECT_EQ(projectAll(store_io_context, store, feed, now_ms - 10), 1u);
 
-        const events::FinalityHeights heights{
-            .head = event.raw.block_number + 100,
-            .safe = event.raw.block_number,
-            .finalized = event.raw.block_number
-        };
-        ASSERT_TRUE(awaitApplyFinality(store_io_context, store, CHAIN_ID, heights, now_ms, 2048));
+        ASSERT_TRUE(awaitApplyFinalityForSource(
+            store_io_context,
+            store,
+            source_id,
+            event.raw.block_number + 100,
+            event.raw.block_number,
+            event.raw.block_number,
+            now_ms,
+            chain_id));
         EXPECT_EQ(projectAll(store_io_context, store, feed, now_ms + 10), 1u);
     }
 }
@@ -47,7 +54,7 @@ TEST_F(UnitTest, Events_History_HotFeedRead_PrefersHotRows)
     const auto paths = makeTempEventsPaths("history_hot_first");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent first = makeDecodedEvent(90, 0, 1, 0xE0, 0x20, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'000'800);
     const events::DecodedEvent second = makeDecodedEvent(91, 0, 1, 0xE1, 0x21, events::EventType::TRANSFORMATION_ADDED, events::EventState::OBSERVED, 1'700'000'801);
@@ -73,12 +80,12 @@ TEST_F(UnitTest, Events_History_HotFeedRead_PrefersHotRows)
     EXPECT_EQ(page.items.at(1).block_number, 90);
 }
 
-TEST_F(UnitTest, Events_History_HotFeedRead_FiltersByDefaultChainId)
+TEST_F(UnitTest, Events_History_HotFeedRead_ServesEverySourceInOnePage)
 {
     const auto paths = makeTempEventsPaths("history_chain_filter");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent chain_one_event = makeDecodedEvent(
         100,
@@ -132,20 +139,34 @@ TEST_F(UnitTest, Events_History_HotFeedRead_FiltersByDefaultChainId)
 
     EXPECT_EQ(projectAll(store_io_context, store, feed_obj, 1'700'200'000'300), 2u);
 
+    // Both rows were projected at the same time, so block number orders them; each
+    // keeps its own chain in its id.
     const feed::FeedPage page = feed_obj.getFeedPage(feed::FeedQuery{
         .limit = 10,
         .include_unfinalized = true
     });
-    ASSERT_EQ(page.items.size(), 1u);
-    EXPECT_EQ(page.items.front().block_number, 100);
-    EXPECT_EQ(page.items.front().feed_id.rfind("local:1:", 0), 0u);
+    ASSERT_EQ(page.items.size(), 2u);
+    EXPECT_EQ(page.items[0].block_number, 200);
+    EXPECT_EQ(page.items[0].feed_id.rfind("local:2:", 0), 0u);
+    EXPECT_EQ(page.items[1].block_number, 100);
+    EXPECT_EQ(page.items[1].feed_id.rfind("local:1:", 0), 0u);
 
-    const feed::FeedPage cross_chain_cursor_page = feed_obj.getFeedPage(feed::FeedQuery{
-        .limit = 10,
-        .before_cursor = std::string("c999:0:0:local:2:deadbeef:1"),
+    // A cursor taken on one chain's item pages on into the other chain's items.
+    const feed::FeedPage first = feed_obj.getFeedPage(feed::FeedQuery{
+        .limit = 1,
         .include_unfinalized = true
     });
-    EXPECT_TRUE(cross_chain_cursor_page.items.empty());
+    ASSERT_EQ(first.items.size(), 1u);
+    ASSERT_TRUE(first.next_before_cursor.has_value());
+
+    const feed::FeedPage second = feed_obj.getFeedPage(feed::FeedQuery{
+        .limit = 1,
+        .before_cursor = first.next_before_cursor,
+        .include_unfinalized = true
+    });
+    ASSERT_EQ(second.items.size(), 1u);
+    EXPECT_EQ(second.items.front().feed_id, page.items[1].feed_id);
+    EXPECT_FALSE(second.has_more);
 }
 
 TEST_F(UnitTest, Events_History_DedupesAcrossHotAndArchive_ByFeedId)
@@ -153,12 +174,12 @@ TEST_F(UnitTest, Events_History_DedupesAcrossHotAndArchive_ByFeedId)
     const auto paths = makeTempEventsPaths("history_dedupe_hot_archive");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent finalized = makeDecodedEvent(92, 0, 1, 0xE2, 0x22, events::EventType::CONDITION_ADDED, events::EventState::OBSERVED, 1'700'000'802);
     ingestProjectFinalize(store_io_context, store, feed_obj, finalized, 1'700'000'802'200);
 
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 36500, 1'700'000'900'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 36500, 1'700'000'900'000));
 
     events_sql::expectRowCount(paths.feed_db, "feed_items_hot", 1);
     {
@@ -174,16 +195,59 @@ TEST_F(UnitTest, Events_History_DedupesAcrossHotAndArchive_ByFeedId)
     EXPECT_EQ(page.items.front().status, "finalized");
 }
 
+// Every chain's rows are archived and read back; a cursor taken on one chain's archived
+// row pages on into another chain's, whatever their block numbers.
+TEST_F(UnitTest, Events_History_ArchiveServesEveryChainAcrossCursorPages)
+{
+    const auto paths = makeTempEventsPaths("history_archive_every_chain");
+    asio::io_context store_io_context;
+    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
+
+    const events::DecodedEvent chain_one = makeDecodedEvent(
+        100, 0, 1, 0xA0, 0xB0, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'000'000);
+    ingestProjectFinalize(store_io_context, store, feed_obj, chain_one, 1'700'000'000'500);
+
+    const events::DecodedEvent chain_two = makeDecodedEvent(
+        5'000'000, 0, 1, 0xA1, 0xB1, events::EventType::TRANSFORMATION_ADDED, events::EventState::OBSERVED, 1'700'000'100);
+    ingestProjectFinalize(store_io_context, store, feed_obj, chain_two, 1'700'000'100'500, "second_chain", 2);
+
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 0, 1'900'000'000'000));
+    events_sql::expectRowCount(paths.feed_db, "feed_items_hot", 0);
+    {
+        SqliteReadonly fdb(paths.feed_db);
+        EXPECT_EQ(fdb.scalarInt64("SELECT COUNT(DISTINCT chain_id) FROM shard_catalog WHERE state='READY';"), 2);
+    }
+
+    // Chain two's row was projected later, so it comes first.
+    const feed::FeedPage first = feed_obj.getFeedPage(feed::FeedQuery{
+        .limit = 1,
+        .include_unfinalized = false
+    });
+    ASSERT_EQ(first.items.size(), 1u);
+    EXPECT_EQ(first.items.front().feed_id.rfind("local:2:", 0), 0u);
+    ASSERT_TRUE(first.next_before_cursor.has_value());
+
+    const feed::FeedPage second = feed_obj.getFeedPage(feed::FeedQuery{
+        .limit = 1,
+        .before_cursor = first.next_before_cursor,
+        .include_unfinalized = false
+    });
+    ASSERT_EQ(second.items.size(), 1u);
+    EXPECT_EQ(second.items.front().feed_id.rfind("local:1:", 0), 0u);
+    EXPECT_FALSE(second.has_more);
+}
+
 TEST_F(UnitTest, Events_History_OrderingAcrossHotArchiveBoundary_IsCanonical)
 {
     const auto paths = makeTempEventsPaths("history_boundary_order");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent older = makeDecodedEvent(93, 0, 1, 0xE3, 0x23, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'000'803);
     ingestProjectFinalize(store_io_context, store, feed_obj, older, 1'700'000'803'200);
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 0, 1'900'000'000'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 0, 1'900'000'000'000));
 
     events_sql::expectRowCount(paths.feed_db, "feed_items_hot", 0);
 
@@ -212,7 +276,7 @@ TEST_F(UnitTest, Events_History_OrderingUsesCreatedAtMsAndCursorPaginatesByIt)
     const auto paths = makeTempEventsPaths("history_updated_at_order");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent high_block_first = makeDecodedEvent(
         200,
@@ -288,7 +352,7 @@ TEST_F(UnitTest, Events_History_OrderingReadsArchiveEvenWhenHotExceedsLimit)
     const auto paths = makeTempEventsPaths("history_archive_scan_with_hot_limit");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const std::int64_t archived_projected_at_ms = 1'700'400'000'200;
     const std::int64_t hot_projected_before_archive_ms = archived_projected_at_ms - 1000;
@@ -303,7 +367,7 @@ TEST_F(UnitTest, Events_History_OrderingReadsArchiveEvenWhenHotExceedsLimit)
         events::EventState::OBSERVED,
         1'700'400'000);
     ingestProjectFinalize(store_io_context, store, feed_obj, archived_top, archived_projected_at_ms);
-    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, CHAIN_ID, 0, 1'900'000'000'000));
+    ASSERT_TRUE(awaitRunArchiveCycle(store_io_context, feed_obj, 0, 1'900'000'000'000));
 
     const events::DecodedEvent hot_one = makeDecodedEvent(
         300,

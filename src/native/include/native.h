@@ -10,6 +10,8 @@
 #   error "Error, unsupported platform"
 #endif
 
+#include <chrono>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -30,6 +32,11 @@ namespace dcn::native
      *
      * @param command The command to execute in the new process
      * @param args The arguments to pass to the command
+     * @param timeout When set, a process still running after this long is killed; the
+     *                call then returns exit code -1 with whatever output was captured.
      */
-    std::pair<int, std::string> runProcess(const std::string & command, std::vector<std::string> args = {});
+    std::pair<int, std::string> runProcess(
+        const std::string & command,
+        std::vector<std::string> args = {},
+        std::optional<std::chrono::milliseconds> timeout = std::nullopt);
 }

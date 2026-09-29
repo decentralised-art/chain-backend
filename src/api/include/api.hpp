@@ -16,6 +16,12 @@
 #include "loader.hpp"
 #include "events.hpp"
 #include "feed_types.hpp"
+#include "eth_client.hpp"
+
+namespace dcn::publish
+{
+    class Publisher;
+}
 
 namespace dcn
 {
@@ -23,6 +29,37 @@ namespace dcn
      * @brief Helper function to handle authentication.
      */
     asio::awaitable<std::expected<chain::Address, auth::AuthError>> authenticate(const http::Request & request, const auth::AuthManager & auth_manager);
+
+    /**
+     * @brief Live reads the HTTP API makes against the configured chain deployment.
+     *
+     * Handlers receive a null pointer when the server has no RPC endpoint; then only
+     * local simulation state exists.
+     */
+    struct ChainAccess
+    {
+        std::shared_ptr<rpc::EthClient> client;
+        std::string registry;   //!< PT registry proxy address
+        std::string runner;     //!< Runner proxy bound to `registry`
+        std::uint64_t execute_max_gas = 100'000'000;
+        std::string execute_block_tag = std::string(rpc::BLOCK_TAG_SAFE);
+    };
+
+    /**
+     * @brief Admits the name of a new local entity, or answers why not.
+     *
+     * The name must be a valid identifier and must not be owned by a chain registry:
+     * the projected registry is asked first, then the live registry at `latest`, so
+     * projector lag cannot admit a name the chain already owns. A live check that
+     * cannot complete refuses the name.
+     *
+     * @return nullopt when the name is admitted, otherwise the response to send
+     */
+    asio::awaitable<std::optional<http::Response>> admitLocalEntityName(
+        registry::Registry & registry,
+        const ChainAccess * chain,
+        pt::EntityKind kind,
+        const std::string & name);
 
 
     /**
@@ -327,7 +364,8 @@ namespace dcn
      * @return An HTTP response
      */
     asio::awaitable<http::Response> POST_connector(const http::Request & request, std::vector<server::RouteArg> route_args, server::QueryArgsList query_args,
-        auth::AuthManager & auth_manager, registry::Registry & registry, evm::EVM & evm, const config::Config & config);
+        auth::AuthManager & auth_manager, registry::Registry & registry, evm::EVM & evm, const config::Config & config,
+        const ChainAccess * chain = nullptr);
 
     /**
      * @brief Handles HEAD requests for the transformation endpoint.
@@ -382,7 +420,8 @@ namespace dcn
      * @return An HTTP response
      */
     asio::awaitable<http::Response> POST_transformation(const http::Request & request, std::vector<server::RouteArg> route_args, server::QueryArgsList query_args,
-        auth::AuthManager & auth_manager, registry::Registry & registry, evm::EVM & evm, const config::Config & config);
+        auth::AuthManager & auth_manager, registry::Registry & registry, evm::EVM & evm, const config::Config & config,
+        const ChainAccess * chain = nullptr);
 
 
     /**
@@ -437,32 +476,84 @@ namespace dcn
      * @param evm EVM instance
      * @return An HTTP response
      */
-    asio::awaitable<http::Response> POST_condition(const http::Request & request, std::vector<server::RouteArg> route_args, server::QueryArgsList query_args, 
-        auth::AuthManager & auth_manager, registry::Registry & registry, evm::EVM & evm, const config::Config & config);
+    asio::awaitable<http::Response> POST_condition(const http::Request & request, std::vector<server::RouteArg> route_args, server::QueryArgsList query_args,
+        auth::AuthManager & auth_manager, registry::Registry & registry, evm::EVM & evm, const config::Config & config,
+        const ChainAccess * chain = nullptr);
 
     /**
-     * @brief Handles OPTIONS requests for the execute endpoint by returning a response with CORS headers.
+     * @brief Handles OPTIONS requests for the /publish/* endpoints.
+     */
+    asio::awaitable<http::Response> OPTIONS_publish(const http::Request & request, std::vector<server::RouteArg> route_args, server::QueryArgsList query_args);
+
+    /**
+     * @brief Handles POST /publish/<kind>/prepare, kind = transformation | condition | connector.
      *
-     * @param request The incoming HTTP request
-     * @param route_args Route arguments
-     * @param query_args Query arguments
-     * @return An HTTP response
+     * Body {"name"}. Rebuilds the caller's own local entity from its retained definition,
+     * stores the artifact durably and answers 200 with the unsigned registry transaction
+     * the owner's wallet sends; the owner pays for it. Answers 200 with status
+     * "published" when the registry already holds this exact publication, and 409 with
+     * `missing`/`mismatched` names when a connector dependency is absent from, or
+     * different on, the target registry. Dependencies are never published recursively.
+     *
+     * @param publisher Publisher bound to the configured deployment, or null when disabled
+     */
+    asio::awaitable<http::Response> POST_publishPrepare(
+        const http::Request & request,
+        std::vector<server::RouteArg> route_args,
+        server::QueryArgsList query_args,
+        auth::AuthManager & auth_manager,
+        evm::EVM & evm,
+        const publish::Publisher * publisher,
+        const config::Config & config);
+
+    /**
+     * @brief Handles POST /publish/<kind>: confirms the owner's publication transaction.
+     *
+     * Body {"name", "content_hash", "tx_hash"} with the content hash /prepare returned.
+     * One receipt lookup: 201 when the transaction registered exactly this publication,
+     * 202 while it is unmined (repeat the request), 400 when it reverted or registered
+     * something else.
+     *
+     * @param publisher Publisher bound to the configured deployment, or null when disabled
+     */
+    asio::awaitable<http::Response> POST_publishConfirm(
+        const http::Request & request,
+        std::vector<server::RouteArg> route_args,
+        server::QueryArgsList query_args,
+        auth::AuthManager & auth_manager,
+        const publish::Publisher * publisher);
+
+    /**
+     * @brief Handles OPTIONS requests for the execute and simulate endpoints.
      */
     asio::awaitable<http::Response> OPTIONS_execute(const http::Request & request, std::vector<server::RouteArg> route_args, server::QueryArgsList query_args);
 
     /**
-     * @brief Handles POST requests for the execute endpoint.
+     * @brief Handles POST /execute: runs a connector on chain.
      *
-     * Verifies the access token, then executes a runner transaction.
+     * An eth_call of Runner.gen on the configured runner under the gas cap. The configured
+     * block tag is resolved to one block and the call is pinned to that block's hash; the
+     * answer is {"block_number", "block_hash", "runner", "particles"}, so anyone can check
+     * it by calling the runner at the same block. The chain decides whether the connector
+     * exists: 404 when the runner's registry does not hold it, 503 when this server has no
+     * chain configured.
      *
-     * @param request The incoming HTTP request
-     * @param route_args Route arguments
-     * @param query_args Query arguments
-     * @param auth_manager Authentication manager instance for verifying access tokens
-     * @param evm EVM instance
-     * @return An HTTP response
+     * @param chain Configured chain deployment, or null when the server has no RPC endpoint
      */
     asio::awaitable<http::Response> POST_execute(
+        const http::Request & request,
+        std::vector<server::RouteArg> route_args,
+        server::QueryArgsList query_args,
+        const auth::AuthManager & auth_manager,
+        const ChainAccess * chain);
+
+    /**
+     * @brief Handles POST /simulate: runs a connector created on this server on the local EVM.
+     *
+     * Only connectors with a local version qualify (404 otherwise); a connector that
+     * exists only on chain runs with POST /execute.
+     */
+    asio::awaitable<http::Response> POST_simulate(
         const http::Request & request,
         std::vector<server::RouteArg> route_args,
         server::QueryArgsList query_args,

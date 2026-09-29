@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <sqlite3.h>
@@ -20,40 +21,38 @@ namespace dcn::events
         public:
             SQLiteHotStore(
                 const std::filesystem::path & hot_db_path,
-                const int default_chain_id);
+                const std::uint64_t default_chain_id);
 
             ~SQLiteHotStore() override;
 
             // ---- hot DB / serialized by runtime strand / synchronous ----
 
-            std::optional<std::int64_t> loadNextFromBlock(const int chain_id) override;
-            std::optional<std::uint64_t> loadNextLocalSeq(const int chain_id);
-
-            bool saveNextLocalSeq(const int chain_id, const std::uint64_t next_seq, const std::int64_t now_ms);
-
-            std::vector<std::int64_t> loadReorgWindowBlocks(
-                    const int chain_id,
-                    const std::int64_t from_block,
-                    const std::int64_t to_block) const;
+            std::optional<std::uint64_t> loadNextCursor(
+                const std::string & source_id,
+                CursorKind kind) override;
 
             bool ingestBatch(
-                    const int chain_id,
+                    const std::string & source_id,
+                    CursorKind kind,
+                    const std::uint64_t chain_id,
                     const std::vector<RawChainLog> & raw_events,
                     const std::vector<DecodedEvent> & decoded_events,
                     const std::vector<ChainBlockInfo> & block_infos,
-                    const std::int64_t next_from_block,
+                    std::uint64_t next_cursor,
                     const std::int64_t now_ms,
-                    const std::optional<std::uint64_t> next_local_seq = std::nullopt) override;
+                    const std::optional<ScannedBlockRange> & scanned_range = std::nullopt) override;
 
             bool ingestBatch(
-                    const int chain_id,
+                    const std::string & source_id,
+                    const std::uint64_t chain_id,
                     const std::vector<DecodedEvent> & events,
                     const std::vector<ChainBlockInfo> & block_infos,
-                    const std::int64_t next_from_block,
+                    std::uint64_t next_cursor,
                     const std::int64_t now_ms);
 
             bool applyFinality(
-                    const int chain_id,
+                    const std::string & source_id,
+                    const std::uint64_t chain_id,
                     const FinalityHeights & heights,
                     const std::int64_t now_ms,
                     const std::size_t reorg_window_blocks) override;
@@ -61,11 +60,13 @@ namespace dcn::events
             // ---- min-cursor pruning / write-strand only ----
 
             std::size_t pruneConsumedRaw(
+                    const std::string & source_id,
                     std::int64_t watermark,
                     std::int64_t finalized_floor_block,
                     std::size_t batch_limit);
 
-            std::int64_t loadHeadBlock(int chain_id);
+            std::int64_t loadHeadBlock(const std::string & source_id);
+            FinalityCheckpoint loadFinalityCheckpoint(const std::string & source_id);
 
             storage::sqlite::WalCheckpointStats checkpointWal(storage::sqlite::WalCheckpointMode mode);
 
@@ -75,8 +76,8 @@ namespace dcn::events
             // markDeadLetter returns false when the row does not exist or the write failed,
             // in which case the caller must keep its cursor parked instead of skipping.
 
-            bool markDeadLetter(int projector_bit, int chain_id, const std::string & block_hash, std::int64_t log_index);
-            bool clearDeadLetter(int projector_bit, int chain_id, const std::string & block_hash, std::int64_t log_index);
+            bool markDeadLetter(int projector_bit, const std::string & source_id, const std::string & block_hash, std::int64_t log_index);
+            bool clearDeadLetter(int projector_bit, const std::string & source_id, const std::string & block_hash, std::int64_t log_index);
 
             // ---- read side / synchronous ----
 
@@ -87,12 +88,19 @@ namespace dcn::events
             bool _initializeHotSchema();
             std::int64_t _nextChangeSeq();
 
+            // Removes rows the scan proved gone. Must run inside the caller's transaction.
+            void _reconcileScannedRange(
+                    const std::string & source_id,
+                    const ScannedBlockRange & range,
+                    const std::vector<RawChainLog> & returned_logs,
+                    std::int64_t now_ms);
+
         private:
             std::filesystem::path _hot_db_path;
 
             sqlite3 * _write_db = nullptr;
             sqlite3 * _read_db = nullptr;
 
-            int _default_chain_id = 1;
+            std::uint64_t _default_chain_id = 1;
     };
 }

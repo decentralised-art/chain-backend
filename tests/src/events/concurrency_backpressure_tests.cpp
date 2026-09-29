@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <exception>
+#include <format>
 #include <future>
 #include <memory>
 #include <thread>
@@ -68,13 +69,17 @@ namespace
     class FakeEmittedLogSource final : public events::IEmittedLogSource
     {
         public:
-            FakeEmittedLogSource(int chain_id, std::vector<evm::EVM::EmittedLogRecord> records)
+            FakeEmittedLogSource(std::uint64_t chain_id, std::vector<evm::EVM::EmittedLogRecord> records)
                 : _chain_id(chain_id)
+                , _source_id(std::format("fake:{}", chain_id))
                 , _records(std::move(records))
             {
             }
 
-            int chainId() const override { return _chain_id; }
+            std::string_view sourceId() const override { return _source_id; }
+            std::uint64_t chainId() const override { return _chain_id; }
+            std::string_view chainNamespace() const override { return events::LOCAL_CHAIN_NAMESPACE; }
+            events::CursorKind cursorKind() const override { return events::CursorKind::LOCAL_SEQUENCE; }
             bool ephemeralEntities() const override { return false; }
 
             asio::awaitable<events::SourcePoll> pollSince(std::uint64_t cursor, std::size_t limit) override
@@ -98,7 +103,8 @@ namespace
             }
 
         private:
-            int _chain_id;
+            std::uint64_t _chain_id;
+            std::string _source_id;
             std::vector<evm::EVM::EmittedLogRecord> _records;
     };
 
@@ -116,7 +122,7 @@ namespace
         record.tx_hash = hexBytes(0x22, 32);
         record.log_index = 0;
         record.address = hexAddress(0xAB);
-        record.topics = { topicForEvent("TransformationAdded(address,string,address,address,uint32)") };
+        record.topics = { topicForEvent("TransformationAdded(address,string,address,address,uint32,bytes32,bytes32,bytes32)") };
         record.data_hex = encodeSimpleAddedEventDataV2(
             makeAddressFromByte(0x41),
             "fake_entity",
@@ -160,13 +166,13 @@ TEST_F(UnitTest, Events_Concurrency_StrandSerializedIngestAndProject_AreDetermin
         hot_write_strand,
         [&]() -> bool
         {
-            return store.ingestBatch(CHAIN_ID, {event}, {block}, 1'001, 1'700'003'000'200);
+            return store.ingestBatch("local", CHAIN_ID, {event}, {block}, 1'001, 1'700'003'000'200);
         });
     EXPECT_TRUE(accepted);
     events_sql::expectRowCount(paths.hot_db, "raw_events_hot", 1);
 
     // Project via the feed-based approach (no longer strand-bound; FeedProjector owns its strand)
-    feed::Feed feed_obj(io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
     EXPECT_EQ(awaitProjectBatch(io_context, store, feed_obj, 8, 1'700'003'000'300), 1u);
     events_sql::expectRowCount(paths.feed_db, "feed_items_hot", 1);
 }
@@ -217,6 +223,7 @@ TEST_F(UnitTest, Events_Concurrency_IngestAndProjectSerializeOnSameHotWriteStran
                     1'700'003'300 + i,
                     1'700'003'300'100 + i);
                 const bool ok = store.ingestBatch(
+                    "local",
                     CHAIN_ID,
                     std::vector<events::DecodedEvent>{event},
                     std::vector<events::ChainBlockInfo>{block_info},
@@ -248,13 +255,13 @@ TEST_F(UnitTest, Events_Concurrency_IngestAndProjectSerializeOnSameHotWriteStran
 
     // Project via a fresh context so io_context.restart() is safe
     asio::io_context project_io;
-    feed::Feed feed_obj(project_io, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(project_io, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
     const std::size_t total_projected = projectAll(project_io, store, feed_obj, 1'700'003'500'999);
     EXPECT_EQ(total_projected, static_cast<std::size_t>(EVENT_COUNT));
     events_sql::expectRowCount(paths.feed_db, "feed_items_hot", EVENT_COUNT);
 }
 
-TEST_F(UnitTest, Events_Runtime_MultipleSources_MergeIntoStorePerChain)
+TEST_F(UnitTest, Events_Runtime_MultipleSources_MergeIntoStorePerSource)
 {
     const auto paths = makeTempEventsPaths("runtime_multi_source_merge");
 
@@ -300,14 +307,14 @@ TEST_F(UnitTest, Events_Runtime_MultipleSources_MergeIntoStorePerChain)
     stop_future.get();
     io_worker.join();
 
-    // Both sources merged into the one store, partitioned by chain_id...
+    // Both sources merged into the one store, partitioned by source_id...
     SqliteReadonly db(paths.hot_db);
-    EXPECT_EQ(db.scalarInt64("SELECT COUNT(1) FROM raw_events_hot WHERE chain_id=1;"), 3);
-    EXPECT_EQ(db.scalarInt64("SELECT COUNT(1) FROM raw_events_hot WHERE chain_id=2;"), 2);
+    EXPECT_EQ(db.scalarInt64("SELECT COUNT(1) FROM raw_events_hot WHERE source_id='fake:1';"), 3);
+    EXPECT_EQ(db.scalarInt64("SELECT COUNT(1) FROM raw_events_hot WHERE source_id='fake:2';"), 2);
 
-    // ...with independent per-chain cursors persisted (next_seq = last seq + 1).
-    EXPECT_EQ(db.scalarInt64("SELECT next_seq FROM local_ingest_resume_state WHERE chain_id=1;"), 3);
-    EXPECT_EQ(db.scalarInt64("SELECT next_seq FROM local_ingest_resume_state WHERE chain_id=2;"), 2);
+    // ...with independent per-source cursors persisted (next_cursor = last seq + 1).
+    EXPECT_EQ(db.scalarInt64("SELECT next_cursor FROM source_resume WHERE source_id='fake:1';"), 3);
+    EXPECT_EQ(db.scalarInt64("SELECT next_cursor FROM source_resume WHERE source_id='fake:2';"), 2);
 }
 
 TEST_F(UnitTest, Events_Concurrency_ReadersDuringWriter_DoNotCorruptState)
@@ -315,7 +322,7 @@ TEST_F(UnitTest, Events_Concurrency_ReadersDuringWriter_DoNotCorruptState)
     const auto paths = makeTempEventsPaths("concurrency_read_write");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     std::atomic<bool> done{false};
     std::atomic<int> read_iterations{0};

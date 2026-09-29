@@ -55,6 +55,11 @@ namespace dcn::registry
             // never carried.
             asio::awaitable<bool> addConnector(chain::Address address, ConnectorRecord connector,
                 std::optional<evmc::bytes32> expected_format_hash = std::nullopt);
+            asio::awaitable<bool> addConnectorVersion(
+                EntitySource source,
+                chain::Address address,
+                ConnectorRecord connector,
+                std::optional<evmc::bytes32> expected_format_hash = std::nullopt);
             asio::awaitable<bool> addConnectorsBatch(
                 std::vector<std::pair<chain::Address, ConnectorRecord>> connectors,
                 bool all_or_nothing = true);
@@ -87,6 +92,10 @@ namespace dcn::registry
             asio::awaitable<std::optional<std::vector<ScalarLabel>>> getScalarLabelsByFormatHash(const evmc::bytes32 & format_hash) const;
 
             asio::awaitable<bool> addTransformation(chain::Address address, TransformationRecord transformation);
+            asio::awaitable<bool> addTransformationVersion(
+                EntitySource source,
+                chain::Address address,
+                TransformationRecord transformation);
             asio::awaitable<bool> addTransformationsBatch(
                 std::vector<std::pair<chain::Address, TransformationRecord>> transformations,
                 bool all_or_nothing = true);
@@ -97,6 +106,30 @@ namespace dcn::registry
             asio::awaitable<bool> hasTransformation(const std::string & name) const;
 
             asio::awaitable<bool> addCondition(chain::Address address, ConditionRecord condition);
+            asio::awaitable<bool> addConditionVersion(
+                EntitySource source,
+                chain::Address address,
+                ConditionRecord condition);
+
+            asio::awaitable<std::optional<EntityLocation>> getEntityLocation(EntityKind kind, const std::string & name) const;
+            asio::awaitable<bool> hasRemoteEntity(EntityKind kind, const std::string & name) const;
+            asio::awaitable<bool> hasLocalEntity(EntityKind kind, const std::string & name) const;
+            asio::awaitable<bool> removeEntityVersion(EntityKind kind, std::string source_id, std::string name);
+            asio::awaitable<bool> changeEntityOwner(
+                EntityKind kind,
+                std::string source_id,
+                std::string name,
+                chain::Address old_owner,
+                chain::Address new_owner);
+            asio::awaitable<std::vector<ArtifactReference>> getArtifactsDue(
+                std::int64_t now_ms,
+                std::size_t limit) const;
+            asio::awaitable<bool> setArtifactState(
+                EntityKind kind,
+                std::string source_id,
+                std::string name,
+                pt::ArtifactState state,
+                std::int64_t retry_at_ms);
 
             asio::awaitable<bool> addConditionsBatch(
                 std::vector<std::pair<chain::Address, ConditionRecord>> conditions,

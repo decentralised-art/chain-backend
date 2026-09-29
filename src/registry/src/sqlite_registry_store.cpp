@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -21,6 +22,9 @@
 
 namespace dcn::registry
 {
+    // Bumped whenever a table definition changes; a database of another version is refused.
+    constexpr int REGISTRY_SCHEMA_VERSION = 1;
+
     namespace
     {
         constexpr std::size_t ADDRESS_BYTES_SIZE = 20;
@@ -71,6 +75,36 @@ namespace dcn::registry
             std::memcpy(out.bytes, blob, ADDRESS_BYTES_SIZE);
             return out;
         }
+
+        static const char * entityTable(const EntityKind kind)
+        {
+            switch(kind)
+            {
+            case EntityKind::CONNECTOR: return "connectors";
+            case EntityKind::TRANSFORMATION: return "transformations";
+            case EntityKind::CONDITION: return "conditions";
+            }
+            std::terminate();
+        }
+
+        static const char * ownedTable(const EntityKind kind)
+        {
+            switch(kind)
+            {
+            case EntityKind::CONNECTOR: return "owned_connectors";
+            case EntityKind::TRANSFORMATION: return "owned_transformations";
+            case EntityKind::CONDITION: return "owned_conditions";
+            }
+            std::terminate();
+        }
+
+        static pt::ArtifactState parseArtifactState(const char * value)
+        {
+            const std::string_view state = value == nullptr ? std::string_view{} : value;
+            if(state == "available") return pt::ArtifactState::AVAILABLE;
+            if(state == "missing") return pt::ArtifactState::MISSING;
+            return pt::ArtifactState::INVALID;
+        }
     }
 
     SQLiteRegistryStore::SQLiteRegistryStore(const std::string & db_path)
@@ -100,7 +134,7 @@ namespace dcn::registry
             throw std::runtime_error("Failed to configure SQLite pragmas");
         }
 
-        if(!_initializeSchema())
+        if(!storage::sqlite::ensureSchemaVersion(_db, REGISTRY_SCHEMA_VERSION, "registry") || !_initializeSchema())
         {
             throw std::runtime_error("Failed to initialize SQLite registry schema");
         }
@@ -138,82 +172,119 @@ namespace dcn::registry
     bool SQLiteRegistryStore::_initializeSchema() const
     {
         const bool base_schema_ok =
-            // Entities mirror only chain-derivable state, stored in explicit columns (no opaque
-            // payload blob). sol_src is intentionally absent: it cannot be reconstructed from chain.
+            // Entities mirror chain-derivable state in explicit columns. Executable source stays
+            // in the verified content-addressed artifact referenced by content_hash.
             _exec(
                 "CREATE TABLE IF NOT EXISTS connectors ("
-                "name TEXT PRIMARY KEY,"
+                "source_id TEXT NOT NULL DEFAULT 'local',"
+                "chain_namespace TEXT NOT NULL DEFAULT 'local',"
+                "chain_id INTEGER NOT NULL DEFAULT 1,"
+                "registry_address TEXT NOT NULL DEFAULT '0x0',"
+                "entity_address BLOB NOT NULL DEFAULT (zeroblob(20)),"
+                "name TEXT NOT NULL,"
                 "owner BLOB NOT NULL,"
                 "format_hash BLOB NOT NULL,"
                 "condition_name TEXT NOT NULL,"
+                "content_hash TEXT NOT NULL DEFAULT '',"
+                "metadata_hash TEXT NOT NULL DEFAULT '',"
+                "runtime_code_hash TEXT NOT NULL DEFAULT '',"
+                "artifact_state TEXT NOT NULL DEFAULT 'missing' CHECK(artifact_state IN ('available','missing','invalid')) ,"
+                "artifact_attempts INTEGER NOT NULL DEFAULT 0,"
+                "artifact_retry_at_ms INTEGER NOT NULL DEFAULT 0,"
+                "definition_conflict INTEGER NOT NULL DEFAULT 0,"
+                "active INTEGER NOT NULL DEFAULT 1,"
+                "origin_block_hash TEXT NOT NULL DEFAULT '',"
+                "origin_log_index INTEGER NOT NULL DEFAULT 0,"
                 "created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))"
+                ",PRIMARY KEY(source_id, name)"
                 ");") &&
             _exec(
                 "CREATE TABLE IF NOT EXISTS connector_dimensions ("
+                "source_id TEXT NOT NULL DEFAULT 'local',"
                 "connector_name TEXT NOT NULL,"
                 "dim_index INTEGER NOT NULL,"
                 "composite TEXT NOT NULL,"
-                "PRIMARY KEY(connector_name, dim_index)"
+                "PRIMARY KEY(source_id, connector_name, dim_index)"
                 ");") &&
             _exec(
                 "CREATE TABLE IF NOT EXISTS connector_dimension_bindings ("
+                "source_id TEXT NOT NULL DEFAULT 'local',"
                 "connector_name TEXT NOT NULL,"
                 "dim_index INTEGER NOT NULL,"
                 "slot TEXT NOT NULL,"
                 "target TEXT NOT NULL,"
-                "PRIMARY KEY(connector_name, dim_index, slot)"
+                "PRIMARY KEY(source_id, connector_name, dim_index, slot)"
                 ");") &&
             _exec(
                 "CREATE TABLE IF NOT EXISTS connector_transformation_defs ("
+                "source_id TEXT NOT NULL DEFAULT 'local',"
                 "connector_name TEXT NOT NULL,"
                 "dim_index INTEGER NOT NULL,"
                 "op_index INTEGER NOT NULL,"
                 "transformation_name TEXT NOT NULL,"
-                "PRIMARY KEY(connector_name, dim_index, op_index)"
+                "PRIMARY KEY(source_id, connector_name, dim_index, op_index)"
                 ");") &&
             _exec(
                 "CREATE TABLE IF NOT EXISTS connector_transformation_def_args ("
+                "source_id TEXT NOT NULL DEFAULT 'local',"
                 "connector_name TEXT NOT NULL,"
                 "dim_index INTEGER NOT NULL,"
                 "op_index INTEGER NOT NULL,"
                 "arg_index INTEGER NOT NULL,"
                 "value INTEGER NOT NULL,"
-                "PRIMARY KEY(connector_name, dim_index, op_index, arg_index)"
+                "PRIMARY KEY(source_id, connector_name, dim_index, op_index, arg_index)"
                 ");") &&
             _exec(
                 "CREATE TABLE IF NOT EXISTS connector_condition_args ("
+                "source_id TEXT NOT NULL DEFAULT 'local',"
                 "connector_name TEXT NOT NULL,"
                 "arg_index INTEGER NOT NULL,"
                 "value INTEGER NOT NULL,"
-                "PRIMARY KEY(connector_name, arg_index)"
+                "PRIMARY KEY(source_id, connector_name, arg_index)"
                 ");") &&
             _exec(
                 "CREATE TABLE IF NOT EXISTS connector_static_ri ("
+                "source_id TEXT NOT NULL DEFAULT 'local',"
                 "connector_name TEXT NOT NULL,"
                 "position INTEGER NOT NULL,"
                 "start_point INTEGER NOT NULL,"
                 "transformation_shift INTEGER NOT NULL,"
-                "PRIMARY KEY(connector_name, position)"
+                "PRIMARY KEY(source_id, connector_name, position)"
                 ");") &&
             _exec(
                 "CREATE TABLE IF NOT EXISTS transformations ("
-                "name TEXT PRIMARY KEY,"
+                "source_id TEXT NOT NULL DEFAULT 'local', chain_namespace TEXT NOT NULL DEFAULT 'local', chain_id INTEGER NOT NULL DEFAULT 1,"
+                "registry_address TEXT NOT NULL DEFAULT '0x0', entity_address BLOB NOT NULL DEFAULT (zeroblob(20)), name TEXT NOT NULL,"
                 "owner BLOB NOT NULL,"
                 "args_count INTEGER NOT NULL,"
+                "content_hash TEXT NOT NULL DEFAULT '', metadata_hash TEXT NOT NULL DEFAULT '',"
+                "runtime_code_hash TEXT NOT NULL DEFAULT '',"
+                "artifact_state TEXT NOT NULL DEFAULT 'missing' CHECK(artifact_state IN ('available','missing','invalid')) ,"
+                "artifact_attempts INTEGER NOT NULL DEFAULT 0, artifact_retry_at_ms INTEGER NOT NULL DEFAULT 0, definition_conflict INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1,"
+                "origin_block_hash TEXT NOT NULL DEFAULT '', origin_log_index INTEGER NOT NULL DEFAULT 0,"
                 "created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))"
+                ",PRIMARY KEY(source_id, name)"
                 ");") &&
             _exec(
                 "CREATE TABLE IF NOT EXISTS conditions ("
-                "name TEXT PRIMARY KEY,"
+                "source_id TEXT NOT NULL DEFAULT 'local', chain_namespace TEXT NOT NULL DEFAULT 'local', chain_id INTEGER NOT NULL DEFAULT 1,"
+                "registry_address TEXT NOT NULL DEFAULT '0x0', entity_address BLOB NOT NULL DEFAULT (zeroblob(20)), name TEXT NOT NULL,"
                 "owner BLOB NOT NULL,"
                 "args_count INTEGER NOT NULL,"
+                "content_hash TEXT NOT NULL DEFAULT '', metadata_hash TEXT NOT NULL DEFAULT '',"
+                "runtime_code_hash TEXT NOT NULL DEFAULT '',"
+                "artifact_state TEXT NOT NULL DEFAULT 'missing' CHECK(artifact_state IN ('available','missing','invalid')) ,"
+                "artifact_attempts INTEGER NOT NULL DEFAULT 0, artifact_retry_at_ms INTEGER NOT NULL DEFAULT 0, definition_conflict INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1,"
+                "origin_block_hash TEXT NOT NULL DEFAULT '', origin_log_index INTEGER NOT NULL DEFAULT 0,"
                 "created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))"
+                ",PRIMARY KEY(source_id, name)"
                 ");") &&
             _exec(
                 "CREATE TABLE IF NOT EXISTS format_members ("
+                "source_id TEXT NOT NULL DEFAULT 'local',"
                 "format_hash BLOB NOT NULL,"
                 "name TEXT NOT NULL,"
-                "PRIMARY KEY(format_hash, name)"
+                "PRIMARY KEY(source_id, format_hash, name)"
                 ");") &&
             _exec(
                 "CREATE TABLE IF NOT EXISTS scalar_labels_by_format ("
@@ -225,27 +296,33 @@ namespace dcn::registry
                 ");") &&
             _exec(
                 "CREATE TABLE IF NOT EXISTS owned_connectors ("
+                "source_id TEXT NOT NULL DEFAULT 'local',"
                 "owner BLOB NOT NULL,"
                 "name TEXT NOT NULL,"
-                "PRIMARY KEY(owner, name)"
+                "PRIMARY KEY(source_id, owner, name)"
                 ");") &&
             _exec(
                 "CREATE TABLE IF NOT EXISTS owned_transformations ("
+                "source_id TEXT NOT NULL DEFAULT 'local',"
                 "owner BLOB NOT NULL,"
                 "name TEXT NOT NULL,"
-                "PRIMARY KEY(owner, name)"
+                "PRIMARY KEY(source_id, owner, name)"
                 ");") &&
             _exec(
                 "CREATE TABLE IF NOT EXISTS owned_conditions ("
+                "source_id TEXT NOT NULL DEFAULT 'local',"
                 "owner BLOB NOT NULL,"
                 "name TEXT NOT NULL,"
-                "PRIMARY KEY(owner, name)"
+                "PRIMARY KEY(source_id, owner, name)"
                 ");") &&
             _exec("CREATE INDEX IF NOT EXISTS idx_format_members_format_name ON format_members(format_hash, name);") &&
             _exec("CREATE INDEX IF NOT EXISTS idx_scalar_labels_format ON scalar_labels_by_format(format_hash);") &&
             _exec("CREATE INDEX IF NOT EXISTS idx_owned_connectors_owner_name ON owned_connectors(owner, name);") &&
             _exec("CREATE INDEX IF NOT EXISTS idx_owned_transformations_owner_name ON owned_transformations(owner, name);") &&
-            _exec("CREATE INDEX IF NOT EXISTS idx_owned_conditions_owner_name ON owned_conditions(owner, name);");
+            _exec("CREATE INDEX IF NOT EXISTS idx_owned_conditions_owner_name ON owned_conditions(owner, name);") &&
+            _exec("CREATE INDEX IF NOT EXISTS idx_connectors_artifact_work ON connectors(artifact_state, artifact_retry_at_ms) WHERE active=1 AND content_hash<>'';") &&
+            _exec("CREATE INDEX IF NOT EXISTS idx_transformations_artifact_work ON transformations(artifact_state, artifact_retry_at_ms) WHERE active=1 AND content_hash<>'';") &&
+            _exec("CREATE INDEX IF NOT EXISTS idx_conditions_artifact_work ON conditions(artifact_state, artifact_retry_at_ms) WHERE active=1 AND content_hash<>'';");
 
         if(!base_schema_ok)
         {
@@ -312,6 +389,8 @@ namespace dcn::registry
     }
 
     bool SQLiteRegistryStore::_insertConnectorRows(
+        const EntitySource & source,
+        const chain::Address & address,
         const chain::Address & owner,
         const evmc::bytes32 & format_hash,
         const ConnectorRecord & record,
@@ -320,14 +399,59 @@ namespace dcn::registry
         const Connector & connector = record.connector();
         const std::string & connector_name = connector.name();
 
+        // Replace semantics: re-projecting the same (source_id, name) version must be
+        // idempotent, so every row this function writes is cleared for that key first.
+        for(const char * table : {
+                "connectors",
+                "connector_dimensions",
+                "connector_dimension_bindings",
+                "connector_transformation_defs",
+                "connector_transformation_def_args",
+                "connector_condition_args",
+                "connector_static_ri",
+                "format_members",
+                "owned_connectors"})
+        {
+            const std::string_view table_name(table);
+            const char * name_column =
+                (table_name == "connectors" || table_name == "format_members" || table_name == "owned_connectors")
+                    ? "name"
+                    : "connector_name";
+            storage::sqlite::Statement del(
+                _db,
+                std::format("DELETE FROM {} WHERE source_id=?1 AND {}=?2;", table, name_column).c_str());
+            sqlite3_bind_text(del.get(), 1, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(del.get(), 2, connector_name.c_str(), static_cast<int>(connector_name.size()), SQLITE_TRANSIENT);
+            if(del.step() != SQLITE_DONE)
+            {
+                spdlog::error("SQLite delete {} failed for `{}`", table, connector_name);
+                return false;
+            }
+        }
+
         {
             storage::sqlite::Statement insert_connector(
                 _db,
-                "INSERT INTO connectors(name, owner, format_hash, condition_name) VALUES(?1, ?2, ?3, ?4);");
-            sqlite3_bind_text(insert_connector.get(), 1, connector_name.c_str(), static_cast<int>(connector_name.size()), SQLITE_TRANSIENT);
-            bindAddress(insert_connector.get(), 2, owner);
-            bindBytes32(insert_connector.get(), 3, format_hash);
-            sqlite3_bind_text(insert_connector.get(), 4, connector.condition_name().c_str(), static_cast<int>(connector.condition_name().size()), SQLITE_TRANSIENT);
+                "INSERT INTO connectors(source_id, chain_namespace, chain_id, registry_address, entity_address, name, owner, "
+                "format_hash, condition_name, content_hash, metadata_hash, runtime_code_hash, artifact_state, definition_conflict, origin_block_hash, origin_log_index) "
+                "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16);");
+            sqlite3_bind_text(insert_connector.get(), 1, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(insert_connector.get(), 2, source.chain_namespace.c_str(), static_cast<int>(source.chain_namespace.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(insert_connector.get(), 3, static_cast<sqlite3_int64>(source.chain_id));
+            sqlite3_bind_text(insert_connector.get(), 4, source.registry_address.c_str(), static_cast<int>(source.registry_address.size()), SQLITE_TRANSIENT);
+            bindAddress(insert_connector.get(), 5, address);
+            sqlite3_bind_text(insert_connector.get(), 6, connector_name.c_str(), static_cast<int>(connector_name.size()), SQLITE_TRANSIENT);
+            bindAddress(insert_connector.get(), 7, owner);
+            bindBytes32(insert_connector.get(), 8, format_hash);
+            sqlite3_bind_text(insert_connector.get(), 9, connector.condition_name().c_str(), static_cast<int>(connector.condition_name().size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(insert_connector.get(), 10, source.content_hash.c_str(), static_cast<int>(source.content_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(insert_connector.get(), 11, source.metadata_hash.c_str(), static_cast<int>(source.metadata_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(insert_connector.get(), 12, source.runtime_code_hash.c_str(), static_cast<int>(source.runtime_code_hash.size()), SQLITE_TRANSIENT);
+            const std::string_view artifact_state = pt::artifactStateName(source.artifact_state);
+            sqlite3_bind_text(insert_connector.get(), 13, artifact_state.data(), static_cast<int>(artifact_state.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int(insert_connector.get(), 14, source.definition_conflict ? 1 : 0);
+            sqlite3_bind_text(insert_connector.get(), 15, source.block_hash.c_str(), static_cast<int>(source.block_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(insert_connector.get(), 16, source.log_index);
             if(insert_connector.step() != SQLITE_DONE)
             {
                 spdlog::error("SQLite insert connectors failed for `{}`", connector_name);
@@ -338,9 +462,10 @@ namespace dcn::registry
         {
             storage::sqlite::Statement insert_format_member(
                 _db,
-                "INSERT OR IGNORE INTO format_members(format_hash, name) VALUES(?1, ?2);");
+                "INSERT OR IGNORE INTO format_members(format_hash, name, source_id) VALUES(?1, ?2, ?3);");
             bindBytes32(insert_format_member.get(), 1, format_hash);
             sqlite3_bind_text(insert_format_member.get(), 2, connector_name.c_str(), static_cast<int>(connector_name.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(insert_format_member.get(), 3, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
             if(insert_format_member.step() != SQLITE_DONE)
             {
                 spdlog::error("SQLite insert format_members failed for `{}`", connector_name);
@@ -370,9 +495,10 @@ namespace dcn::registry
         {
             storage::sqlite::Statement insert_owned(
                 _db,
-                "INSERT OR REPLACE INTO owned_connectors(owner, name) VALUES(?1, ?2);");
+                "INSERT OR REPLACE INTO owned_connectors(owner, name, source_id) VALUES(?1, ?2, ?3);");
             bindAddress(insert_owned.get(), 1, owner);
             sqlite3_bind_text(insert_owned.get(), 2, connector_name.c_str(), static_cast<int>(connector_name.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(insert_owned.get(), 3, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
             if(insert_owned.step() != SQLITE_DONE)
             {
                 spdlog::error("SQLite insert owned_connectors failed for `{}`", connector_name);
@@ -383,13 +509,14 @@ namespace dcn::registry
         {
             storage::sqlite::Statement insert_cond_arg(
                 _db,
-                "INSERT INTO connector_condition_args(connector_name, arg_index, value) VALUES(?1, ?2, ?3);");
+                "INSERT INTO connector_condition_args(connector_name, arg_index, value, source_id) VALUES(?1, ?2, ?3, ?4);");
             for(int i = 0; i < connector.condition_args_size(); ++i)
             {
                 insert_cond_arg.reset();
                 sqlite3_bind_text(insert_cond_arg.get(), 1, connector_name.c_str(), static_cast<int>(connector_name.size()), SQLITE_TRANSIENT);
                 sqlite3_bind_int64(insert_cond_arg.get(), 2, static_cast<sqlite3_int64>(i));
                 sqlite3_bind_int64(insert_cond_arg.get(), 3, static_cast<sqlite3_int64>(connector.condition_args(i)));
+                sqlite3_bind_text(insert_cond_arg.get(), 4, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
                 if(insert_cond_arg.step() != SQLITE_DONE)
                 {
                     spdlog::error("SQLite insert connector_condition_args failed for `{}`", connector_name);
@@ -401,7 +528,7 @@ namespace dcn::registry
         {
             storage::sqlite::Statement insert_static_ri(
                 _db,
-                "INSERT INTO connector_static_ri(connector_name, position, start_point, transformation_shift) VALUES(?1, ?2, ?3, ?4);");
+                "INSERT INTO connector_static_ri(connector_name, position, start_point, transformation_shift, source_id) VALUES(?1, ?2, ?3, ?4, ?5);");
             for(const auto & [position, running_instance] : connector.static_ri())
             {
                 insert_static_ri.reset();
@@ -409,6 +536,7 @@ namespace dcn::registry
                 sqlite3_bind_int64(insert_static_ri.get(), 2, static_cast<sqlite3_int64>(position));
                 sqlite3_bind_int64(insert_static_ri.get(), 3, static_cast<sqlite3_int64>(running_instance.start_point()));
                 sqlite3_bind_int64(insert_static_ri.get(), 4, static_cast<sqlite3_int64>(running_instance.transformation_shift()));
+                sqlite3_bind_text(insert_static_ri.get(), 5, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
                 if(insert_static_ri.step() != SQLITE_DONE)
                 {
                     spdlog::error("SQLite insert connector_static_ri failed for `{}`", connector_name);
@@ -420,16 +548,16 @@ namespace dcn::registry
         {
             storage::sqlite::Statement insert_dim(
                 _db,
-                "INSERT INTO connector_dimensions(connector_name, dim_index, composite) VALUES(?1, ?2, ?3);");
+                "INSERT INTO connector_dimensions(connector_name, dim_index, composite, source_id) VALUES(?1, ?2, ?3, ?4);");
             storage::sqlite::Statement insert_binding(
                 _db,
-                "INSERT INTO connector_dimension_bindings(connector_name, dim_index, slot, target) VALUES(?1, ?2, ?3, ?4);");
+                "INSERT INTO connector_dimension_bindings(connector_name, dim_index, slot, target, source_id) VALUES(?1, ?2, ?3, ?4, ?5);");
             storage::sqlite::Statement insert_tdef(
                 _db,
-                "INSERT INTO connector_transformation_defs(connector_name, dim_index, op_index, transformation_name) VALUES(?1, ?2, ?3, ?4);");
+                "INSERT INTO connector_transformation_defs(connector_name, dim_index, op_index, transformation_name, source_id) VALUES(?1, ?2, ?3, ?4, ?5);");
             storage::sqlite::Statement insert_tdef_arg(
                 _db,
-                "INSERT INTO connector_transformation_def_args(connector_name, dim_index, op_index, arg_index, value) VALUES(?1, ?2, ?3, ?4, ?5);");
+                "INSERT INTO connector_transformation_def_args(connector_name, dim_index, op_index, arg_index, value, source_id) VALUES(?1, ?2, ?3, ?4, ?5, ?6);");
 
             for(int dim_index = 0; dim_index < connector.dimensions_size(); ++dim_index)
             {
@@ -439,6 +567,7 @@ namespace dcn::registry
                 sqlite3_bind_text(insert_dim.get(), 1, connector_name.c_str(), static_cast<int>(connector_name.size()), SQLITE_TRANSIENT);
                 sqlite3_bind_int64(insert_dim.get(), 2, static_cast<sqlite3_int64>(dim_index));
                 sqlite3_bind_text(insert_dim.get(), 3, dimension.composite().c_str(), static_cast<int>(dimension.composite().size()), SQLITE_TRANSIENT);
+                sqlite3_bind_text(insert_dim.get(), 4, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
                 if(insert_dim.step() != SQLITE_DONE)
                 {
                     spdlog::error("SQLite insert connector_dimensions failed for `{}`", connector_name);
@@ -452,6 +581,7 @@ namespace dcn::registry
                     sqlite3_bind_int64(insert_binding.get(), 2, static_cast<sqlite3_int64>(dim_index));
                     sqlite3_bind_text(insert_binding.get(), 3, slot.c_str(), static_cast<int>(slot.size()), SQLITE_TRANSIENT);
                     sqlite3_bind_text(insert_binding.get(), 4, target.c_str(), static_cast<int>(target.size()), SQLITE_TRANSIENT);
+                    sqlite3_bind_text(insert_binding.get(), 5, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
                     if(insert_binding.step() != SQLITE_DONE)
                     {
                         spdlog::error("SQLite insert connector_dimension_bindings failed for `{}`", connector_name);
@@ -468,6 +598,7 @@ namespace dcn::registry
                     sqlite3_bind_int64(insert_tdef.get(), 2, static_cast<sqlite3_int64>(dim_index));
                     sqlite3_bind_int64(insert_tdef.get(), 3, static_cast<sqlite3_int64>(op_index));
                     sqlite3_bind_text(insert_tdef.get(), 4, tdef.name().c_str(), static_cast<int>(tdef.name().size()), SQLITE_TRANSIENT);
+                    sqlite3_bind_text(insert_tdef.get(), 5, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
                     if(insert_tdef.step() != SQLITE_DONE)
                     {
                         spdlog::error("SQLite insert connector_transformation_defs failed for `{}`", connector_name);
@@ -482,6 +613,7 @@ namespace dcn::registry
                         sqlite3_bind_int64(insert_tdef_arg.get(), 3, static_cast<sqlite3_int64>(op_index));
                         sqlite3_bind_int64(insert_tdef_arg.get(), 4, static_cast<sqlite3_int64>(arg_index));
                         sqlite3_bind_int64(insert_tdef_arg.get(), 5, static_cast<sqlite3_int64>(tdef.args(arg_index)));
+                        sqlite3_bind_text(insert_tdef_arg.get(), 6, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
                         if(insert_tdef_arg.step() != SQLITE_DONE)
                         {
                             spdlog::error("SQLite insert connector_transformation_def_args failed for `{}`", connector_name);
@@ -495,15 +627,18 @@ namespace dcn::registry
         return true;
     }
 
-    std::optional<ConnectorRecord> SQLiteRegistryStore::_readConnectorRecord(const std::string & name) const
+    std::optional<ConnectorRecord> SQLiteRegistryStore::_readConnectorRecord(
+        const std::string & source_id,
+        const std::string & name) const
     {
         ConnectorRecord record;
         Connector * connector = record.mutable_connector();
         connector->set_name(name);
 
         {
-            storage::sqlite::Statement stmt(_db, "SELECT owner, condition_name FROM connectors WHERE name = ?1 LIMIT 1;");
-            sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+            storage::sqlite::Statement stmt(_db, "SELECT owner, condition_name FROM connectors WHERE source_id=?1 AND name=?2 AND active=1;");
+            sqlite3_bind_text(stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt.get(), 2, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
             if(stmt.step() != SQLITE_ROW)
             {
                 return std::nullopt;
@@ -525,8 +660,9 @@ namespace dcn::registry
         }
 
         {
-            storage::sqlite::Statement stmt(_db, "SELECT value FROM connector_condition_args WHERE connector_name = ?1 ORDER BY arg_index ASC;");
+            storage::sqlite::Statement stmt(_db, "SELECT value FROM connector_condition_args WHERE connector_name=?1 AND source_id=?2 ORDER BY arg_index ASC;");
             sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt.get(), 2, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
             for(int rc = stmt.step(); rc == SQLITE_ROW; rc = stmt.step())
             {
                 connector->add_condition_args(static_cast<std::int32_t>(sqlite3_column_int64(stmt.get(), 0)));
@@ -534,8 +670,9 @@ namespace dcn::registry
         }
 
         {
-            storage::sqlite::Statement stmt(_db, "SELECT position, start_point, transformation_shift FROM connector_static_ri WHERE connector_name = ?1;");
+            storage::sqlite::Statement stmt(_db, "SELECT position, start_point, transformation_shift FROM connector_static_ri WHERE connector_name=?1 AND source_id=?2;");
             sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt.get(), 2, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
             for(int rc = stmt.step(); rc == SQLITE_ROW; rc = stmt.step())
             {
                 const std::uint32_t position = static_cast<std::uint32_t>(sqlite3_column_int64(stmt.get(), 0));
@@ -547,8 +684,9 @@ namespace dcn::registry
         }
 
         {
-            storage::sqlite::Statement dim_stmt(_db, "SELECT dim_index, composite FROM connector_dimensions WHERE connector_name = ?1 ORDER BY dim_index ASC;");
+            storage::sqlite::Statement dim_stmt(_db, "SELECT dim_index, composite FROM connector_dimensions WHERE connector_name=?1 AND source_id=?2 ORDER BY dim_index ASC;");
             sqlite3_bind_text(dim_stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(dim_stmt.get(), 2, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
             for(int rc = dim_stmt.step(); rc == SQLITE_ROW; rc = dim_stmt.step())
             {
                 const std::int64_t dim_index = sqlite3_column_int64(dim_stmt.get(), 0);
@@ -560,9 +698,10 @@ namespace dcn::registry
                 }
 
                 {
-                    storage::sqlite::Statement binding_stmt(_db, "SELECT slot, target FROM connector_dimension_bindings WHERE connector_name = ?1 AND dim_index = ?2;");
+                    storage::sqlite::Statement binding_stmt(_db, "SELECT slot, target FROM connector_dimension_bindings WHERE connector_name=?1 AND dim_index=?2 AND source_id=?3;");
                     sqlite3_bind_text(binding_stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
                     sqlite3_bind_int64(binding_stmt.get(), 2, dim_index);
+                    sqlite3_bind_text(binding_stmt.get(), 3, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
                     for(int brc = binding_stmt.step(); brc == SQLITE_ROW; brc = binding_stmt.step())
                     {
                         const unsigned char * slot = sqlite3_column_text(binding_stmt.get(), 0);
@@ -575,9 +714,10 @@ namespace dcn::registry
                 }
 
                 {
-                    storage::sqlite::Statement tdef_stmt(_db, "SELECT op_index, transformation_name FROM connector_transformation_defs WHERE connector_name = ?1 AND dim_index = ?2 ORDER BY op_index ASC;");
+                    storage::sqlite::Statement tdef_stmt(_db, "SELECT op_index, transformation_name FROM connector_transformation_defs WHERE connector_name=?1 AND dim_index=?2 AND source_id=?3 ORDER BY op_index ASC;");
                     sqlite3_bind_text(tdef_stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
                     sqlite3_bind_int64(tdef_stmt.get(), 2, dim_index);
+                    sqlite3_bind_text(tdef_stmt.get(), 3, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
                     for(int trc = tdef_stmt.step(); trc == SQLITE_ROW; trc = tdef_stmt.step())
                     {
                         const std::int64_t op_index = sqlite3_column_int64(tdef_stmt.get(), 0);
@@ -588,10 +728,11 @@ namespace dcn::registry
                             tdef->set_name(reinterpret_cast<const char *>(tdef_name));
                         }
 
-                        storage::sqlite::Statement arg_stmt(_db, "SELECT value FROM connector_transformation_def_args WHERE connector_name = ?1 AND dim_index = ?2 AND op_index = ?3 ORDER BY arg_index ASC;");
+                        storage::sqlite::Statement arg_stmt(_db, "SELECT value FROM connector_transformation_def_args WHERE connector_name=?1 AND dim_index=?2 AND op_index=?3 AND source_id=?4 ORDER BY arg_index ASC;");
                         sqlite3_bind_text(arg_stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
                         sqlite3_bind_int64(arg_stmt.get(), 2, dim_index);
                         sqlite3_bind_int64(arg_stmt.get(), 3, op_index);
+                        sqlite3_bind_text(arg_stmt.get(), 4, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
                         for(int arc = arg_stmt.step(); arc == SQLITE_ROW; arc = arg_stmt.step())
                         {
                             tdef->add_args(static_cast<std::int32_t>(sqlite3_column_int64(arg_stmt.get(), 0)));
@@ -616,7 +757,7 @@ namespace dcn::registry
             
             spdlog::debug("SQLite::hasConnector('{}'): prepare (db={})", name, static_cast<const void *>(_db));
             
-            storage::sqlite::Statement stmt(_db, "SELECT 1 FROM connectors WHERE name = ?1 LIMIT 1;");
+            storage::sqlite::Statement stmt(_db, "SELECT 1 FROM connectors WHERE name=?1 AND active=1 LIMIT 1;");
             const int bind_rc = sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
             
             spdlog::debug("SQLite::hasConnector('{}'): bind rc={}", name, bind_rc);
@@ -645,7 +786,14 @@ namespace dcn::registry
         {
             spdlog::debug("SQLite::getConnectorRecordHandle('{}'): prepare", name);
             
-            auto record_opt = _readConnectorRecord(name);
+            storage::sqlite::Statement source_stmt(
+                _db,
+                "SELECT source_id FROM connectors WHERE name=?1 AND active=1 "
+                "ORDER BY CASE WHEN source_id='local' THEN 1 ELSE 0 END, source_id LIMIT 1;");
+            sqlite3_bind_text(source_stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+            if(source_stmt.step() != SQLITE_ROW) return std::nullopt;
+            const std::string source_id = reinterpret_cast<const char*>(sqlite3_column_text(source_stmt.get(), 0));
+            auto record_opt = _readConnectorRecord(source_id, name);
             if(!record_opt.has_value())
             {
                 spdlog::debug("SQLite::getConnectorRecordHandle('{}'): not found", name);
@@ -666,7 +814,10 @@ namespace dcn::registry
     {
         try
         {
-            storage::sqlite::Statement stmt(_db, "SELECT format_hash FROM connectors WHERE name = ?1 LIMIT 1;");
+            storage::sqlite::Statement stmt(
+                _db,
+                "SELECT format_hash FROM connectors WHERE name=?1 AND active=1 "
+                "ORDER BY CASE WHEN source_id='local' THEN 1 ELSE 0 END, source_id LIMIT 1;");
             sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
             if(stmt.step() != SQLITE_ROW)
             {
@@ -682,6 +833,237 @@ namespace dcn::registry
     }
 
     bool SQLiteRegistryStore::addConnector(
+        const chain::Address & address,
+        const ConnectorRecord & record,
+        const evmc::bytes32 & format_hash,
+        const std::vector<ScalarLabel> & canonical_scalar_labels)
+    {
+        return addConnectorVersion(EntitySource{}, address, record, format_hash, canonical_scalar_labels);
+    }
+
+    std::optional<EntityLocation> SQLiteRegistryStore::getEntityLocation(
+        const EntityKind kind,
+        const std::string & name) const
+    {
+        storage::sqlite::Statement stmt(
+            _db,
+            std::format(
+                "SELECT source_id,chain_namespace,chain_id,registry_address,entity_address,content_hash,metadata_hash,runtime_code_hash,artifact_state,definition_conflict,origin_block_hash,origin_log_index,active "
+                "FROM {} WHERE name=?1 AND active=1 "
+                "ORDER BY CASE WHEN source_id='local' THEN 1 ELSE 0 END, source_id LIMIT 1;",
+                entityTable(kind)).c_str());
+        sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+        if(stmt.step() != SQLITE_ROW) return std::nullopt;
+
+        const auto address = columnAddress(stmt.get(), 4);
+        if(!address) return std::nullopt;
+
+        EntityLocation location{};
+        location.source.source_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
+        location.source.chain_namespace = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
+        location.source.chain_id = static_cast<std::uint64_t>(sqlite3_column_int64(stmt.get(), 2));
+        location.source.registry_address = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 3));
+        location.address = *address;
+        location.source.content_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 5));
+        location.source.metadata_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 6));
+        location.source.runtime_code_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 7));
+        location.source.artifact_state = parseArtifactState(
+            reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 8)));
+        location.source.definition_conflict = sqlite3_column_int(stmt.get(), 9) != 0;
+        location.source.block_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 10));
+        location.source.log_index = sqlite3_column_int64(stmt.get(), 11);
+        location.active = sqlite3_column_int(stmt.get(), 12) != 0;
+        return location;
+    }
+
+    bool SQLiteRegistryStore::hasRemoteEntity(const EntityKind kind, const std::string & name) const
+    {
+        storage::sqlite::Statement stmt(
+            _db,
+            std::format("SELECT 1 FROM {} WHERE name=?1 AND source_id<>'local' AND active=1 LIMIT 1;", entityTable(kind)).c_str());
+        sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+        return stmt.step() == SQLITE_ROW;
+    }
+
+    bool SQLiteRegistryStore::hasLocalEntity(const EntityKind kind, const std::string & name) const
+    {
+        storage::sqlite::Statement stmt(
+            _db,
+            std::format("SELECT 1 FROM {} WHERE name=?1 AND source_id='local' AND active=1 LIMIT 1;", entityTable(kind)).c_str());
+        sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+        return stmt.step() == SQLITE_ROW;
+    }
+
+    bool SQLiteRegistryStore::removeEntityVersion(
+        const EntityKind kind,
+        const std::string & source_id,
+        const std::string & name)
+    {
+        if(!_beginTransaction()) return false;
+        try
+        {
+            storage::sqlite::Statement owner_stmt(
+                _db,
+                std::format("SELECT owner FROM {} WHERE source_id=?1 AND name=?2 AND active=1;", entityTable(kind)).c_str());
+            sqlite3_bind_text(owner_stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(owner_stmt.get(), 2, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+            if(owner_stmt.step() != SQLITE_ROW)
+            {
+                _rollbackTransaction();
+                return true;
+            }
+            const auto owner = columnAddress(owner_stmt.get(), 0);
+            if(!owner) throw std::runtime_error("invalid entity owner");
+
+            storage::sqlite::Statement update_stmt(
+                _db,
+                std::format("UPDATE {} SET active=0 WHERE source_id=?1 AND name=?2;", entityTable(kind)).c_str());
+            sqlite3_bind_text(update_stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(update_stmt.get(), 2, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+            if(update_stmt.step() != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(_db));
+
+            storage::sqlite::Statement owned_stmt(
+                _db,
+                std::format("DELETE FROM {} WHERE source_id=?1 AND owner=?2 AND name=?3;", ownedTable(kind)).c_str());
+            sqlite3_bind_text(owned_stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+            bindAddress(owned_stmt.get(), 2, *owner);
+            sqlite3_bind_text(owned_stmt.get(), 3, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+            if(owned_stmt.step() != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(_db));
+
+            if(kind == EntityKind::CONNECTOR)
+            {
+                storage::sqlite::Statement format_stmt(
+                    _db,
+                    "DELETE FROM format_members WHERE source_id=?1 AND name=?2;");
+                sqlite3_bind_text(format_stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+                sqlite3_bind_text(format_stmt.get(), 2, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+                if(format_stmt.step() != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(_db));
+            }
+            if(!_commitTransaction()) throw std::runtime_error("commit failed");
+            return true;
+        }
+        catch(...)
+        {
+            _rollbackTransaction();
+            return false;
+        }
+    }
+
+    bool SQLiteRegistryStore::changeEntityOwner(
+        const EntityKind kind,
+        const std::string & source_id,
+        const std::string & name,
+        const chain::Address & old_owner,
+        const chain::Address & new_owner)
+    {
+        if(!_beginTransaction()) return false;
+        try
+        {
+            storage::sqlite::Statement update_stmt(
+                _db,
+                std::format("UPDATE {} SET owner=?1 WHERE source_id=?2 AND name=?3 AND owner=?4 AND active=1;", entityTable(kind)).c_str());
+            bindAddress(update_stmt.get(), 1, new_owner);
+            sqlite3_bind_text(update_stmt.get(), 2, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(update_stmt.get(), 3, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+            bindAddress(update_stmt.get(), 4, old_owner);
+            if(update_stmt.step() != SQLITE_DONE || sqlite3_changes(_db) != 1) throw std::runtime_error("owner mismatch");
+
+            storage::sqlite::Statement delete_owned(
+                _db,
+                std::format("DELETE FROM {} WHERE source_id=?1 AND owner=?2 AND name=?3;", ownedTable(kind)).c_str());
+            sqlite3_bind_text(delete_owned.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+            bindAddress(delete_owned.get(), 2, old_owner);
+            sqlite3_bind_text(delete_owned.get(), 3, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+            if(delete_owned.step() != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(_db));
+
+            storage::sqlite::Statement insert_owned(
+                _db,
+                std::format("INSERT INTO {}(source_id,owner,name) VALUES(?1,?2,?3);", ownedTable(kind)).c_str());
+            sqlite3_bind_text(insert_owned.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+            bindAddress(insert_owned.get(), 2, new_owner);
+            sqlite3_bind_text(insert_owned.get(), 3, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+            if(insert_owned.step() != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(_db));
+
+            if(!_commitTransaction()) throw std::runtime_error("commit failed");
+            return true;
+        }
+        catch(...)
+        {
+            _rollbackTransaction();
+            return false;
+        }
+    }
+
+    std::vector<ArtifactReference> SQLiteRegistryStore::getArtifactsDue(
+        const std::int64_t now_ms,
+        const std::size_t limit) const
+    {
+        std::vector<ArtifactReference> references;
+        try
+        {
+            storage::sqlite::Statement stmt(
+                _db,
+                "SELECT kind,source_id,name,content_hash,metadata_hash,runtime_code_hash,artifact_state,artifact_attempts FROM ("
+                "SELECT 0 AS kind,source_id,name,content_hash,metadata_hash,runtime_code_hash,artifact_state,artifact_attempts,artifact_retry_at_ms,active FROM connectors "
+                "UNION ALL SELECT 1,source_id,name,content_hash,metadata_hash,runtime_code_hash,artifact_state,artifact_attempts,artifact_retry_at_ms,active FROM transformations "
+                "UNION ALL SELECT 2,source_id,name,content_hash,metadata_hash,runtime_code_hash,artifact_state,artifact_attempts,artifact_retry_at_ms,active FROM conditions) "
+                "WHERE active=1 AND content_hash<>'' AND artifact_state<>'available' AND artifact_retry_at_ms<=?1 "
+                "ORDER BY artifact_retry_at_ms,source_id,name LIMIT ?2;");
+            sqlite3_bind_int64(stmt.get(), 1, now_ms);
+            sqlite3_bind_int(stmt.get(), 2, toSqliteInt(limit));
+
+            while(stmt.step() == SQLITE_ROW)
+            {
+                references.push_back(ArtifactReference{
+                    .kind = static_cast<EntityKind>(sqlite3_column_int(stmt.get(), 0)),
+                    .source_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1)),
+                    .name = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2)),
+                    .content_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 3)),
+                    .metadata_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 4)),
+                    .runtime_code_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 5)),
+                    .state = parseArtifactState(reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 6))),
+                    .attempts = static_cast<std::uint32_t>(std::clamp<sqlite3_int64>(
+                        sqlite3_column_int64(stmt.get(), 7), 0, 8))});
+            }
+        }
+        catch(const std::exception & error)
+        {
+            spdlog::error("SQLite artifact work query failed: {}", error.what());
+        }
+        return references;
+    }
+
+    bool SQLiteRegistryStore::setArtifactState(
+        const EntityKind kind,
+        const std::string & source_id,
+        const std::string & name,
+        const pt::ArtifactState state,
+        const std::int64_t retry_at_ms)
+    {
+        try
+        {
+            storage::sqlite::Statement stmt(
+                _db,
+                std::format(
+                    "UPDATE {} SET artifact_state=?1,artifact_attempts=CASE WHEN ?1='available' THEN 0 ELSE artifact_attempts+1 END,"
+                    "artifact_retry_at_ms=?2 WHERE source_id=?3 AND name=?4 AND active=1;",
+                    entityTable(kind)).c_str());
+            const std::string_view state_name = pt::artifactStateName(state);
+            sqlite3_bind_text(stmt.get(), 1, state_name.data(), static_cast<int>(state_name.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(stmt.get(), 2, retry_at_ms);
+            sqlite3_bind_text(stmt.get(), 3, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt.get(), 4, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+            return stmt.step() == SQLITE_DONE && sqlite3_changes(_db) == 1;
+        }
+        catch(const std::exception & error)
+        {
+            spdlog::error("SQLite artifact state update failed for '{}': {}", name, error.what());
+            return false;
+        }
+    }
+
+    bool SQLiteRegistryStore::addConnectorVersion(
+        const EntitySource & source,
         const chain::Address & address,
         const ConnectorRecord & record,
         const evmc::bytes32 & format_hash,
@@ -719,7 +1101,7 @@ namespace dcn::registry
 
         try
         {
-            if(!_insertConnectorRows(*owner_opt, format_hash, record, canonical_scalar_labels))
+            if(!_insertConnectorRows(source, address, *owner_opt, format_hash, record, canonical_scalar_labels))
             {
                 rollback_with_log("insert connector rows");
                 return false;
@@ -808,7 +1190,7 @@ namespace dcn::registry
 
                 bool item_ok = true;
 
-                if(!_insertConnectorRows(*owner_opt, item.format_hash, item.record, item.canonical_scalar_labels))
+                if(!_insertConnectorRows(EntitySource{}, chain::Address{}, *owner_opt, item.format_hash, item.record, item.canonical_scalar_labels))
                 {
                     item_ok = fail_item("insert connector rows");
                 }
@@ -1090,7 +1472,7 @@ namespace dcn::registry
             
             spdlog::debug("SQLite::hasTransformation('{}'): prepare (db={})", name, static_cast<const void *>(_db));
             
-            storage::sqlite::Statement stmt(_db, "SELECT 1 FROM transformations WHERE name = ?1 LIMIT 1;");
+            storage::sqlite::Statement stmt(_db, "SELECT 1 FROM transformations WHERE name=?1 AND active=1 LIMIT 1;");
             const int bind_rc = sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
             
             spdlog::debug("SQLite::hasTransformation('{}'): bind rc={}", name, bind_rc);
@@ -1120,7 +1502,10 @@ namespace dcn::registry
             
             spdlog::debug("SQLite::getTransformationRecordHandle('{}'): prepare", name);
             
-            storage::sqlite::Statement stmt(_db, "SELECT owner, args_count FROM transformations WHERE name = ?1 LIMIT 1;");
+            storage::sqlite::Statement stmt(
+                _db,
+                "SELECT owner, args_count FROM transformations WHERE name=?1 AND active=1 "
+                "ORDER BY CASE WHEN source_id='local' THEN 1 ELSE 0 END, source_id LIMIT 1;");
             sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
 
             spdlog::debug("SQLite::getTransformationRecordHandle('{}'): bound name", name);
@@ -1159,6 +1544,14 @@ namespace dcn::registry
 
     bool SQLiteRegistryStore::addTransformation(const chain::Address & address, const TransformationRecord & record)
     {
+        return addTransformationVersion(EntitySource{}, address, record);
+    }
+
+    bool SQLiteRegistryStore::addTransformationVersion(
+        const EntitySource & source,
+        const chain::Address & address,
+        const TransformationRecord & record)
+    {
         const std::string & transformation_name = record.transformation().name();
         const auto owner_opt = evmc::from_hex<chain::Address>(record.owner());
         if(!owner_opt)
@@ -1185,19 +1578,54 @@ namespace dcn::registry
 
         try
         {
-            storage::sqlite::Statement insert_entity(_db, "INSERT INTO transformations(name, owner, args_count) VALUES(?1, ?2, ?3);");
-            sqlite3_bind_text(insert_entity.get(), 1, transformation_name.c_str(), static_cast<int>(transformation_name.size()), SQLITE_TRANSIENT);
-            bindAddress(insert_entity.get(), 2, *owner_opt);
-            sqlite3_bind_int64(insert_entity.get(), 3, static_cast<sqlite3_int64>(record.transformation().args_count()));
+            storage::sqlite::Statement insert_entity(
+                _db,
+                "INSERT INTO transformations(source_id,chain_namespace,chain_id,registry_address,entity_address,name,owner,args_count,content_hash,metadata_hash,runtime_code_hash,artifact_state,definition_conflict,origin_block_hash,origin_log_index) "
+                "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) "
+                "ON CONFLICT(source_id,name) DO UPDATE SET "
+                "chain_namespace=excluded.chain_namespace, chain_id=excluded.chain_id, "
+                "registry_address=excluded.registry_address, entity_address=excluded.entity_address, "
+                "owner=excluded.owner, args_count=excluded.args_count, "
+                "content_hash=excluded.content_hash, metadata_hash=excluded.metadata_hash, runtime_code_hash=excluded.runtime_code_hash, artifact_state=excluded.artifact_state, definition_conflict=excluded.definition_conflict, "
+                "artifact_attempts=0, artifact_retry_at_ms=0, "
+                "origin_block_hash=excluded.origin_block_hash, origin_log_index=excluded.origin_log_index, "
+                "active=1;");
+            sqlite3_bind_text(insert_entity.get(), 1, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(insert_entity.get(), 2, source.chain_namespace.c_str(), static_cast<int>(source.chain_namespace.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(insert_entity.get(), 3, static_cast<sqlite3_int64>(source.chain_id));
+            sqlite3_bind_text(insert_entity.get(), 4, source.registry_address.c_str(), static_cast<int>(source.registry_address.size()), SQLITE_TRANSIENT);
+            bindAddress(insert_entity.get(), 5, address);
+            sqlite3_bind_text(insert_entity.get(), 6, transformation_name.c_str(), static_cast<int>(transformation_name.size()), SQLITE_TRANSIENT);
+            bindAddress(insert_entity.get(), 7, *owner_opt);
+            sqlite3_bind_int64(insert_entity.get(), 8, static_cast<sqlite3_int64>(record.transformation().args_count()));
+            sqlite3_bind_text(insert_entity.get(), 9, source.content_hash.c_str(), static_cast<int>(source.content_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(insert_entity.get(), 10, source.metadata_hash.c_str(), static_cast<int>(source.metadata_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(insert_entity.get(), 11, source.runtime_code_hash.c_str(), static_cast<int>(source.runtime_code_hash.size()), SQLITE_TRANSIENT);
+            const std::string_view artifact_state = pt::artifactStateName(source.artifact_state);
+            sqlite3_bind_text(insert_entity.get(), 12, artifact_state.data(), static_cast<int>(artifact_state.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int(insert_entity.get(), 13, source.definition_conflict ? 1 : 0);
+            sqlite3_bind_text(insert_entity.get(), 14, source.block_hash.c_str(), static_cast<int>(source.block_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(insert_entity.get(), 15, source.log_index);
             if(insert_entity.step() != SQLITE_DONE)
             {
                 rollback_with_log("insert transformations");
                 return false;
             }
 
-            storage::sqlite::Statement insert_owned(_db, "INSERT OR REPLACE INTO owned_transformations(owner, name) VALUES(?1, ?2);");
+            // A re-projected version may carry another owner; its old index row goes first.
+            storage::sqlite::Statement delete_owned(_db, "DELETE FROM owned_transformations WHERE source_id=?1 AND name=?2;");
+            sqlite3_bind_text(delete_owned.get(), 1, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(delete_owned.get(), 2, transformation_name.c_str(), static_cast<int>(transformation_name.size()), SQLITE_TRANSIENT);
+            if(delete_owned.step() != SQLITE_DONE)
+            {
+                rollback_with_log("delete owned_transformations");
+                return false;
+            }
+
+            storage::sqlite::Statement insert_owned(_db, "INSERT OR REPLACE INTO owned_transformations(owner, name, source_id) VALUES(?1, ?2, ?3);");
             bindAddress(insert_owned.get(), 1, *owner_opt);
             sqlite3_bind_text(insert_owned.get(), 2, transformation_name.c_str(), static_cast<int>(transformation_name.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(insert_owned.get(), 3, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
             if(insert_owned.step() != SQLITE_DONE)
             {
                 rollback_with_log("insert owned_transformations");
@@ -1370,7 +1798,7 @@ namespace dcn::registry
             
             spdlog::debug("SQLite::hasCondition('{}'): prepare (db={})", name, static_cast<const void *>(_db));
             
-            storage::sqlite::Statement stmt(_db, "SELECT 1 FROM conditions WHERE name = ?1 LIMIT 1;");
+            storage::sqlite::Statement stmt(_db, "SELECT 1 FROM conditions WHERE name=?1 AND active=1 LIMIT 1;");
             const int bind_rc = sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
             
             spdlog::debug("SQLite::hasCondition('{}'): bind rc={}", name, bind_rc);
@@ -1400,7 +1828,10 @@ namespace dcn::registry
             
             spdlog::debug("SQLite::getConditionRecordHandle('{}'): prepare", name);
             
-            storage::sqlite::Statement stmt(_db, "SELECT owner, args_count FROM conditions WHERE name = ?1 LIMIT 1;");
+            storage::sqlite::Statement stmt(
+                _db,
+                "SELECT owner, args_count FROM conditions WHERE name=?1 AND active=1 "
+                "ORDER BY CASE WHEN source_id='local' THEN 1 ELSE 0 END, source_id LIMIT 1;");
             sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
 
             spdlog::debug("SQLite::getConditionRecordHandle('{}'): bound name", name);
@@ -1439,6 +1870,14 @@ namespace dcn::registry
 
     bool SQLiteRegistryStore::addCondition(const chain::Address & address, const ConditionRecord & record)
     {
+        return addConditionVersion(EntitySource{}, address, record);
+    }
+
+    bool SQLiteRegistryStore::addConditionVersion(
+        const EntitySource & source,
+        const chain::Address & address,
+        const ConditionRecord & record)
+    {
         const std::string & condition_name = record.condition().name();
         const auto owner_opt = evmc::from_hex<chain::Address>(record.owner());
         if(!owner_opt)
@@ -1465,19 +1904,54 @@ namespace dcn::registry
 
         try
         {
-            storage::sqlite::Statement insert_entity(_db, "INSERT INTO conditions(name, owner, args_count) VALUES(?1, ?2, ?3);");
-            sqlite3_bind_text(insert_entity.get(), 1, condition_name.c_str(), static_cast<int>(condition_name.size()), SQLITE_TRANSIENT);
-            bindAddress(insert_entity.get(), 2, *owner_opt);
-            sqlite3_bind_int64(insert_entity.get(), 3, static_cast<sqlite3_int64>(record.condition().args_count()));
+            storage::sqlite::Statement insert_entity(
+                _db,
+                "INSERT INTO conditions(source_id,chain_namespace,chain_id,registry_address,entity_address,name,owner,args_count,content_hash,metadata_hash,runtime_code_hash,artifact_state,definition_conflict,origin_block_hash,origin_log_index) "
+                "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) "
+                "ON CONFLICT(source_id,name) DO UPDATE SET "
+                "chain_namespace=excluded.chain_namespace, chain_id=excluded.chain_id, "
+                "registry_address=excluded.registry_address, entity_address=excluded.entity_address, "
+                "owner=excluded.owner, args_count=excluded.args_count, "
+                "content_hash=excluded.content_hash, metadata_hash=excluded.metadata_hash, runtime_code_hash=excluded.runtime_code_hash, artifact_state=excluded.artifact_state, definition_conflict=excluded.definition_conflict, "
+                "artifact_attempts=0, artifact_retry_at_ms=0, "
+                "origin_block_hash=excluded.origin_block_hash, origin_log_index=excluded.origin_log_index, "
+                "active=1;");
+            sqlite3_bind_text(insert_entity.get(), 1, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(insert_entity.get(), 2, source.chain_namespace.c_str(), static_cast<int>(source.chain_namespace.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(insert_entity.get(), 3, static_cast<sqlite3_int64>(source.chain_id));
+            sqlite3_bind_text(insert_entity.get(), 4, source.registry_address.c_str(), static_cast<int>(source.registry_address.size()), SQLITE_TRANSIENT);
+            bindAddress(insert_entity.get(), 5, address);
+            sqlite3_bind_text(insert_entity.get(), 6, condition_name.c_str(), static_cast<int>(condition_name.size()), SQLITE_TRANSIENT);
+            bindAddress(insert_entity.get(), 7, *owner_opt);
+            sqlite3_bind_int64(insert_entity.get(), 8, static_cast<sqlite3_int64>(record.condition().args_count()));
+            sqlite3_bind_text(insert_entity.get(), 9, source.content_hash.c_str(), static_cast<int>(source.content_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(insert_entity.get(), 10, source.metadata_hash.c_str(), static_cast<int>(source.metadata_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(insert_entity.get(), 11, source.runtime_code_hash.c_str(), static_cast<int>(source.runtime_code_hash.size()), SQLITE_TRANSIENT);
+            const std::string_view artifact_state = pt::artifactStateName(source.artifact_state);
+            sqlite3_bind_text(insert_entity.get(), 12, artifact_state.data(), static_cast<int>(artifact_state.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int(insert_entity.get(), 13, source.definition_conflict ? 1 : 0);
+            sqlite3_bind_text(insert_entity.get(), 14, source.block_hash.c_str(), static_cast<int>(source.block_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(insert_entity.get(), 15, source.log_index);
             if(insert_entity.step() != SQLITE_DONE)
             {
                 rollback_with_log("insert conditions");
                 return false;
             }
 
-            storage::sqlite::Statement insert_owned(_db, "INSERT OR REPLACE INTO owned_conditions(owner, name) VALUES(?1, ?2);");
+            // A re-projected version may carry another owner; its old index row goes first.
+            storage::sqlite::Statement delete_owned(_db, "DELETE FROM owned_conditions WHERE source_id=?1 AND name=?2;");
+            sqlite3_bind_text(delete_owned.get(), 1, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(delete_owned.get(), 2, condition_name.c_str(), static_cast<int>(condition_name.size()), SQLITE_TRANSIENT);
+            if(delete_owned.step() != SQLITE_DONE)
+            {
+                rollback_with_log("delete owned_conditions");
+                return false;
+            }
+
+            storage::sqlite::Statement insert_owned(_db, "INSERT OR REPLACE INTO owned_conditions(owner, name, source_id) VALUES(?1, ?2, ?3);");
             bindAddress(insert_owned.get(), 1, *owner_opt);
             sqlite3_bind_text(insert_owned.get(), 2, condition_name.c_str(), static_cast<int>(condition_name.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(insert_owned.get(), 3, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
             if(insert_owned.step() != SQLITE_DONE)
             {
                 rollback_with_log("insert owned_conditions");

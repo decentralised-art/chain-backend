@@ -53,7 +53,7 @@ TEST_F(UnitTest, Events_StreamPage_SinceSeqAndOrdering_AreMonotonic)
     const auto paths = makeTempEventsPaths("stream_monotonic");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     ingestAndProjectOne(store_io_context, store, feed_obj, 80, 0xD0, 0xF0, 1'700'000'700, 1'700'000'700'100);
     ingestAndProjectOne(store_io_context, store, feed_obj, 81, 0xD1, 0xF1, 1'700'000'701, 1'700'000'701'100);
@@ -72,12 +72,12 @@ TEST_F(UnitTest, Events_StreamPage_SinceSeqAndOrdering_AreMonotonic)
     EXPECT_FALSE(page.has_more);
 }
 
-TEST_F(UnitTest, Events_StreamPage_FiltersDeltasByDefaultChainId)
+TEST_F(UnitTest, Events_StreamPage_ServesEverySourceInStreamOrder)
 {
     const auto paths = makeTempEventsPaths("stream_chain_filter");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent chain_one_event = makeDecodedEvent(
         300,
@@ -122,8 +122,12 @@ TEST_F(UnitTest, Events_StreamPage_FiltersDeltasByDefaultChainId)
         .since_seq = 0,
         .limit = 16
     });
-    ASSERT_EQ(page.deltas.size(), 1u);
-    EXPECT_EQ(page.deltas.front().feed_id.rfind("local:1:", 0), 0u);
+    // Deltas from every source share one stream, in projection order; each keeps its
+    // own chain in its id.
+    ASSERT_EQ(page.deltas.size(), 2u);
+    EXPECT_EQ(page.deltas[0].feed_id.rfind("local:1:", 0), 0u);
+    EXPECT_EQ(page.deltas[1].feed_id.rfind("local:2:", 0), 0u);
+    EXPECT_LT(page.deltas[0].stream_seq, page.deltas[1].stream_seq);
 }
 
 TEST_F(UnitTest, Events_StreamPage_ReconnectWithLastSeq_DoesNotDuplicate)
@@ -131,7 +135,7 @@ TEST_F(UnitTest, Events_StreamPage_ReconnectWithLastSeq_DoesNotDuplicate)
     const auto paths = makeTempEventsPaths("stream_reconnect");
     asio::io_context store_io_context;
     events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
-    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     ingestAndProjectOne(store_io_context, store, feed_obj, 83, 0xD3, 0xF3, 1'700'000'703, 1'700'000'703'100);
     ingestAndProjectOne(store_io_context, store, feed_obj, 84, 0xD4, 0xF4, 1'700'000'704, 1'700'000'704'100);
@@ -159,7 +163,7 @@ TEST_F(UnitTest, Events_API_FeedStream_EmitsSseFramesWithFloorAndMeta)
     asio::io_context writer_io_context;
     events::SQLiteHotStore writer(paths.hot_db, CHAIN_ID);
     // retention=10ms: outbox rows pruned quickly on next projectBatch pass
-    feed::Feed feed_obj(writer_io_context, paths.feed_db, paths.feed_archive_root, 10, CHAIN_ID);
+    feed::Feed feed_obj(writer_io_context, paths.feed_db, paths.feed_archive_root, 10);
 
     ingestAndProjectOne(writer_io_context, writer, feed_obj, 85, 0xD5, 0xF5, 1'700'000'705, 1'700'000'705'100);
     ingestAndProjectOne(writer_io_context, writer, feed_obj, 86, 0xD6, 0xF6, 1'700'000'706, 1'700'000'706'100);
@@ -199,14 +203,14 @@ TEST_F(UnitTest, Events_API_FeedStream_AfterRestart_UsesDurableOutboxState)
     {
         asio::io_context writer_io_context;
         events::SQLiteHotStore writer(paths.hot_db, CHAIN_ID);
-        feed::Feed feed_writer(writer_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+        feed::Feed feed_writer(writer_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
         ingestAndProjectOne(writer_io_context, writer, feed_writer, 87, 0xD7, 0xF7, 1'700'000'707, 1'700'000'707'100);
         ingestAndProjectOne(writer_io_context, writer, feed_writer, 88, 0xD8, 0xF8, 1'700'000'708, 1'700'000'708'100);
     }
 
     // "Restart": open a new Feed on the same DB to verify durable state.
     asio::io_context io_context;
-    feed::Feed feed_reader(io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000, CHAIN_ID);
+    feed::Feed feed_reader(io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
     const std::string body = buildFeedStreamSseReplay(feed_reader, feed::StreamQuery{.since_seq = 1, .limit = 10});
 
     const std::vector<SseFrame> frames = parseSseFrames(body);
@@ -231,7 +235,7 @@ TEST_F(UnitTest, Events_API_FeedStream_StaleCursor_IsStructuredInMeta)
         asio::io_context writer_io_context;
         events::SQLiteHotStore writer(paths.hot_db, CHAIN_ID);
         // retention=10ms: first outbox row expires on the next projectBatch call
-        feed::Feed feed_obj(writer_io_context, paths.feed_db, paths.feed_archive_root, 10, CHAIN_ID);
+        feed::Feed feed_obj(writer_io_context, paths.feed_db, paths.feed_archive_root, 10);
         ingestAndProjectOne(writer_io_context, writer, feed_obj, 89, 0xD9, 0xF9, 1'700'000'709, 1'700'000'709'100);
         // Force a projectBatch pass at a later timestamp so maintainOutbox prunes the first row
         EXPECT_EQ(awaitProjectBatch(writer_io_context, writer, feed_obj, 16, 1'700'000'710'500), 0u);
@@ -240,7 +244,7 @@ TEST_F(UnitTest, Events_API_FeedStream_StaleCursor_IsStructuredInMeta)
 
     // "Restart" on the same feed DB.
     asio::io_context io_context;
-    feed::Feed feed_reader(io_context, paths.feed_db, paths.feed_archive_root, 10, CHAIN_ID);
+    feed::Feed feed_reader(io_context, paths.feed_db, paths.feed_archive_root, 10);
     const std::string body = buildFeedStreamSseReplay(feed_reader, feed::StreamQuery{.since_seq = 1, .limit = 10});
 
     const std::vector<SseFrame> frames = parseSseFrames(body);
