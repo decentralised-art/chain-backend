@@ -353,7 +353,7 @@ namespace
         return containsRegistryEntry(io_context, evm_instance, "containsCondition(string)", name);
     }
 
-    http::Request makeExecuteRequest(const std::string & access_token, const std::string & connector_name)
+    http::Request makeExecuteRequest(const std::string & connector_name)
     {
         json request_json = {
             {"connector_name", connector_name},
@@ -370,8 +370,7 @@ namespace
         request.setMethod(http::Method::POST)
                .setPath(http::URL("/simulate"))
                .setVersion("HTTP/1.1")
-               .setBody(request_json.dump())
-               .setHeader(http::Header::Authorization, std::format("Bearer {}", access_token));
+               .setBody(request_json.dump());
 
         return request;
     }
@@ -580,27 +579,19 @@ TEST_F(UnitTest, API_Simulate_MissingConnectorReturnsNotFound)
 
     asio::io_context io_context;
     registry::Registry registry(io_context, db_path.string());
-    auth::AuthManager auth_manager(io_context);
     evm::EVM evm_instance(io_context, EVMC_SHANGHAI, solcPath(), ptPath());
     io_context.run();
-
-    const chain::Address caller = makeAddressFromByte(0x44);
-    (void)runAwaitable(io_context, evm_instance.addAccount(caller, evm::DEFAULT_GAS_LIMIT));
-    (void)runAwaitable(io_context, evm_instance.setGas(caller, evm::DEFAULT_GAS_LIMIT));
-
-    const std::string access_token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
 
     config::Config cfg;
     cfg.storage_path = storage_path;
 
-    auto request = makeExecuteRequest(access_token, "MissingConnector");
+    auto request = makeExecuteRequest("MissingConnector");
     const auto response = runAwaitable(
         io_context,
         POST_simulate(
             request,
             std::vector<server::RouteArg>{},
             server::QueryArgsList{},
-            auth_manager,
             registry,
             evm_instance,
             cfg));
@@ -1103,15 +1094,10 @@ TEST_F(UnitTest, API_Simulate_LazilyDeploysConnectorClosureFromDb)
 
     asio::io_context io_context;
     registry::Registry registry(io_context, db_path.string());
-    auth::AuthManager auth_manager(io_context);
     evm::EVM evm_instance(io_context, EVMC_SHANGHAI, solcPath(), ptPath());
     io_context.run();
 
-    const chain::Address caller = makeAddressFromByte(0x54);
-    const std::string owner_hex = evmc::hex(caller);
-    (void)runAwaitable(io_context, evm_instance.addAccount(caller, evm::DEFAULT_GAS_LIMIT));
-    (void)runAwaitable(io_context, evm_instance.setGas(caller, evm::DEFAULT_GAS_LIMIT));
-    const std::string access_token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
+    const std::string owner_hex = evmc::hex(makeAddressFromByte(0x54));
 
     const auto transformation_record = makeTransformationRecord("LazyTx", owner_hex);
     ConnectorRecord connector_record = makeConnectorRecord("LazyConnector", owner_hex);
@@ -1133,14 +1119,13 @@ TEST_F(UnitTest, API_Simulate_LazilyDeploysConnectorClosureFromDb)
     config::Config cfg;
     cfg.storage_path = storage_path;
 
-    auto request = makeExecuteRequest(access_token, "LazyConnector");
+    auto request = makeExecuteRequest("LazyConnector");
     const auto response = runAwaitable(
         io_context,
         POST_simulate(
             request,
             std::vector<server::RouteArg>{},
             server::QueryArgsList{},
-            auth_manager,
             registry,
             evm_instance,
             cfg));
@@ -1184,24 +1169,19 @@ TEST_F(UnitTest, API_Simulate_BrokenDbDependencyReturnsInvariantError)
 
     asio::io_context io_context;
     registry::Registry registry(io_context, db_path.string());
-    auth::AuthManager auth_manager(io_context);
     evm::EVM evm_instance(io_context, EVMC_SHANGHAI, solcPath(), ptPath());
     io_context.run();
-
-    const chain::Address caller = makeAddressFromByte(0x63);
-    const std::string access_token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
 
     config::Config cfg;
     cfg.storage_path = storage_path;
 
-    auto request = makeExecuteRequest(access_token, "BrokenConnector");
+    auto request = makeExecuteRequest("BrokenConnector");
     const auto response = runAwaitable(
         io_context,
         POST_simulate(
             request,
             std::vector<server::RouteArg>{},
             server::QueryArgsList{},
-            auth_manager,
             registry,
             evm_instance,
             cfg));

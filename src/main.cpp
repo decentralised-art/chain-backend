@@ -1082,9 +1082,9 @@ int main(int argc, char* argv[])
         dcn::POST_publishConfirm, std::ref(auth_manager), publisher_ptr);
 
     server.addRoute({dcn::http::Method::OPTIONS, "/execute"},   dcn::OPTIONS_execute);
-    server.addRoute({dcn::http::Method::POST, "/execute"},      dcn::POST_execute, std::cref(auth_manager), chain_ptr);
+    server.addRoute({dcn::http::Method::POST, "/execute"},      dcn::POST_execute, chain_ptr);
     server.addRoute({dcn::http::Method::OPTIONS, "/simulate"},  dcn::OPTIONS_execute);
-    server.addRoute({dcn::http::Method::POST, "/simulate"},     dcn::POST_simulate, std::cref(auth_manager), std::ref(registry), std::ref(evm), std::cref(cfg));
+    server.addRoute({dcn::http::Method::POST, "/simulate"},     dcn::POST_simulate, std::ref(registry), std::ref(evm), std::cref(cfg));
 
     if(!dcn::loader::ensurePTBuildVersion(cfg.storage_path))
     {

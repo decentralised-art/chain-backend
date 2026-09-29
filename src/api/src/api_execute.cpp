@@ -93,41 +93,34 @@ namespace dcn
             return response;
         }
 
-        /// Authentication and request validation shared by /execute and /simulate.
-        asio::awaitable<std::expected<std::pair<ExecuteRequest, chain::Address>, http::Response>> beginExecution(
+        /// Request validation shared by /execute and /simulate. Both only read state through
+        /// the view Runner.gen, so neither asks for a login.
+        std::expected<ExecuteRequest, http::Response> beginExecution(
             const http::Request & request,
-            const std::vector<server::RouteArg> & args,
-            const auth::AuthManager & auth_manager)
+            const std::vector<server::RouteArg> & args)
         {
             if(!args.empty())
             {
-                co_return std::unexpected(failure(http::Code::BadRequest, "Unexpected arguments"));
-            }
-
-            const auto auth_result = co_await authenticate(request, auth_manager);
-            if(!auth_result)
-            {
-                co_return std::unexpected(failure(
-                    http::Code::Unauthorized, std::format("Authentication error: {}", auth_result.error().kind)));
+                return std::unexpected(failure(http::Code::BadRequest, "Unexpected arguments"));
             }
 
             auto execute_request = parse::parseFromJson<ExecuteRequest>(request.getBody(), parse::use_protobuf);
             if(!execute_request)
             {
-                co_return std::unexpected(failure(http::Code::BadRequest, "Failed to parse execute request"));
+                return std::unexpected(failure(http::Code::BadRequest, "Failed to parse execute request"));
             }
             if(execute_request->particles_count() == 0 || execute_request->particles_count() > MAX_PARTICLES_COUNT)
             {
-                co_return std::unexpected(failure(http::Code::BadRequest, std::format(
+                return std::unexpected(failure(http::Code::BadRequest, std::format(
                     "particles_count must be between 1 and {}", MAX_PARTICLES_COUNT)));
             }
             if(execute_request->dynamic_ri_size() > MAX_DYNAMIC_RUNNING_INSTANCES)
             {
-                co_return std::unexpected(failure(http::Code::BadRequest, std::format(
+                return std::unexpected(failure(http::Code::BadRequest, std::format(
                     "at most {} dynamic running instances are accepted", MAX_DYNAMIC_RUNNING_INSTANCES)));
             }
 
-            co_return std::pair{std::move(*execute_request), *auth_result};
+            return std::move(*execute_request);
         }
     }
 
@@ -138,7 +131,7 @@ namespace dcn
                 .setVersion("HTTP/1.1")
                 .setHeader(http::Header::AccessControlAllowOrigin, "*")
                 .setHeader(http::Header::AccessControlAllowMethods, "POST, OPTIONS")
-                .setHeader(http::Header::AccessControlAllowHeaders, "Authorization, Content-Type")
+                .setHeader(http::Header::AccessControlAllowHeaders, "Content-Type")
                 .setHeader(http::Header::AccessControlMaxAge, "600")
                 .setHeader(http::Header::Connection, "close");
 
@@ -149,10 +142,9 @@ namespace dcn
         const http::Request & request,
         std::vector<server::RouteArg> args,
         server::QueryArgsList,
-        const auth::AuthManager & auth_manager,
         const ChainAccess * chain)
     {
-        auto begun = co_await beginExecution(request, args, auth_manager);
+        auto begun = beginExecution(request, args);
         if(!begun) co_return std::move(begun.error());
 
         if(chain == nullptr)
@@ -180,7 +172,7 @@ namespace dcn
         // so a connector counts as soon as it is registered at that block.
         const auto output = co_await chain->client->callAtBlock(
             chain->runner,
-            chain::bytesToHex(encodeGenCall(begun->first)),
+            chain::bytesToHex(encodeGenCall(*begun)),
             header.hash,
             chain->execute_max_gas);
         if(!output)
@@ -220,14 +212,13 @@ namespace dcn
         const http::Request & request,
         std::vector<server::RouteArg> args,
         server::QueryArgsList,
-        const auth::AuthManager & auth_manager,
         registry::Registry & registry,
         evm::EVM & evm,
         const config::Config & config)
     {
-        auto begun = co_await beginExecution(request, args, auth_manager);
+        auto begun = beginExecution(request, args);
         if(!begun) co_return std::move(begun.error());
-        const auto & [execute_request, caller] = *begun;
+        const ExecuteRequest & execute_request = *begun;
 
         if(!co_await registry.hasLocalEntity(pt::EntityKind::CONNECTOR, execute_request.connector_name()))
         {
@@ -240,10 +231,10 @@ namespace dcn
             co_return failure(http::Code::InternalServerError, "Connector deployment invariant failed");
         }
 
-        co_await evm.setGas(caller, evm::DEFAULT_GAS_LIMIT);
+        // Runner.gen is a view that never reads msg.sender, so the runner calls itself.
         co_await evm.setGas(evm.getRunnerAddress(), evm::DEFAULT_GAS_LIMIT);
         const auto exec_result = co_await evm.execute(
-            caller, evm.getRunnerAddress(), encodeGenCall(execute_request), evm::DEFAULT_GAS_LIMIT, 0);
+            evm.getRunnerAddress(), evm.getRunnerAddress(), encodeGenCall(execute_request), evm::DEFAULT_GAS_LIMIT, 0);
         if(!exec_result)
         {
             if(exec_result.error().kind == chain::ExecuteError::Kind::TRANSACTION_REVERTED)

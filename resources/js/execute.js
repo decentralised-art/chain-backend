@@ -1,5 +1,4 @@
 import {
-    requestWithLogin,
     formatJSON,
     apiUrl,
     normalizeConnectorName as normalizeConnectorNameBase,
@@ -785,7 +784,7 @@ async function runConnector(path) {
         return;
     }
     try {
-        const res = await requestWithLogin(apiUrl(path),
+        const res = await fetch(apiUrl(path),
             {
                 method: 'POST',
                 headers: {
