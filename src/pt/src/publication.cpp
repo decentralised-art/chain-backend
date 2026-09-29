@@ -206,6 +206,20 @@ namespace dcn::pt
             return abi::Component{.dynamic = true, .data = abi::encodeTuple(fields)};
         }
 
+        std::string publishSignature(const EntityKind kind)
+        {
+            switch(kind)
+            {
+            case EntityKind::TRANSFORMATION:
+                return std::format("publishTransformation(bytes,{},bytes)", PUBLICATION_TUPLE);
+            case EntityKind::CONDITION:
+                return std::format("publishCondition(bytes,{},bytes)", PUBLICATION_TUPLE);
+            case EntityKind::CONNECTOR:
+                return std::format("publishConnector(bytes,{},{},bytes)", PUBLICATION_TUPLE, CONNECTOR_REGISTRATION_TUPLE);
+            }
+            return {};
+        }
+
         std::vector<std::uint8_t> encodeCall(
             const std::string & signature,
             const std::vector<abi::Component> & arguments)
@@ -358,7 +372,7 @@ namespace dcn::pt
         std::span<const std::uint8_t> owner_signature)
     {
         return encodeCall(
-            std::format("publishTransformation(bytes,{},bytes)", PUBLICATION_TUPLE),
+            publishSignature(EntityKind::TRANSFORMATION),
             {abi::bytesComponent(creation_code),
              publicationComponent(publication),
              abi::bytesComponent(owner_signature)});
@@ -370,7 +384,7 @@ namespace dcn::pt
         std::span<const std::uint8_t> owner_signature)
     {
         return encodeCall(
-            std::format("publishCondition(bytes,{},bytes)", PUBLICATION_TUPLE),
+            publishSignature(EntityKind::CONDITION),
             {abi::bytesComponent(creation_code),
              publicationComponent(publication),
              abi::bytesComponent(owner_signature)});
@@ -383,11 +397,89 @@ namespace dcn::pt
         std::span<const std::uint8_t> owner_signature)
     {
         return encodeCall(
-            std::format("publishConnector(bytes,{},{},bytes)", PUBLICATION_TUPLE, CONNECTOR_REGISTRATION_TUPLE),
+            publishSignature(EntityKind::CONNECTOR),
             {abi::bytesComponent(creation_code),
              publicationComponent(publication),
              registrationComponent(registration),
              abi::bytesComponent(owner_signature)});
+    }
+
+    std::optional<Publication> decodePublishCall(const std::span<const std::uint8_t> calldata)
+    {
+        if(calldata.size() < 4) return std::nullopt;
+
+        std::optional<EntityKind> kind;
+        for(const EntityKind candidate : {EntityKind::TRANSFORMATION, EntityKind::CONDITION, EntityKind::CONNECTOR})
+        {
+            const std::vector<std::uint8_t> selector = chain::constructSelector(publishSignature(candidate));
+            if(std::equal(selector.begin(), selector.end(), calldata.begin()))
+            {
+                kind = candidate;
+                break;
+            }
+        }
+        if(!kind) return std::nullopt;
+
+        const std::uint8_t * arguments = calldata.data() + 4;
+        const std::size_t arguments_size = calldata.size() - 4;
+
+        // The publication tuple is the second argument of every publish call.
+        const auto tuple_offset = chain::readWordAsSizeT(arguments, arguments_size, 32);
+        if(!tuple_offset || *tuple_offset > arguments_size) return std::nullopt;
+        const std::uint8_t * tuple = arguments + *tuple_offset;
+        const std::size_t tuple_size = arguments_size - *tuple_offset;
+
+        const auto word = [&](const std::size_t index)
+        {
+            return chain::readWordAsSizeT(tuple, tuple_size, index * 32);
+        };
+        const auto bytes32 = [&](const std::size_t index) -> std::optional<evmc::bytes32>
+        {
+            if(tuple_size < (index + 1) * 32) return std::nullopt;
+            evmc::bytes32 out{};
+            std::copy_n(tuple + index * 32, 32, out.bytes);
+            return out;
+        };
+
+        const auto encoded_kind = word(0);
+        if(!encoded_kind || *encoded_kind != static_cast<std::size_t>(*kind)) return std::nullopt;
+
+        const auto name_offset = word(1);
+        if(!name_offset) return std::nullopt;
+        auto name = chain::decodeAbiString(tuple, tuple_size, *name_offset);
+
+        // An address word is left-padded with twelve zero bytes.
+        const auto owner_word = bytes32(2);
+        if(!owner_word || std::any_of(owner_word->bytes, owner_word->bytes + 12, [](const std::uint8_t b) { return b != 0; }))
+        {
+            return std::nullopt;
+        }
+
+        const auto content_hash = bytes32(3);
+        const auto metadata_hash = bytes32(4);
+        const auto creation_code_hash = bytes32(5);
+        const auto runtime_code_hash = bytes32(6);
+        const auto registration_hash = bytes32(7);
+        const auto nonce = word(8);
+        const auto deadline = word(9);
+        if(!name || !content_hash || !metadata_hash || !creation_code_hash || !runtime_code_hash
+           || !registration_hash || !nonce || !deadline)
+        {
+            return std::nullopt;
+        }
+
+        Publication publication;
+        publication.kind = *kind;
+        publication.name = std::move(*name);
+        std::copy_n(owner_word->bytes + 12, 20, publication.owner.bytes);
+        publication.content_hash = *content_hash;
+        publication.metadata_hash = *metadata_hash;
+        publication.creation_code_hash = *creation_code_hash;
+        publication.runtime_code_hash = *runtime_code_hash;
+        publication.registration_hash = *registration_hash;
+        publication.nonce = static_cast<std::uint64_t>(*nonce);
+        publication.deadline = static_cast<std::uint64_t>(*deadline);
+        return publication;
     }
 
     std::vector<std::uint8_t> encodePublicationNonceCall(const chain::Address & owner)

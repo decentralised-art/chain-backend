@@ -10,7 +10,8 @@ const CONFIRM_POLL_MS = 5000;
 const CONFIRM_POLL_LIMIT = 120;
 
 // The selected publication's identity and optional unsigned transaction.
-// Confirmation is checked against its content hash.
+// Confirmation is checked against its content hash. A relayed publication also
+// carries the nonce and fees the wallet signs, since it never sends it itself.
 let prepared = null;
 let pollTimer = null;
 let busy = false;
@@ -48,6 +49,11 @@ function setStatus(message, { isError = false, txHash = null } = {}) {
     }
 }
 
+// A wallet answers this way when it can only sign a transaction by sending it.
+function cannotSignOffline(error) {
+    return error?.code === 4200 || error?.code === -32601;
+}
+
 function stopPolling() {
     clearTimeout(pollTimer);
     pollTimer = null;
@@ -58,7 +64,8 @@ export function updatePublishActionAvailability() {
     byId('btn_preparePublication').disabled = busy || !byId('publishName').value.trim();
     byId('btn_sendPublication').disabled = busy || prepared?.status !== 'prepared' || !!txHash;
     byId('btn_confirmPublication').disabled = busy || pollTimer !== null || !prepared || !/^0x[0-9a-fA-F]{64}$/.test(txHash);
-    for (const id of ['publishKind', 'publishName', 'publishTxHash']) {
+    byId('btn_sendPublication').textContent = byId('publishRelay').checked ? 'Sign and relay' : 'Send with wallet';
+    for (const id of ['publishKind', 'publishName', 'publishRelay', 'publishTxHash']) {
         byId(id).disabled = busy;
     }
 }
@@ -104,6 +111,7 @@ export async function preparePublication() {
 
     const kind = byId('publishKind').value;
     const name = byId('publishName').value.trim();
+    const relay = byId('publishRelay').checked;
     if (!name) {
         setStatus('Enter the name of one of your entities.', { isError: true });
         return;
@@ -115,14 +123,14 @@ export async function preparePublication() {
         const res = await requestWithLogin(apiUrl(`/publish/${kind}/prepare`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name })
+            body: JSON.stringify(relay ? { name, relay: true } : { name })
         });
         const text = await res.text();
         showResponse(res.status, text);
         const body = parseJson(text);
 
         if (res.ok && (body?.status === 'prepared' || body?.status === 'published')) {
-            prepared = { kind, name, ...body };
+            prepared = { kind, name, relay, ...body };
             if (body.status === 'published') {
                 setStatus(`Already published at ${body.address}. No transaction needs to be sent. Confirm can check the original transaction's receipt.`);
             } else if (byId('publishTxHash').value.trim()) {
@@ -178,16 +186,54 @@ export async function sendPublication() {
             });
         }
 
-        txHash = await window.ethereum.request({ method: 'eth_sendTransaction', params: [transaction] });
+        if (prepared.relay) {
+            txHash = await signAndRelay(transaction);
+            if (!txHash) return;
+        } else {
+            txHash = await window.ethereum.request({ method: 'eth_sendTransaction', params: [transaction] });
+        }
         prepared.status = 'sent';
         byId('publishTxHash').value = txHash;
         setStatus('Sent. Checking whether the publication has been mined...', { txHash });
     } catch (error) {
-        setStatus(error?.message || 'The wallet did not send the transaction.', { isError: true });
+        setStatus(
+            prepared.relay && cannotSignOffline(error)
+                ? 'This wallet cannot sign a transaction without sending it. Turn off relay, prepare again and send with the wallet.'
+                : error?.message || 'The wallet did not send the transaction.',
+            { isError: true });
     } finally {
         setBusy(false);
     }
     if (txHash) await confirmUntilSettled(0);
+}
+
+// The wallet signs the complete transaction and the server broadcasts it. Returns the
+// transaction hash, or nothing after reporting why the server refused it.
+async function signAndRelay(transaction) {
+    if (!prepared.signing) {
+        setStatus('The server did not return what the wallet needs to sign offline. Prepare again.', { isError: true });
+        return null;
+    }
+
+    const raw = await window.ethereum.request({
+        method: 'eth_signTransaction',
+        params: [{ ...transaction, ...prepared.signing }]
+    });
+
+    setStatus('Signed. The server is checking and broadcasting the transaction...');
+    const res = await requestWithLogin(apiUrl(`/publish/${prepared.kind}/send`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: prepared.name, content_hash: prepared.content_hash, raw_tx: raw })
+    });
+    const text = await res.text();
+    showResponse(res.status, text);
+    const body = parseJson(text);
+    if (res.status !== 202 || !body?.tx_hash) {
+        setStatus(body?.message || `The server did not relay the transaction (${res.status}).`, { isError: true });
+        return null;
+    }
+    return body.tx_hash;
 }
 
 export function confirmPublication() {

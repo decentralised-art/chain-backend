@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <expected>
 #include <optional>
 #include <span>
 #include <string>
@@ -43,4 +44,18 @@ namespace dcn::publish
 
     /// Transaction hash of a signed transaction, as the provider will report it.
     std::string transactionHash(std::string_view raw_tx_hex);
+
+    /// A signed type-2 transaction and the account whose key signed it.
+    struct SignedTransaction
+    {
+        Transaction transaction;
+        chain::Address sender{};
+        std::string tx_hash;
+    };
+
+    /// Decodes a `0x02 || rlp(...)` transaction and recovers its sender. Only the form
+    /// encodeSignedTransaction produces is accepted: a type-2 envelope calling an address,
+    /// with an empty access list, 64-bit quantities, canonical RLP and a low-s
+    /// signature, so every accepted transaction has exactly one encoding and one hash.
+    std::expected<SignedTransaction, std::string> decodeSignedTransaction(std::string_view raw_tx_hex);
 }

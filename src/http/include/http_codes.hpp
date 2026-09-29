@@ -27,6 +27,10 @@ namespace dcn::http
      * 
      *     - - `NotFound`: The server has not found anything matching the request.
      * 
+     *     - - `PayloadTooLarge`: The request body is larger than the server accepts.
+     * 
+     *     - - `RequestHeaderFieldsTooLarge`: The request line and headers are larger than the server accepts.
+     * 
      * - Level 500: Server error responses.
      * 
      *     - - `InternalServerError`: The server encountered an unexpected condition.
@@ -52,6 +56,8 @@ namespace dcn::http
         Forbidden = 403,
         NotFound = 404,
         Conflict = 409,
+        PayloadTooLarge = 413,
+        RequestHeaderFieldsTooLarge = 431,
 
         // LEVEL 500
         InternalServerError = 500,
@@ -77,6 +83,9 @@ struct std::formatter<dcn::http::Code> : std::formatter<std::string> {
         case dcn::http::Code::Forbidden:           return formatter<string>::format("403 Forbidden", ctx);
         case dcn::http::Code::NotFound:            return formatter<string>::format("404 Not Found", ctx);
         case dcn::http::Code::Conflict:            return formatter<string>::format("409 Conflict", ctx);
+        case dcn::http::Code::PayloadTooLarge:     return formatter<string>::format("413 Payload Too Large", ctx);
+        case dcn::http::Code::RequestHeaderFieldsTooLarge:
+                                                   return formatter<string>::format("431 Request Header Fields Too Large", ctx);
         
         // LEVEL 500
         case dcn::http::Code::InternalServerError: return formatter<string>::format("500 Internal Server Error", ctx);

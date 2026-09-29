@@ -33,6 +33,7 @@ namespace dcn
             case publish::PublishError::Kind::INVALID: code = http::Code::BadRequest; break;
             case publish::PublishError::Kind::CONFLICT: code = http::Code::Conflict; break;
             case publish::PublishError::Kind::REVERTED: code = http::Code::BadRequest; break;
+            case publish::PublishError::Kind::FORBIDDEN: code = http::Code::Forbidden; break;
             case publish::PublishError::Kind::PENDING: code = http::Code::Accepted; break;
             case publish::PublishError::Kind::UPSTREAM: code = http::Code::ServiceUnavailable; break;
             }
@@ -118,6 +119,27 @@ namespace dcn
             target.name = std::move(*name);
 
             co_return target;
+        }
+
+        /// The publication a /publish/<kind> or /publish/<kind>/send request names, from
+        /// the route kind, the caller and the body's name and content hash.
+        std::expected<publish::PublicationClaim, http::Response> claimOf(const PublishTarget & target)
+        {
+            auto content_hash_field = stringField(target.body, "content_hash");
+            if(!content_hash_field) return std::unexpected(std::move(content_hash_field.error()));
+            // Exactly 32 bytes: a typed parse would left-pad a short value into a valid hash.
+            const auto content_hash = evmc::from_hex(*content_hash_field);
+            if(!content_hash || content_hash->size() != 32)
+            {
+                return std::unexpected(failure(http::Code::BadRequest, "'content_hash' must be a 32-byte hex value"));
+            }
+
+            return publish::PublicationClaim{
+                .kind = target.kind,
+                .name = target.name,
+                .owner = target.owner,
+                .content_hash = chain::bytesToHex(*content_hash),
+                .metadata_hash = chain::bytes32ToHex(pt::computeMetadataHash(target.kind, target.name))};
         }
 
         /// The retained local definition of an entity the caller owns.
@@ -212,6 +234,16 @@ namespace dcn
         auto target = co_await beginPublication(request, args, auth_manager, publisher);
         if(!target) co_return std::move(target.error());
 
+        bool relay = false;
+        if(target->body.contains("relay"))
+        {
+            if(!target->body.at("relay").is_boolean())
+            {
+                co_return failure(http::Code::BadRequest, "'relay' must be a boolean");
+            }
+            relay = target->body.at("relay").get<bool>();
+        }
+
         auto prepared = co_await rebuild(*target, evm, *publisher, config.storage_path);
         if(!prepared) co_return std::move(prepared.error());
 
@@ -238,11 +270,11 @@ namespace dcn
             .creation_code = std::move(prepared->creation_code),
             .registration = std::move(prepared->registration),
             .artifact_bytes = std::move(prepared->artifact_bytes),
-            .dependencies = std::move(prepared->dependencies)});
+            .dependencies = std::move(prepared->dependencies)},
+            relay);
         if(!transaction) co_return publishFailure(transaction.error());
 
-        http::Response response = makeResponse();
-        response.setCode(http::Code::OK).setBodyWithContentLength(json{
+        json body{
             {"status", "prepared"},
             {"kind", kind_name},
             {"name", target->name},
@@ -258,6 +290,47 @@ namespace dcn
             {"content_hash", transaction->content_hash},
             {"publication_nonce", transaction->publication_nonce},
             {"deadline", transaction->deadline}
+        };
+        if(transaction->signing)
+        {
+            // Merged into `transaction`, these make it signable offline for /send.
+            body["signing"] = {
+                {"type", "0x2"},
+                {"nonce", quantity(transaction->signing->nonce)},
+                {"maxFeePerGas", quantity(transaction->signing->max_fee_per_gas)},
+                {"maxPriorityFeePerGas", quantity(transaction->signing->max_priority_fee_per_gas)},
+                {"value", "0x0"}
+            };
+        }
+
+        http::Response response = makeResponse();
+        response.setCode(http::Code::OK).setBodyWithContentLength(body.dump());
+        co_return response;
+    }
+
+    asio::awaitable<http::Response> POST_publishSend(
+        const http::Request & request,
+        std::vector<server::RouteArg> args,
+        server::QueryArgsList,
+        auth::AuthManager & auth_manager,
+        const publish::Publisher * publisher)
+    {
+        auto target = co_await beginPublication(request, args, auth_manager, publisher);
+        if(!target) co_return std::move(target.error());
+
+        auto claim = claimOf(*target);
+        if(!claim) co_return std::move(claim.error());
+
+        auto raw_tx = stringField(target->body, "raw_tx");
+        if(!raw_tx) co_return std::move(raw_tx.error());
+
+        const auto sent = co_await publisher->send(std::move(*claim), std::move(*raw_tx));
+        if(!sent) co_return publishFailure(sent.error());
+
+        http::Response response = makeResponse();
+        response.setCode(http::Code::Accepted).setBodyWithContentLength(json{
+            {"status", "pending"},
+            {"tx_hash", *sent}
         }.dump());
         co_return response;
     }
@@ -272,26 +345,13 @@ namespace dcn
         auto target = co_await beginPublication(request, args, auth_manager, publisher);
         if(!target) co_return std::move(target.error());
 
-        auto content_hash_field = stringField(target->body, "content_hash");
-        if(!content_hash_field) co_return std::move(content_hash_field.error());
-        // Exactly 32 bytes: a typed parse would left-pad a short value into a valid hash.
-        const auto content_hash = evmc::from_hex(*content_hash_field);
-        if(!content_hash || content_hash->size() != 32)
-        {
-            co_return failure(http::Code::BadRequest, "'content_hash' must be a 32-byte hex value");
-        }
+        auto claim = claimOf(*target);
+        if(!claim) co_return std::move(claim.error());
 
         auto tx_hash = stringField(target->body, "tx_hash");
         if(!tx_hash) co_return std::move(tx_hash.error());
 
-        const auto confirmed = co_await publisher->confirm(
-            publish::PublicationClaim{
-                .kind = target->kind,
-                .name = target->name,
-                .owner = target->owner,
-                .content_hash = chain::bytesToHex(*content_hash),
-                .metadata_hash = chain::bytes32ToHex(pt::computeMetadataHash(target->kind, target->name))},
-            std::move(*tx_hash));
+        const auto confirmed = co_await publisher->confirm(std::move(*claim), std::move(*tx_hash));
         if(!confirmed) co_return publishFailure(confirmed.error());
 
         http::Response response = makeResponse();

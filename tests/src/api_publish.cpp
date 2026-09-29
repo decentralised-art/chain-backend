@@ -224,6 +224,91 @@ TEST_F(UnitTest, API_PublishConfirm_AnswersPendingUntilTheRegistryEventIsMined)
     EXPECT_EQ(result["address"], hexAddress(0x55));
 }
 
+TEST_F(UnitTest, API_PublishSend_ValidatesRouteAuthenticationAndBody)
+{
+    asio::io_context io_context;
+    auth::AuthManager auth_manager(io_context);
+    auto node = std::make_shared<FakeNode>();
+    const auto paths = makeTempEventsPaths("api_publish_send_validation");
+    const pt::ArtifactStore artifacts(paths.root / "cache", {}, {paths.root / "replica"});
+    const publish::Publisher publisher(makeClient(node), makeManifest(), artifacts);
+
+    const auto owner = makeOwnerSigner();
+    const pt::Publication publication = makeRelayedPublication(owner->address(), "PubTx");
+    const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(owner->address()));
+    const json body{
+        {"name", "PubTx"},
+        {"content_hash", chain::bytes32ToHex(publication.content_hash)},
+        {"raw_tx", signTransaction(*owner, makePublicationTransaction(publication))}};
+
+    const auto send = [&](const std::string & kind, const std::string & request_token, const json & request_body,
+                          const publish::Publisher * target)
+    {
+        return runAwaitable(io_context, POST_publishSend(
+            postRequest("/publish/" + kind + "/send", request_token, request_body),
+            {kindArg(kind)}, {}, auth_manager, target));
+    };
+
+    EXPECT_EQ(send("transformation", token, body, nullptr).getCode(), http::Code::Forbidden);
+    EXPECT_EQ(send("widget", token, body, &publisher).getCode(), http::Code::NotFound);
+    EXPECT_EQ(send("transformation", "", body, &publisher).getCode(), http::Code::Unauthorized);
+
+    json bad_hash = body;
+    bad_hash["content_hash"] = "0x1234";
+    EXPECT_EQ(send("transformation", token, bad_hash, &publisher).getCode(), http::Code::BadRequest);
+
+    json no_raw = body;
+    no_raw.erase("raw_tx");
+    EXPECT_EQ(send("transformation", token, no_raw, &publisher).getCode(), http::Code::BadRequest);
+
+    json garbage = body;
+    garbage["raw_tx"] = "0x02c0";
+    EXPECT_EQ(send("transformation", token, garbage, &publisher).getCode(), http::Code::BadRequest);
+
+    EXPECT_TRUE(node->sent_raw_transactions.empty());
+}
+
+TEST_F(UnitTest, API_PublishSend_ForwardsOnlyTheOwnersSignedPublication)
+{
+    asio::io_context io_context;
+    auth::AuthManager auth_manager(io_context);
+    auto node = std::make_shared<FakeNode>();
+    const auto paths = makeTempEventsPaths("api_publish_send");
+    const pt::ArtifactStore artifacts(paths.root / "cache", {}, {paths.root / "replica"});
+    const publish::Publisher publisher(makeClient(node), makeManifest(), artifacts);
+
+    const auto owner = makeOwnerSigner();
+    const pt::Publication publication = makeRelayedPublication(owner->address(), "PubTx");
+    const std::string raw = signTransaction(*owner, makePublicationTransaction(publication));
+    const json body{
+        {"name", "PubTx"},
+        {"content_hash", chain::bytes32ToHex(publication.content_hash)},
+        {"raw_tx", raw}};
+
+    const auto send = [&](const chain::Address & caller)
+    {
+        const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
+        return runAwaitable(io_context, POST_publishSend(
+            postRequest("/publish/transformation/send", token, body),
+            {kindArg("transformation")}, {}, auth_manager, &publisher));
+    };
+
+    // Another account's session cannot pass the owner's transaction off as its own.
+    EXPECT_EQ(send(makeAddressFromByte(0x43)).getCode(), http::Code::Forbidden);
+    EXPECT_TRUE(node->sent_raw_transactions.empty());
+
+    const auto sent = send(owner->address());
+    ASSERT_EQ(sent.getCode(), http::Code::Accepted) << sent.getBody();
+    EXPECT_EQ(bodyOf(sent)["status"], "pending");
+    EXPECT_EQ(bodyOf(sent)["tx_hash"], publish::transactionHash(raw));
+    ASSERT_EQ(node->sent_raw_transactions.size(), 1u);
+    EXPECT_EQ(node->sent_raw_transactions.front(), raw);
+
+    // A used account nonce is resolved by preparing again.
+    node->send_error = rpc::RpcError{.kind = rpc::RpcError::Kind::EXECUTION, .code = -32000, .message = "nonce too low"};
+    EXPECT_EQ(send(owner->address()).getCode(), http::Code::Conflict);
+}
+
 TEST_F(UnitTest, API_PublishPrepare_RebuildsTheCallersLocalEntityIntoAnOwnerPaidTransaction)
 {
     ASSERT_TRUE(std::filesystem::exists(solcPath())) << std::format("Missing Solidity compiler at '{}'", solcPath().string());
@@ -251,12 +336,16 @@ TEST_F(UnitTest, API_PublishPrepare_RebuildsTheCallersLocalEntityIntoAnOwnerPaid
     config::Config cfg;
     cfg.storage_path = storage;
 
-    const auto prepare = [&](const chain::Address & caller, const std::string & name)
+    const auto prepareWith = [&](const chain::Address & caller, const json & request_body)
     {
         const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
         return runAwaitable(io_context, POST_publishPrepare(
-            postRequest("/publish/transformation/prepare", token, json{{"name", name}}),
+            postRequest("/publish/transformation/prepare", token, request_body),
             {kindArg("transformation")}, {}, auth_manager, evm_instance, &publisher, cfg));
+    };
+    const auto prepare = [&](const chain::Address & caller, const std::string & name)
+    {
+        return prepareWith(caller, json{{"name", name}});
     };
 
     const auto prepared = prepare(owner, "PubTx");
@@ -269,6 +358,19 @@ TEST_F(UnitTest, API_PublishPrepare_RebuildsTheCallersLocalEntityIntoAnOwnerPaid
     EXPECT_EQ(body["transaction"]["gas"], "0x2bf20");
     EXPECT_TRUE(body["transaction"]["data"].get<std::string>().starts_with("0x"));
     EXPECT_EQ(body["publication_nonce"], 3);
+    // A browser wallet picks its own nonce and fees.
+    EXPECT_FALSE(body.contains("signing"));
+
+    // A relay adds what an offline signer needs to complete the transaction.
+    const auto relayed = prepareWith(owner, json{{"name", "PubTx"}, {"relay", true}});
+    ASSERT_EQ(relayed.getCode(), http::Code::OK) << relayed.getBody();
+    const json signing = bodyOf(relayed)["signing"];
+    EXPECT_EQ(signing["type"], "0x2");
+    EXPECT_EQ(signing["nonce"], "0x7");
+    EXPECT_EQ(signing["maxFeePerGas"], "0xd09dc300");          // 2 x 1 gwei base fee + 1.5 gwei tip
+    EXPECT_EQ(signing["maxPriorityFeePerGas"], "0x59682f00");  // 1.5 gwei
+    EXPECT_EQ(signing["value"], "0x0");
+    EXPECT_EQ(prepareWith(owner, json{{"name", "PubTx"}, {"relay", "yes"}}).getCode(), http::Code::BadRequest);
 
     // The artifact is durable before the owner can send, and the server sent nothing.
     const std::string content_hash = body["content_hash"];

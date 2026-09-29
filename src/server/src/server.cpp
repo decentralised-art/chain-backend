@@ -1,4 +1,5 @@
 #include <exception>
+#include <format>
 #include <string_view>
 
 #include "server.hpp"
@@ -6,6 +7,34 @@
 
 namespace dcn::server
 {
+    namespace
+    {
+        http::Response sizeRejection(const http::Code code)
+        {
+            http::Response response;
+            response.setVersion("HTTP/1.1");
+            response.setCode(code);
+            response.setHeader(http::Header::Connection, "close");
+            response.setBodyWithContentLength(std::format("{}", code));
+            return response;
+        }
+    }
+
+    std::optional<http::Code> requestSizeRejection(
+        const std::size_t received,
+        const bool headers_complete,
+        const std::size_t content_length,
+        const std::size_t max_body_size)
+    {
+        if(!headers_complete)
+        {
+            if(received > MAX_HEADER_SIZE) return http::Code::RequestHeaderFieldsTooLarge;
+            return std::nullopt;
+        }
+        if(content_length > max_body_size) return http::Code::PayloadTooLarge;
+        return std::nullopt;
+    }
+
     Server::Server(asio::io_context & io_context, asio::ip::tcp::endpoint endpoint)
     :   _io_context(io_context),
         _strand(asio::make_strand(io_context)),
@@ -51,6 +80,11 @@ namespace dcn::server
     void Server::setIdleInterval(std::chrono::milliseconds idle_interval)
     {
         _idle_interval = idle_interval;
+    }
+
+    void Server::setMaxBodySize(const std::size_t max_body_size)
+    {
+        _max_body_size = max_body_size;
     }
 
     asio::awaitable<void> Server::handleConnection(asio::ip::tcp::socket sock)
@@ -106,7 +140,15 @@ namespace dcn::server
             // Try to find end of headers
             std::size_t header_end_pos = full_request_data.find("\r\n\r\n");
             if (header_end_pos == std::string::npos)
+            {
+                if(const auto rejection = requestSizeRejection(full_request_data.size(), false, 0, _max_body_size))
+                {
+                    spdlog::warn("Refusing a request whose headers exceed {} bytes", MAX_HEADER_SIZE);
+                    co_await writeData(sock, std::format("{}", sizeRejection(*rejection)));
+                    co_return;
+                }
                 continue; // keep reading until full headers are received
+            }
 
             // Parse headers first
             request = parse::parseRequestFromString(full_request_data);
@@ -124,6 +166,14 @@ namespace dcn::server
                 catch(...)
                 {
                     spdlog::error("Invalid content length header");
+                    co_return;
+                }
+
+                // Refused before the body is read, so a declared size never has to fit in memory.
+                if(const auto rejection = requestSizeRejection(header_end_pos + 4, true, content_length, _max_body_size))
+                {
+                    spdlog::warn("Refusing a {}-byte request body; the limit is {} bytes", content_length, _max_body_size);
+                    co_await writeData(sock, std::format("{}", sizeRejection(*rejection)));
                     co_return;
                 }
 

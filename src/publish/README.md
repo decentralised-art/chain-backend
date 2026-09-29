@@ -13,7 +13,10 @@ flowchart LR
     Check --> Upload["ArtifactStore::publish<br/>durable + read-back verified"]
     Upload --> Tx["unsigned registry call<br/>nonce, deadline, gas estimate"]
     Tx --> Wallet["owner's wallet<br/>eth_sendTransaction"]
+    Tx -->|relay| Sign["owner signs offline<br/>eth_signTransaction"]
+    Sign --> Send["POST /publish/&lt;kind&gt;/send<br/>checks + eth_sendRawTransaction"]
     Wallet --> Confirm["POST /publish/&lt;kind&gt;<br/>tx_hash"]
+    Send --> Confirm
     Confirm --> Receipt["receipt + registry event"]
 ```
 
@@ -21,12 +24,12 @@ flowchart LR
 
 | Piece | Responsibility |
 | --- | --- |
-| `Publisher` | `prepare`: checks connector dependencies against the target registry, binds the owner's publication nonce and a deadline, stores the artifact durably, estimates gas and returns the unsigned transaction. `confirm`: one receipt lookup, then validation of the registry event. `findPublished`: the registry's current answer for a name. |
+| `Publisher` | `prepare`: checks connector dependencies against the target registry, binds the owner's publication nonce and a deadline, stores the artifact durably, estimates gas and returns the unsigned transaction; for a relay, also the owner's account nonce and fees. `send`: checks an offline-signed transaction and broadcasts it. `confirm`: one receipt lookup, then validation of the registry event. `findPublished`: the registry's current answer for a name. |
 | `DeploymentManifest` | The identity of one PT deployment: proxies, implementations, implementation code hashes, deployment block, protocol id/version, compiler and PT revision, upgrade owner. Written through a temporary file and renamed. |
 | `verifyDeployment` | Re-proves a manifest against the live chain at startup: chain id, proxy implementation slots, implementation code hashes, protocol identity of registry and runner, the runner-to-registry link and the pinned upgrade owner. |
 | `bootstrapDeployment` | Deploys registry and runner implementations and their proxies from one operator account, one transaction at a time, with gas and fee ceilings; waits for every receipt, verifies the result and returns the manifest. |
 | `Signer` | Holds the bootstrap key while it is needed. Loaded from a file readable only by its owner, or from an environment variable that is cleared after reading. |
-| `eth_tx` | Minimal RLP writer plus type-2 (EIP-1559) transaction encoding and signing hash. |
+| `eth_tx` | Minimal RLP writer plus type-2 (EIP-1559) transaction encoding, signing hash, and decoding of a signed transaction with sender recovery. |
 
 ## Publication flow
 
@@ -61,6 +64,37 @@ flowchart LR
 
 The chain stays the source of truth: the registry projection of the event, not
 the confirmation response, is what the server's read endpoints serve.
+
+## Relayed publication
+
+An owner without their own chain endpoint signs the transaction and lets the
+server broadcast it. The owner still pays for it from their own account; the
+server only forwards what the owner signed and never holds a key for it.
+
+1. `POST /publish/<kind>/prepare` with `{"name", "relay": true}`. The answer also
+   carries `signing`: `type` `0x2`, the owner's pending account `nonce`,
+   `maxFeePerGas`, `maxPriorityFeePerGas` and `value` `0x0`, all hex quantities.
+   `relay` is opt-in, so a browser wallet keeps choosing its own nonce and fees.
+2. The owner signs `transaction` merged with `signing` offline, for example with
+   `eth_signTransaction` or a local key.
+3. `POST /publish/<kind>/send` with `{"name", "content_hash", "raw_tx"}`. Before
+   broadcasting, the server checks the following and stops at the first failure:
+   - the transaction decodes as a canonical type-2 transaction with no access list
+     and a low-`s` signature (`400`);
+   - the caller signed it (`403`);
+   - it is for the deployment's chain, calls the registry and transfers no value
+     (`400`);
+   - its calldata publishes exactly the named entity with the requested content
+     hash, whose artifact `prepare` stored (`400`);
+   - a dry run succeeds (`400` on revert) within the transaction's gas limit (`400`).
+4. The answer is `202 {"status": "pending", "tx_hash"}` once the provider accepts
+   the transaction, or already holds it: a retried request is harmless. A used
+   account nonce, or another pending transaction with the same nonce, is `409`,
+   so prepare again.
+5. `POST /publish/<kind>` confirms it as in the publication flow above.
+
+The web UI's Publish tab offers this as "Relay through the server" for wallets
+that can sign without sending. MetaMask cannot, so it is off by default.
 
 The web UI's Publish tab runs steps 1 to 6 with the browser wallet: it switches
 the wallet to the transaction's chain, refuses to send from any account but the

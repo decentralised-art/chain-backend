@@ -1,6 +1,8 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
+#include <optional>
 using namespace std::chrono_literals;
 
 #include "native.h"
@@ -16,6 +18,29 @@ using namespace asio::experimental::awaitable_operators;
 
 namespace dcn::server
 {
+    /// Default ceiling on a request body, in bytes: well above any entity definition or
+    /// signed publication transaction the API accepts.
+    constexpr std::size_t DEFAULT_MAX_BODY_SIZE = 1024 * 1024;
+
+    /// Ceiling on the request line plus headers, in bytes.
+    constexpr std::size_t MAX_HEADER_SIZE = 64 * 1024;
+
+    /**
+     * @brief The status a request is refused with because of its size.
+     *
+     * @param received Bytes read so far on this request.
+     * @param headers_complete Whether the blank line that ends the headers was read.
+     * @param content_length The body size the request declares; used once the headers are complete.
+     * @param max_body_size Largest body accepted.
+     * @return 431 while headers alone exceed MAX_HEADER_SIZE, 413 when the declared body
+     * exceeds `max_body_size`, nullopt when the request is within limits.
+     */
+    std::optional<http::Code> requestSizeRejection(
+        std::size_t received,
+        bool headers_complete,
+        std::size_t content_length,
+        std::size_t max_body_size);
+
     /**
      * @brief Type representing a route handler function.
      */
@@ -123,6 +148,13 @@ namespace dcn::server
             void setIdleInterval(std::chrono::milliseconds idle_interval);
 
             /**
+             * @brief Set the largest request body accepted, in bytes.
+             * A request declaring a larger Content-Length is answered with 413 and the
+             * connection is closed without reading the body.
+             */
+            void setMaxBodySize(std::size_t max_body_size);
+
+            /**
              * @brief Closes the server gracefully.
              * 
              * This function sets the `_close` flag to true, signaling the server to stop
@@ -177,5 +209,6 @@ namespace dcn::server
             Router _router;
 
             std::chrono::milliseconds _idle_interval;
+            std::size_t _max_body_size = DEFAULT_MAX_BODY_SIZE;
     };
 }
