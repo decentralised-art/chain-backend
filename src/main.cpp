@@ -586,6 +586,7 @@ int main(int argc, char* argv[])
     arg_parser.addArg<bool>("--version", "Display version and exit");
     arg_parser.addArg<bool>("--verbose", "Enable verbose logging");
     arg_parser.addArg<unsigned int>("--port", "Port to listen on");
+    arg_parser.addArg<unsigned int>("--max-request-body", "Largest HTTP request body accepted, in bytes; larger requests are answered with 413");
     arg_parser.addArg<std::string>("--chain-rpc", "Ethereum JSON-RPC endpoint URL used for event sync, execution and publication");
     arg_parser.addArg<std::string>("--chain-rpc-env", "Environment variable holding the JSON-RPC endpoint URL; keeps a provider API key out of the process table");
     arg_parser.addArg<std::string>("--chain-registry", "PT registry proxy address, when no deployment manifest is used");
@@ -638,6 +639,14 @@ int main(int argc, char* argv[])
     cfg.verbose = arg_parser.getArg<bool>("--verbose").value_or(false);
 
     cfg.port = arg_parser.getArg<unsigned int>("--port").value_or(dcn::DEFAULT_PORT);
+
+    cfg.max_request_body_size = arg_parser.getArg<unsigned int>("--max-request-body")
+        .value_or(static_cast<unsigned int>(dcn::server::DEFAULT_MAX_BODY_SIZE));
+    if(cfg.max_request_body_size == 0)
+    {
+        spdlog::error("--max-request-body must be a positive number of bytes");
+        return 1;
+    }
 
     const auto events_chain_id = _parseUint64(arg_parser.getArg<std::string>("--events-chain-id").value_or("1"));
     if(!events_chain_id || *events_chain_id == 0)
@@ -825,6 +834,7 @@ int main(int argc, char* argv[])
     dcn::server::Server server(io_context, {asio::ip::tcp::v4(), asio::ip::port_type(cfg.port)});
 
     server.setIdleInterval(5000ms);
+    server.setMaxBodySize(cfg.max_request_body_size);
 
     std::vector<std::shared_ptr<dcn::events::IEmittedLogSource>> event_sources;
     if(cfg.chain_ingestion.use_local_evm_source)
@@ -1064,6 +1074,9 @@ int main(int argc, char* argv[])
     server.addRoute({dcn::http::Method::OPTIONS, "/publish/<string>/prepare"}, dcn::OPTIONS_publish);
     server.addRoute({dcn::http::Method::POST, "/publish/<string>/prepare"},
         dcn::POST_publishPrepare, std::ref(auth_manager), std::ref(evm), publisher_ptr, std::cref(cfg));
+    server.addRoute({dcn::http::Method::OPTIONS, "/publish/<string>/send"}, dcn::OPTIONS_publish);
+    server.addRoute({dcn::http::Method::POST, "/publish/<string>/send"},
+        dcn::POST_publishSend, std::ref(auth_manager), publisher_ptr);
     server.addRoute({dcn::http::Method::OPTIONS, "/publish/<string>"}, dcn::OPTIONS_publish);
     server.addRoute({dcn::http::Method::POST, "/publish/<string>"},
         dcn::POST_publishConfirm, std::ref(auth_manager), publisher_ptr);

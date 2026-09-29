@@ -118,6 +118,12 @@ namespace dcn::pt
         const ConnectorRegistration & registration,
         std::span<const std::uint8_t> owner_signature);
 
+    /// The Publication a `publishTransformation`, `publishCondition` or `publishConnector`
+    /// call carries, with the kind taken from the selector. Nullopt when the calldata is
+    /// not one of those calls or its publication tuple is malformed. The creation code,
+    /// connector registration and owner signature are not decoded.
+    std::optional<Publication> decodePublishCall(std::span<const std::uint8_t> calldata);
+
     /// Calldata for `publicationNonce(address)`.
     std::vector<std::uint8_t> encodePublicationNonceCall(const chain::Address & owner);
 

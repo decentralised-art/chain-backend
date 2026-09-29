@@ -1,10 +1,12 @@
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <format>
 
 #include <spdlog/spdlog.h>
 
 #include "chain.hpp"
+#include "eth_tx.hpp"
 #include "pt_reads.hpp"
 #include "registry_events.hpp"
 
@@ -57,6 +59,31 @@ namespace dcn::publish
         {
             const auto bytes = evmc::from_hex(value);
             return value.starts_with("0x") && bytes && bytes->size() == 32;
+        }
+
+        // A dry run that fails: a deterministic revert, or a provider fault.
+        PublishError _estimateFailure(const rpc::RpcError & error, std::string tx_hash = {})
+        {
+            if(error.kind == rpc::RpcError::Kind::EXECUTION)
+            {
+                return PublishError{
+                    .kind = PublishError::Kind::REVERTED,
+                    .message = error.data.empty()
+                        ? std::format("publication would revert: {}", error.message)
+                        : describeRevert(error.data),
+                    .tx_hash = std::move(tx_hash)};
+            }
+            return _upstream(std::format("eth_estimateGas failed: {}", error.message), std::move(tx_hash));
+        }
+
+        bool _mentions(const std::string & text, const std::string_view needle)
+        {
+            std::string lowered = text;
+            std::ranges::transform(lowered, lowered.begin(), [](const unsigned char c)
+            {
+                return static_cast<char>(std::tolower(c));
+            });
+            return lowered.find(needle) != std::string::npos;
         }
     }
 
@@ -158,7 +185,8 @@ namespace dcn::publish
     }
 
     asio::awaitable<std::expected<PreparedTransaction, PublishError>> Publisher::prepare(
-        PublicationRequest request) const
+        PublicationRequest request,
+        const bool relay) const
     {
         pt::Publication & publication = request.publication;
 
@@ -261,16 +289,29 @@ namespace dcn::publish
         const auto estimate = co_await _client->estimateGas(owner_hex, _manifest.registry, data_hex);
         if(!estimate)
         {
-            if(estimate.error().kind == rpc::RpcError::Kind::EXECUTION)
+            co_return std::unexpected(_estimateFailure(estimate.error()));
+        }
+
+        std::optional<SigningFields> signing;
+        if(relay)
+        {
+            // The pending count includes the owner's own unmined transactions, so the
+            // signed transaction does not collide with one already in the mempool.
+            const auto account_nonce = co_await _client->transactionCount(owner_hex, rpc::BLOCK_TAG_PENDING);
+            if(!account_nonce)
             {
-                co_return std::unexpected(PublishError{
-                    .kind = PublishError::Kind::REVERTED,
-                    .message = estimate.error().data.empty()
-                        ? std::format("publication would revert: {}", estimate.error().message)
-                        : describeRevert(estimate.error().data)});
+                co_return std::unexpected(_upstream(
+                    std::format("cannot read the owner's account nonce: {}", account_nonce.error().message)));
             }
-            co_return std::unexpected(_upstream(
-                std::format("eth_estimateGas failed: {}", estimate.error().message)));
+            const auto fees = co_await _client->feeEstimate();
+            if(!fees)
+            {
+                co_return std::unexpected(_upstream(std::format("cannot estimate fees: {}", fees.error().message)));
+            }
+            signing = SigningFields{
+                .nonce = *account_nonce,
+                .max_fee_per_gas = fees->max_fee_per_gas,
+                .max_priority_fee_per_gas = fees->max_priority_fee_per_gas};
         }
 
         co_return PreparedTransaction{
@@ -283,8 +324,123 @@ namespace dcn::publish
                 pt::predictEntityAddress(_registry_address, publication, request.creation_code)),
             .content_hash = content_hash,
             .publication_nonce = publication.nonce,
-            .deadline = publication.deadline
+            .deadline = publication.deadline,
+            .signing = signing
         };
+    }
+
+    asio::awaitable<std::expected<std::string, PublishError>> Publisher::send(
+        PublicationClaim claim,
+        std::string raw_tx) const
+    {
+        if(_registry_address == chain::Address{})
+        {
+            co_return std::unexpected(_upstream("no registry address is configured"));
+        }
+
+        const auto signed_tx = decodeSignedTransaction(raw_tx);
+        if(!signed_tx)
+        {
+            co_return std::unexpected(_invalid(std::format("'raw_tx' is not accepted: {}", signed_tx.error())));
+        }
+        const Transaction & transaction = signed_tx->transaction;
+        const std::string & tx_hash = signed_tx->tx_hash;
+
+        // The server forwards only the owner's own publication: never someone else's
+        // transaction, and never an arbitrary call it would be relaying for free.
+        if(signed_tx->sender != claim.owner)
+        {
+            co_return std::unexpected(PublishError{
+                .kind = PublishError::Kind::FORBIDDEN,
+                .message = "the transaction is signed by an account other than the entity owner",
+                .tx_hash = tx_hash});
+        }
+        if(transaction.chain_id != _manifest.chain_id)
+        {
+            co_return std::unexpected(_invalid(std::format(
+                "the transaction is for chain {}, the registry is on chain {}", transaction.chain_id, _manifest.chain_id),
+                tx_hash));
+        }
+        if(transaction.to != _registry_address)
+        {
+            co_return std::unexpected(_invalid("the transaction does not call the configured registry", tx_hash));
+        }
+        if(transaction.value != 0)
+        {
+            co_return std::unexpected(_invalid("a publication transaction transfers no value", tx_hash));
+        }
+
+        // The publication must be the one named in the request, whose artifact prepare
+        // stored durably: an event whose artifact cannot be fetched is not reconstructable.
+        const auto publication = pt::decodePublishCall(transaction.data);
+        if(!publication)
+        {
+            co_return std::unexpected(_invalid("the transaction is not a registry publication call", tx_hash));
+        }
+        if(publication->kind != claim.kind || publication->name != claim.name || publication->owner != claim.owner
+           || chain::normalizeHex(chain::bytes32ToHex(publication->content_hash)) != chain::normalizeHex(claim.content_hash)
+           || chain::normalizeHex(chain::bytes32ToHex(publication->metadata_hash)) != chain::normalizeHex(claim.metadata_hash))
+        {
+            co_return std::unexpected(_invalid("the transaction publishes something other than the named entity", tx_hash));
+        }
+
+        // A mined revert still costs the owner gas, so a failing dry run stops here.
+        const std::string owner_hex = chain::addressToHex(claim.owner);
+        const auto estimate = co_await _client->estimateGas(
+            owner_hex, _manifest.registry, chain::bytesToHex(transaction.data));
+        if(!estimate)
+        {
+            co_return std::unexpected(_estimateFailure(estimate.error(), tx_hash));
+        }
+        if(*estimate > transaction.gas_limit)
+        {
+            co_return std::unexpected(_invalid(std::format(
+                "gas limit {} is below the {} the publication needs", transaction.gas_limit, *estimate), tx_hash));
+        }
+
+        const auto sent = co_await _client->sendRawTransaction(raw_tx);
+        if(sent)
+        {
+            co_return tx_hash;
+        }
+
+        const rpc::RpcError & error = sent.error();
+        if(_mentions(error.message, "already known") || _mentions(error.message, "known transaction")
+           || _mentions(error.message, "already imported"))
+        {
+            co_return tx_hash;
+        }
+        if(_mentions(error.message, "nonce too low"))
+        {
+            // Also what a retry reports once the first attempt was mined.
+            const auto receipt = co_await _client->transactionReceipt(tx_hash);
+            if(receipt && *receipt)
+            {
+                co_return tx_hash;
+            }
+            co_return std::unexpected(PublishError{
+                .kind = PublishError::Kind::CONFLICT,
+                .message = "the account nonce is already used; prepare the publication again",
+                .tx_hash = tx_hash});
+        }
+        if(_mentions(error.message, "replacement transaction underpriced"))
+        {
+            co_return std::unexpected(PublishError{
+                .kind = PublishError::Kind::CONFLICT,
+                .message = "another transaction with this account nonce is pending; prepare the publication again",
+                .tx_hash = tx_hash});
+        }
+        if(_mentions(error.message, "insufficient funds"))
+        {
+            co_return std::unexpected(_invalid("the owner's account cannot pay for this transaction", tx_hash));
+        }
+        if(error.kind == rpc::RpcError::Kind::EXECUTION)
+        {
+            co_return std::unexpected(_invalid(
+                std::format("the provider refused the transaction: {}", error.message), tx_hash));
+        }
+        co_return std::unexpected(_upstream(
+            std::format("eth_sendRawTransaction failed: {}", error.message), tx_hash));
     }
 
     std::expected<PublishResult, PublishError> Publisher::_validateReceipt(

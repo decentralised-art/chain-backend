@@ -348,6 +348,22 @@ h3 {
     font-size: 0.83rem;
 }
 
+.checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin: 0.2rem 0 0;
+    font-size: 0.85rem;
+    color: #333333;
+    cursor: pointer;
+}
+
+.checkbox-row input {
+    display: inline-block;
+    width: auto;
+    margin: 0;
+}
+
 .form-row {
     display: flex;
     align-items: flex-end;

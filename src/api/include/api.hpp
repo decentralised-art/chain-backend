@@ -488,9 +488,11 @@ namespace dcn
     /**
      * @brief Handles POST /publish/<kind>/prepare, kind = transformation | condition | connector.
      *
-     * Body {"name"}. Rebuilds the caller's own local entity from its retained definition,
+     * Body {"name", "relay"?}. Rebuilds the caller's own local entity from its retained definition,
      * stores the artifact durably and answers 200 with the unsigned registry transaction
-     * the owner's wallet sends; the owner pays for it. Answers 200 with status
+     * the owner's wallet sends; the owner pays for it. With "relay": true the answer also
+     * carries `signing` (account nonce, fees, type, value), which makes the transaction
+     * signable offline for POST /publish/<kind>/send. Answers 200 with status
      * "published" when the registry already holds this exact publication, and 409 with
      * `missing`/`mismatched` names when a connector dependency is absent from, or
      * different on, the target registry. Dependencies are never published recursively.
@@ -505,6 +507,26 @@ namespace dcn
         evm::EVM & evm,
         const publish::Publisher * publisher,
         const config::Config & config);
+
+    /**
+     * @brief Handles POST /publish/<kind>/send: broadcasts a publication the owner signed offline.
+     *
+     * Body {"name", "content_hash", "raw_tx"}, raw_tx being the signed type-2 transaction
+     * built from a relay /prepare answer. The server checks that the owner signed it, that
+     * it publishes exactly this entity on the configured registry, and that a dry run
+     * does not revert, then forwards it through its own provider; the owner pays for it.
+     * 202 {"status": "pending", "tx_hash"} once broadcast or already known to the
+     * provider; confirm it with POST /publish/<kind>. 403 when another account signed it,
+     * 409 when its account nonce is already used.
+     *
+     * @param publisher Publisher bound to the configured deployment, or null when disabled
+     */
+    asio::awaitable<http::Response> POST_publishSend(
+        const http::Request & request,
+        std::vector<server::RouteArg> route_args,
+        server::QueryArgsList query_args,
+        auth::AuthManager & auth_manager,
+        const publish::Publisher * publisher);
 
     /**
      * @brief Handles POST /publish/<kind>: confirms the owner's publication transaction.

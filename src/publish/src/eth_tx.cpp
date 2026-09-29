@@ -3,6 +3,7 @@
 
 #include "chain.hpp"
 #include "crypto.hpp"
+#include "publication.hpp"
 
 #include "eth_tx.hpp"
 
@@ -63,6 +64,72 @@ namespace dcn::publish
             return fields;
         }
 
+        struct RlpItem
+        {
+            bool is_list = false;
+            std::span<const std::uint8_t> payload;
+        };
+
+        // The item at the front of `input`; `consumed` receives its encoded size. Only
+        // bounds are checked here: canonical form is proven by re-encoding.
+        std::optional<RlpItem> readItem(const std::span<const std::uint8_t> input, std::size_t & consumed)
+        {
+            if(input.empty()) return std::nullopt;
+
+            const std::uint8_t prefix = input[0];
+            if(prefix < 0x80)
+            {
+                consumed = 1;
+                return RlpItem{.is_list = false, .payload = input.first(1)};
+            }
+
+            const bool is_list = prefix >= 0xC0;
+            std::size_t length = prefix - (is_list ? 0xC0 : 0x80);
+            std::size_t header = 1;
+            if(length > 55)
+            {
+                const std::size_t length_of_length = length - 55;
+                if(length_of_length > sizeof(std::size_t) || input.size() < 1 + length_of_length)
+                {
+                    return std::nullopt;
+                }
+                length = 0;
+                for(std::size_t i = 0; i < length_of_length; ++i)
+                {
+                    length = (length << 8) | input[1 + i];
+                }
+                header += length_of_length;
+            }
+
+            if(length > input.size() - header) return std::nullopt;
+            consumed = header + length;
+            return RlpItem{.is_list = is_list, .payload = input.subspan(header, length)};
+        }
+
+        std::optional<std::vector<RlpItem>> readListItems(std::span<const std::uint8_t> payload)
+        {
+            std::vector<RlpItem> items;
+            while(!payload.empty())
+            {
+                std::size_t consumed = 0;
+                const auto item = readItem(payload, consumed);
+                if(!item) return std::nullopt;
+                items.push_back(*item);
+                payload = payload.subspan(consumed);
+            }
+            return items;
+        }
+
+        std::optional<std::uint64_t> readUint(const RlpItem & item)
+        {
+            if(item.is_list || item.payload.size() > 8) return std::nullopt;
+            std::uint64_t value = 0;
+            for(const std::uint8_t byte : item.payload)
+            {
+                value = (value << 8) | byte;
+            }
+            return value;
+        }
     }
 
     namespace rlp
@@ -145,5 +212,107 @@ namespace dcn::publish
         const auto bytes = evmc::from_hex(std::string(raw_tx_hex));
         if(!bytes) return {};
         return chain::bytes32ToHex(chain::keccakBytes(bytes->data(), bytes->size()));
+    }
+
+    std::expected<SignedTransaction, std::string> decodeSignedTransaction(const std::string_view raw_tx_hex)
+    {
+        const auto raw = evmc::from_hex(std::string(raw_tx_hex));
+        if(!raw || raw->empty())
+        {
+            return std::unexpected("not a hex-encoded transaction");
+        }
+        if((*raw)[0] != 0x02)
+        {
+            return std::unexpected("only type-2 (EIP-1559) transactions are accepted");
+        }
+
+        const std::span<const std::uint8_t> body(raw->data() + 1, raw->size() - 1);
+        std::size_t consumed = 0;
+        const auto envelope = readItem(body, consumed);
+        if(!envelope || !envelope->is_list || consumed != body.size())
+        {
+            return std::unexpected("malformed RLP envelope");
+        }
+
+        const auto fields = readListItems(envelope->payload);
+        if(!fields || fields->size() != 12)
+        {
+            return std::unexpected("a signed type-2 transaction has twelve fields");
+        }
+        const std::vector<RlpItem> & field = *fields;
+
+        const auto chain_id = readUint(field[0]);
+        const auto nonce = readUint(field[1]);
+        const auto max_priority_fee_per_gas = readUint(field[2]);
+        const auto max_fee_per_gas = readUint(field[3]);
+        const auto gas_limit = readUint(field[4]);
+        const auto value = readUint(field[6]);
+        if(!chain_id || !nonce || !max_priority_fee_per_gas || !max_fee_per_gas || !gas_limit || !value)
+        {
+            return std::unexpected("transaction quantities must fit in 64 bits");
+        }
+
+        if(field[5].is_list || field[5].payload.size() != 20)
+        {
+            return std::unexpected("the transaction must call a contract address");
+        }
+        chain::Address to{};
+        std::ranges::copy(field[5].payload, to.bytes);
+
+        if(field[7].is_list)
+        {
+            return std::unexpected("transaction data must be a byte string");
+        }
+        if(!field[8].is_list || !field[8].payload.empty())
+        {
+            return std::unexpected("transactions with an access list are not accepted");
+        }
+
+        const auto parity = readUint(field[9]);
+        if(!parity || *parity > 1)
+        {
+            return std::unexpected("signature yParity must be 0 or 1");
+        }
+        if(field[10].is_list || field[11].is_list || field[10].payload.size() > 32 || field[11].payload.size() > 32)
+        {
+            return std::unexpected("malformed signature");
+        }
+
+        Transaction transaction{
+            .chain_id = *chain_id,
+            .nonce = *nonce,
+            .max_priority_fee_per_gas = *max_priority_fee_per_gas,
+            .max_fee_per_gas = *max_fee_per_gas,
+            .gas_limit = *gas_limit,
+            .to = to,
+            .value = *value,
+            .data = std::vector<std::uint8_t>(field[7].payload.begin(), field[7].payload.end())
+        };
+
+        // r and s right-aligned into 32-byte words, then v as the recovery id.
+        std::vector<std::uint8_t> signature(65, 0);
+        std::ranges::copy(field[10].payload, signature.begin() + static_cast<std::ptrdiff_t>(32 - field[10].payload.size()));
+        std::ranges::copy(field[11].payload, signature.begin() + static_cast<std::ptrdiff_t>(64 - field[11].payload.size()));
+        signature[64] = static_cast<std::uint8_t>(*parity);
+
+        // The encoder emits the one canonical form, so reproducing the input byte for byte
+        // rejects non-minimal lengths and integers and anything the reader tolerated.
+        const auto reencoded = evmc::from_hex(encodeSignedTransaction(transaction, signature));
+        if(!reencoded || *reencoded != *raw)
+        {
+            return std::unexpected("the transaction is not canonically encoded");
+        }
+
+        const auto sender = pt::recoverSigner(signingHash(transaction), signature);
+        if(!sender)
+        {
+            return std::unexpected("the signature does not recover to an account");
+        }
+
+        return SignedTransaction{
+            .transaction = std::move(transaction),
+            .sender = *sender,
+            .tx_hash = chain::bytes32ToHex(chain::keccakBytes(raw->data(), raw->size()))
+        };
     }
 }

@@ -69,6 +69,9 @@ namespace dcn::config
 
         std::uint32_t port;
 
+        // Largest HTTP request body accepted, in bytes.
+        std::uint32_t max_request_body_size;
+
         IngestionConfig chain_ingestion;
         ExecuteConfig execute;
         PublishConfig publish;

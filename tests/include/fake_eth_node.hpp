@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <stdexcept>
 #include <map>
 #include <memory>
 #include <optional>
@@ -86,6 +89,8 @@ namespace dcn::tests::fake_eth
         std::uint64_t tx_count = 7;
         std::uint64_t gas_estimate = 150'000;
         std::optional<rpc::RpcError> estimate_error;
+        // Answered for eth_sendRawTransaction instead of accepting the transaction.
+        std::optional<rpc::RpcError> send_error;
 
         bool contains_entity = false;
         std::string entity_content_hash = wordOfFill(0xAA);
@@ -166,6 +171,7 @@ namespace dcn::tests::fake_eth
 
             if(method == "eth_sendRawTransaction")
             {
+                if(send_error) return rpcError(request, send_error->code, send_error->message);
                 sent_raw_transactions.push_back(params.at(0).get<std::string>());
                 const std::string tx_hash = publish::transactionHash(sent_raw_transactions.back());
                 if(mine_deployments)
@@ -307,6 +313,66 @@ namespace dcn::tests::fake_eth
             pt::abi::bytes32Component(content_hash),
             pt::abi::bytes32Component(metadata_hash),
             pt::abi::bytes32Component(bytes32OfFill(0xDD))}));
+    }
+
+    // Key of the entity owner in relayed-publication tests.
+    inline const std::string OWNER_KEY =
+        "0x5151515151515151515151515151515151515151515151515151515151515151";
+
+    inline std::shared_ptr<publish::Signer> makeOwnerSigner()
+    {
+        const std::filesystem::path key_path = buildPath() / "fake_eth_owner.key";
+        std::ofstream out(key_path, std::ios::trunc);
+        out << OWNER_KEY;
+        out.close();
+        // Key files readable by anyone but their owner are refused.
+        std::filesystem::permissions(
+            key_path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace);
+
+        auto signer = publish::Signer::fromKeyFile(key_path);
+        if(!signer) throw std::runtime_error(signer.error());
+        return *signer;
+    }
+
+    // A transformation publication `owner` authorizes, with the metadata hash the API
+    // derives from the kind and name.
+    inline pt::Publication makeRelayedPublication(const chain::Address & owner, const std::string & name)
+    {
+        pt::Publication publication;
+        publication.kind = pt::EntityKind::TRANSFORMATION;
+        publication.name = name;
+        publication.owner = owner;
+        publication.content_hash = bytes32OfFill(0xAA);
+        publication.metadata_hash = pt::computeMetadataHash(pt::EntityKind::TRANSFORMATION, name);
+        publication.creation_code_hash = bytes32OfFill(0xCC);
+        publication.runtime_code_hash = bytes32OfFill(0xDD);
+        publication.nonce = 3;
+        publication.deadline = 1'900'000'000;
+        return publication;
+    }
+
+    // The registry call publishing `publication`, as an owner signs it for relay.
+    inline publish::Transaction makePublicationTransaction(const pt::Publication & publication)
+    {
+        return publish::Transaction{
+            .chain_id = CHAIN_ID,
+            .nonce = 7,
+            .max_priority_fee_per_gas = 1'500'000'000,
+            .max_fee_per_gas = 3'500'000'000,
+            .gas_limit = 200'000,
+            .to = evmc::from_hex<chain::Address>(REGISTRY_ADDRESS).value(),
+            .value = 0,
+            .data = pt::encodePublishTransformationCall(
+                std::vector<std::uint8_t>{0x60, 0x00, 0x60, 0x00, 0xF3}, publication, {})};
+    }
+
+    inline std::string signTransaction(const publish::Signer & signer, const publish::Transaction & transaction)
+    {
+        auto raw = signer.signTransaction(transaction);
+        if(!raw) throw std::runtime_error(raw.error());
+        return *raw;
     }
 
     // A receipt whose only log is a TransformationAdded event for an entity at 0x55.

@@ -116,6 +116,7 @@
         document.getElementById('btn_confirmPublication').addEventListener('click', confirmPublication);
         document.getElementById('publishKind').addEventListener('change', resetPublication);
         document.getElementById('publishName').addEventListener('input', resetPublication);
+        document.getElementById('publishRelay').addEventListener('change', resetPublication);
         document.getElementById('publishTxHash').addEventListener('input', updatePublicationHash);
         document.getElementById('btn_publishCopyResponse').addEventListener('click', () => copyTextFromElement('publishResponseBody'));
         updatePublishActionAvailability();
@@ -444,7 +445,7 @@
                 <section class="tab-panel" data-tab-panel="publish" role="tabpanel" aria-labelledby="tab-btn-publish">
                     <div class="group-head">
                       <h2>Publish</h2>
-                      <p>Register one of your entities on chain. Your wallet sends the transaction and pays for it.</p>
+                      <p>Register one of your entities on chain. Your wallet sends the transaction, or signs it for the server to relay; either way your account pays for it.</p>
                     </div>
                     <div class="tab-grid">
                         <div class="tab-column">
@@ -459,6 +460,12 @@
 
                             <label for="publishName">Name</label>
                             <input type="text" id="publishName" placeholder="add">
+
+                            <label class="checkbox-row" for="publishRelay">
+                                <input type="checkbox" id="publishRelay" aria-describedby="publishRelayHint">
+                                Relay through the server
+                            </label>
+                            <p id="publishRelayHint" class="tab-hint">For wallets that can sign a transaction without sending it. The server checks it and broadcasts it through its own node, so the wallet needs no network access; your account still pays. MetaMask cannot sign without sending: leave this off.</p>
 
                             <div class="button-row">
                                 <button id="btn_preparePublication" class="action-button" disabled>🔒 Prepare</button>
