@@ -281,7 +281,7 @@ static asio::awaitable<void> _runGracefulShutdown(
     dcn::feed::FeedRuntime & feed_runtime,
     dcn::registry::ArtifactRuntime & artifact_runtime)
 {
-    spdlog::info("Decentralised Art server stopping...");
+    spdlog::info("decentralised.art chain backend stopping...");
     // Stop events first: its projectors write into feed_runtime.feed(), so the feed
     // must outlive them. Stopping feed first would let a final projector pass write
     // after the feed's final checkpoint, losing those rows.
@@ -292,7 +292,7 @@ static asio::awaitable<void> _runGracefulShutdown(
     co_await feed_runtime.stop();
     spdlog::info("Feed runtime stopped");
     co_await server.close();
-    spdlog::info("Decentralised Art server close requested");
+    spdlog::info("decentralised.art chain backend close requested");
 
     if(wal_sync_worker != std::nullopt)
     {
@@ -578,7 +578,7 @@ int main(int argc, char* argv[])
 
     spdlog::debug("Version: {}.{}.{}\n", dcn::MAJOR_VERSION, dcn::MINOR_VERSION, dcn::PATCH_VERSION);
 
-    spdlog::debug("Decentralised Art server started with {} arguments", argc);
+    spdlog::debug("decentralised.art chain backend started with {} arguments", argc);
     
     dcn::cmd::ArgParser arg_parser;
     arg_parser.addArg<bool>("-h", "Display help message and exit");
@@ -625,7 +625,7 @@ int main(int argc, char* argv[])
 
     if(arg_parser.getArg<bool>("--version").value_or(false))
     {
-        spdlog::info("Decentralised Art server build timestamp: {}", build_timestamp);
+        spdlog::info("decentralised.art chain backend build timestamp: {}", build_timestamp);
         spdlog::info("Version: {}.{}.{}", dcn::MAJOR_VERSION, dcn::MINOR_VERSION, dcn::PATCH_VERSION);
         return 0;
     }

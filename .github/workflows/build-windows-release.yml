@@ -24,10 +24,10 @@ jobs:
 
     - name: Pack install directory into tarball
       run: |
-        tar -czf dcn-server-windows-x64.tar.gz -C install .
+        tar -czf chain-backend-windows-x64.tar.gz -C install .
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: dcn-server-windows-x64
-        path: dcn-server-windows-x64.tar.gz 
+        name: chain-backend-windows-x64
+        path: chain-backend-windows-x64.tar.gz

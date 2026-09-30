@@ -5,8 +5,8 @@ set(PROJECT_PREFIX "DecentralisedArt")
 
 project("${PROJECT_NAME}"   
     VERSION "0.0.1"
-    DESCRIPTION "DecentralisedArt-Server"
-    HOMEPAGE_URL "https://github.com/hypermusic-ai/dcn-server"
+    DESCRIPTION "decentralised.art chain backend"
+    HOMEPAGE_URL "https://github.com/decentralised-art/chain-backend"
     LANGUAGES C CXX
 )
 

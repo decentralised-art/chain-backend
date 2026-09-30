@@ -9,8 +9,8 @@ set(STRESS_TEST_TARGET "DecentralisedArtServerStressTests")
 
 project("${UNIT_TEST_TARGET}"   
     VERSION "0.0.1"
-    DESCRIPTION "Decentralised Art Server tests"
-    HOMEPAGE_URL "https://github.com/hypermusic-ai/dcn-server"
+    DESCRIPTION "decentralised.art chain backend tests"
+    HOMEPAGE_URL "https://github.com/decentralised-art/chain-backend"
     LANGUAGES CXX
 )
 
