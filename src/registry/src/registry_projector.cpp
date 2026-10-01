@@ -62,15 +62,19 @@ namespace dcn::registry
                 pt::abi::uintComponent(static_cast<std::uint64_t>(kind)),
                 pt::abi::stringComponent(name)};
 
-            const auto address_word = co_await client.callAtBlock(registry_address, encodeCall(
-                kind == EntityKind::TRANSFORMATION ? "getTransformation(string)" : "getCondition(string)",
-                {pt::abi::stringComponent(name)}), block_hash);
-            const auto owner_word = co_await client.callAtBlock(
-                registry_address, encodeCall("getEntityOwner(uint8,string)", entity_key), block_hash);
-            const auto content_word = co_await client.callAtBlock(
-                registry_address, encodeCall("getEntityContentHash(uint8,string)", entity_key), block_hash);
-            const auto metadata_word = co_await client.callAtBlock(
-                registry_address, encodeCall("getEntityMetadataHash(uint8,string)", entity_key), block_hash);
+            // GCC 13 ICEs on braced-init temporaries inside co_await expressions, so each
+            // call payload is built before it is awaited.
+            const std::vector<pt::abi::Component> name_key{pt::abi::stringComponent(name)};
+            const std::string address_call = encodeCall(
+                kind == EntityKind::TRANSFORMATION ? "getTransformation(string)" : "getCondition(string)", name_key);
+            const std::string owner_call = encodeCall("getEntityOwner(uint8,string)", entity_key);
+            const std::string content_call = encodeCall("getEntityContentHash(uint8,string)", entity_key);
+            const std::string metadata_call = encodeCall("getEntityMetadataHash(uint8,string)", entity_key);
+
+            const auto address_word = co_await client.callAtBlock(registry_address, address_call, block_hash);
+            const auto owner_word = co_await client.callAtBlock(registry_address, owner_call, block_hash);
+            const auto content_word = co_await client.callAtBlock(registry_address, content_call, block_hash);
+            const auto metadata_word = co_await client.callAtBlock(registry_address, metadata_call, block_hash);
             if(!address_word || !owner_word || !content_word || !metadata_word)
             {
                 spdlog::error("[RegistryProjector] cannot read {} '{}' from registry {} at block {}",
@@ -89,11 +93,14 @@ namespace dcn::registry
                 co_return std::nullopt;
             }
 
-            const auto args_word = co_await client.callAtBlock(*entity_hex, encodeCall("getArgsCount()", {}), block_hash);
+            const std::string args_call = encodeCall("getArgsCount()", std::vector<pt::abi::Component>{});
+            const auto args_word = co_await client.callAtBlock(*entity_hex, args_call, block_hash);
             const auto code_hash = co_await rpc::readCodeHash(client, *entity_hex);
-            const auto args_count = args_word
-                ? rpc::uint64FromWord(*args_word, "args count")
-                : std::expected<std::uint64_t, rpc::RpcError>(std::unexpected(args_word.error()));
+            std::optional<std::uint64_t> args_count;
+            if(args_word)
+            {
+                if(const auto parsed = rpc::uint64FromWord(*args_word, "args count")) args_count = *parsed;
+            }
             if(!args_count || *args_count > std::numeric_limits<std::uint32_t>::max() || !code_hash || !*code_hash)
             {
                 spdlog::error("[RegistryProjector] cannot read {} '{}' at {}",
@@ -101,13 +108,14 @@ namespace dcn::registry
                 co_return std::nullopt;
             }
 
-            co_return ChainEntityState{
+            ChainEntityState state{
                 .address = evmc::from_hex<chain::Address>(*entity_hex).value_or(chain::Address{}),
                 .owner = *owner_hex,
                 .args_count = static_cast<std::uint32_t>(*args_count),
                 .content_hash = *content_hash,
                 .metadata_hash = *metadata_hash,
                 .runtime_code_hash = **code_hash};
+            co_return state;
         }
     }
 
