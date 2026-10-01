@@ -1196,6 +1196,94 @@ TEST_F(UnitTest, API_Simulate_BrokenDbDependencyReturnsInvariantError)
     EXPECT_FALSE(*contains_connector_after);
 }
 
+TEST_F(UnitTest, API_Simulate_MaterializesAChainOnlyConnectorFromItsArtifacts)
+{
+    ASSERT_TRUE(std::filesystem::exists(solcPath())) << std::format("Missing Solidity compiler at '{}'", solcPath().string());
+    ASSERT_TRUE(std::filesystem::exists(ptPath() / "contracts")) << std::format("Missing PT contracts at '{}'", (ptPath() / "contracts").string());
+
+    const auto root = makeTestPath("simulate_chain_only");
+    PathScope root_scope(root);
+    const auto publisher_storage = root / "publisher";
+    const auto storage_path = root / "server";
+    ASSERT_TRUE(prepareStorageLayout(publisher_storage));
+    ASSERT_TRUE(prepareStorageLayout(storage_path));
+
+    asio::io_context io_context;
+    // The publisher builds the artifacts; the server knows the entities only from the chain.
+    registry::Registry publisher_registry(io_context);
+    evm::EVM publisher_evm(io_context, EVMC_SHANGHAI, solcPath(), ptPath());
+    registry::Registry registry(io_context);
+    evm::EVM evm_instance(io_context, EVMC_SHANGHAI, solcPath(), ptPath());
+    io_context.run();
+
+    const std::string owner_hex = chain::addressToHex(makeAddressFromByte(0x56));
+    const auto transformation_record = makeTransformationRecord("ChainTx", owner_hex, "return x + 1;");
+    ConnectorRecord connector_record = makeConnectorRecord("ChainConnector", owner_hex);
+    addConnectorDimension(connector_record, "", "ChainTx");
+
+    ASSERT_TRUE(runAwaitable(io_context, loader::deployTransformation(
+        publisher_evm, publisher_registry, transformation_record, publisher_storage)).has_value());
+    const auto transformation_publication = runAwaitable(io_context, loader::prepareTransformationPublication(
+        publisher_evm, transformation_record, publisher_storage));
+    ASSERT_TRUE(transformation_publication.has_value());
+    const auto connector_publication = runAwaitable(io_context, loader::prepareConnectorPublication(
+        publisher_evm, connector_record, publisher_storage, makeAddressFromByte(0xAB)));
+    ASSERT_TRUE(connector_publication.has_value());
+
+    // The registry holds what the chain events carry: the definition without source, and
+    // the publication hashes.
+    const auto chainVersion = [](const loader::PreparedPublication & publication)
+    {
+        const auto bundle = pt::decodeArtifactBundle(publication.artifact_bytes, publication.content_hash);
+        EXPECT_TRUE(bundle.has_value());
+        registry::EntitySource source{
+            .source_id = "eip155:1:0x00000000000000000000000000000000000000ab",
+            .chain_namespace = "eip155:1",
+            .registry_address = "0x00000000000000000000000000000000000000ab",
+            .content_hash = publication.content_hash,
+            .metadata_hash = bundle->metadata_hash,
+            .runtime_code_hash = bundle->runtime_code_hash};
+        return std::make_pair(source, bundle->definition.dump());
+    };
+    const auto [transformation_source, transformation_definition] = chainVersion(*transformation_publication);
+    const auto [connector_source, connector_definition] = chainVersion(*connector_publication);
+    const auto chain_transformation = parse::parseFromJson<TransformationRecord>(transformation_definition, parse::use_protobuf);
+    const auto chain_connector = parse::parseFromJson<ConnectorRecord>(connector_definition, parse::use_protobuf);
+    ASSERT_TRUE(chain_transformation.has_value());
+    ASSERT_TRUE(chain_connector.has_value());
+    ASSERT_TRUE(runAwaitable(io_context, registry.addTransformationVersion(
+        transformation_source, makeAddressFromByte(0x71), *chain_transformation)));
+    ASSERT_TRUE(runAwaitable(io_context, registry.addConnectorVersion(
+        connector_source, makeAddressFromByte(0x72), *chain_connector)));
+    ASSERT_FALSE(runAwaitable(io_context, registry.hasLocalEntity(pt::EntityKind::CONNECTOR, "ChainConnector")));
+
+    config::Config cfg;
+    cfg.storage_path = storage_path;
+    const auto simulate = [&]()
+    {
+        return runAwaitable(io_context, POST_simulate(
+            makeExecuteRequest("ChainConnector"), {}, {}, registry, evm_instance, cfg));
+    };
+
+    // Until the artifacts are available there is nothing verified to build from.
+    EXPECT_EQ(simulate().getCode(), http::Code::ServiceUnavailable);
+
+    const pt::ArtifactStore cache(storage_path / "artifacts" / "cache");
+    ASSERT_TRUE(cache.cache(transformation_publication->artifact_bytes).has_value());
+    ASSERT_TRUE(cache.cache(connector_publication->artifact_bytes).has_value());
+
+    const auto response = simulate();
+    ASSERT_EQ(response.getCode(), http::Code::OK) << response.getBody();
+    EXPECT_TRUE(json::parse(response.getBody(), nullptr, false).is_array());
+
+    const auto contains_tx = containsTransformation(io_context, evm_instance, "ChainTx");
+    ASSERT_TRUE(contains_tx.has_value());
+    EXPECT_TRUE(*contains_tx);
+    const auto contains_connector = containsConnector(io_context, evm_instance, "ChainConnector");
+    ASSERT_TRUE(contains_connector.has_value());
+    EXPECT_TRUE(*contains_connector);
+}
+
 TEST_F(UnitTest, SQLiteRegistryStore_QueryHelpers_PrepareFailureReturnsSafeDefaults)
 {
     const auto storage_path = makeTestPath("sqlite_prepare_failure");

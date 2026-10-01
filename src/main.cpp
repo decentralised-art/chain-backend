@@ -1104,7 +1104,8 @@ int main(int argc, char* argv[])
         events_runtime.projectionStore(),
         registry,
         events_runtime.writeStrand(),
-        projector_retry));
+        projector_retry,
+        chain_access ? chain_access->client : nullptr));
 
     events_runtime.start();
     artifact_runtime.start();

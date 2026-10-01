@@ -1,5 +1,8 @@
+#include <limits>
 #include <optional>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <spdlog/spdlog.h>
@@ -9,22 +12,116 @@
 #include "connector.hpp"
 #include "transformation.hpp"
 #include "condition.hpp"
+#include "publication.hpp"
 #include "address.hpp"
+#include "chain.hpp"
 #include "format_hash.hpp"
 #include "hex.hpp"
 #include "async.hpp"
 
 namespace dcn::registry
 {
+    namespace
+    {
+        std::string encodeCall(const std::string & signature, const std::vector<pt::abi::Component> & arguments)
+        {
+            std::vector<std::uint8_t> call = chain::constructSelector(signature);
+            const std::vector<std::uint8_t> encoded = pt::abi::encodeTuple(arguments);
+            call.insert(call.end(), encoded.begin(), encoded.end());
+            return chain::bytesToHex(call);
+        }
+
+        std::optional<std::string> bytes32FromWord(const std::string & word_hex)
+        {
+            const auto value = evmc::from_hex<evmc::bytes32>(word_hex);
+            if(!value) return std::nullopt;
+            return chain::bytes32ToHex(*value);
+        }
+
+        struct ChainEntityState
+        {
+            chain::Address address{};
+            std::string owner;
+            std::uint32_t args_count = 0;
+            std::string content_hash;
+            std::string metadata_hash;
+            std::string runtime_code_hash;
+        };
+
+        // A transformation or condition as the PT registry holds it at `block_hash`: the
+        // fields its Added event carries. The runtime code hash is the entity's code hash,
+        // which the registry checks against the publication when it deploys the entity.
+        asio::awaitable<std::optional<ChainEntityState>> readChainEntity(
+            const rpc::EthClient & client,
+            const std::string & registry_address,
+            const std::string & block_hash,
+            const EntityKind kind,
+            const std::string & name)
+        {
+            const std::vector<pt::abi::Component> entity_key{
+                pt::abi::uintComponent(static_cast<std::uint64_t>(kind)),
+                pt::abi::stringComponent(name)};
+
+            const auto address_word = co_await client.callAtBlock(registry_address, encodeCall(
+                kind == EntityKind::TRANSFORMATION ? "getTransformation(string)" : "getCondition(string)",
+                {pt::abi::stringComponent(name)}), block_hash);
+            const auto owner_word = co_await client.callAtBlock(
+                registry_address, encodeCall("getEntityOwner(uint8,string)", entity_key), block_hash);
+            const auto content_word = co_await client.callAtBlock(
+                registry_address, encodeCall("getEntityContentHash(uint8,string)", entity_key), block_hash);
+            const auto metadata_word = co_await client.callAtBlock(
+                registry_address, encodeCall("getEntityMetadataHash(uint8,string)", entity_key), block_hash);
+            if(!address_word || !owner_word || !content_word || !metadata_word)
+            {
+                spdlog::error("[RegistryProjector] cannot read {} '{}' from registry {} at block {}",
+                    pt::entityKindName(kind), name, registry_address, block_hash);
+                co_return std::nullopt;
+            }
+
+            const auto entity_hex = rpc::addressFromWord(*address_word, "entity address");
+            const auto owner_hex = rpc::addressFromWord(*owner_word, "entity owner");
+            const auto content_hash = bytes32FromWord(*content_word);
+            const auto metadata_hash = bytes32FromWord(*metadata_word);
+            if(!entity_hex || !owner_hex || !content_hash || !metadata_hash)
+            {
+                spdlog::error("[RegistryProjector] registry {} returned malformed state for {} '{}'",
+                    registry_address, pt::entityKindName(kind), name);
+                co_return std::nullopt;
+            }
+
+            const auto args_word = co_await client.callAtBlock(*entity_hex, encodeCall("getArgsCount()", {}), block_hash);
+            const auto code_hash = co_await rpc::readCodeHash(client, *entity_hex);
+            const auto args_count = args_word
+                ? rpc::uint64FromWord(*args_word, "args count")
+                : std::expected<std::uint64_t, rpc::RpcError>(std::unexpected(args_word.error()));
+            if(!args_count || *args_count > std::numeric_limits<std::uint32_t>::max() || !code_hash || !*code_hash)
+            {
+                spdlog::error("[RegistryProjector] cannot read {} '{}' at {}",
+                    pt::entityKindName(kind), name, *entity_hex);
+                co_return std::nullopt;
+            }
+
+            co_return ChainEntityState{
+                .address = evmc::from_hex<chain::Address>(*entity_hex).value_or(chain::Address{}),
+                .owner = *owner_hex,
+                .args_count = static_cast<std::uint32_t>(*args_count),
+                .content_hash = *content_hash,
+                .metadata_hash = *metadata_hash,
+                .runtime_code_hash = **code_hash};
+        }
+    }
+
     RegistryProjector::RegistryProjector(
         events::SQLiteHotStore & store,
         Registry & registry,
         const asio::strand<asio::io_context::executor_type> & write_strand,
-        events::ProjectorRetryConfig retry)
+        events::ProjectorRetryConfig retry,
+        std::shared_ptr<const rpc::EthClient> chain)
         : _store(store)
         , _registry(registry)
         , _write_strand(write_strand)
         , _retry(retry)
+        , _chain(std::move(chain))
     {
         // Load the persisted cursor so we resume from the right position after restart.
         _cursor = _registry.getMaterializationCursor();
@@ -175,6 +272,72 @@ namespace dcn::registry
         }
 
         co_return resolved;
+    }
+
+    asio::awaitable<bool> RegistryProjector::_backfillDependencies(
+        const EntitySource & source,
+        const std::string & block_hash,
+        const Connector & connector)
+    {
+        if(!_chain) co_return true;
+
+        std::set<std::pair<EntityKind, std::string>> dependencies;
+        for(const auto & dimension : connector.dimensions())
+        {
+            for(const auto & transformation : dimension.transformations())
+            {
+                if(!transformation.name().empty())
+                {
+                    dependencies.emplace(EntityKind::TRANSFORMATION, transformation.name());
+                }
+            }
+        }
+        if(!connector.condition_name().empty())
+        {
+            dependencies.emplace(EntityKind::CONDITION, connector.condition_name());
+        }
+
+        // ponytail: composite and binding connectors are not back-filled; their definition
+        // lives only in their event or artifact, not in readable registry state.
+        for(const auto & [kind, name] : dependencies)
+        {
+            if(co_await _registry.hasRemoteEntity(kind, name)) continue;
+
+            const auto state = co_await readChainEntity(*_chain, source.registry_address, block_hash, kind, name);
+            if(!state) co_return false;
+
+            // Read from registry state rather than an event: the origin is the block it was
+            // read at, with no log index.
+            EntitySource dependency_source = source;
+            dependency_source.content_hash = state->content_hash;
+            dependency_source.metadata_hash = state->metadata_hash;
+            dependency_source.runtime_code_hash = state->runtime_code_hash;
+            dependency_source.log_index = -1;
+            dependency_source.definition_conflict = false;
+
+            bool added = false;
+            if(kind == EntityKind::TRANSFORMATION)
+            {
+                TransformationRecord record;
+                record.mutable_transformation()->set_name(name);
+                record.mutable_transformation()->set_args_count(state->args_count);
+                record.set_owner(state->owner);
+                added = co_await _registry.addTransformationVersion(dependency_source, state->address, std::move(record));
+            }
+            else
+            {
+                ConditionRecord record;
+                record.mutable_condition()->set_name(name);
+                record.mutable_condition()->set_args_count(state->args_count);
+                record.set_owner(state->owner);
+                added = co_await _registry.addConditionVersion(dependency_source, state->address, std::move(record));
+            }
+            if(!added) co_return false;
+
+            spdlog::info("[RegistryProjector] back-filled {} '{}' of connector '{}' from source '{}'",
+                pt::entityKindName(kind), name, connector.name(), source.source_id);
+        }
+        co_return true;
     }
 
     asio::awaitable<bool> RegistryProjector::_materializeOne(const events::ChangeRecord & row)
@@ -394,6 +557,10 @@ namespace dcn::registry
             }
 
             ConnectorRecord record = pt::buildConnectorRecordFromEvent(*event);
+            if(!local_source && !co_await _backfillDependencies(source, row.block_hash, record.connector()))
+            {
+                co_return false;
+            }
             co_return co_await _registry.addConnectorVersion(
                 source, materializedAddress(event->connector_address), std::move(record), expected_format_hash);
         }

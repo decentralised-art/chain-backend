@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string_view>
 
 #include "native.h"
@@ -10,6 +11,7 @@
 #include "event_projector.hpp"
 #include "sqlite_hot_store.hpp"
 #include "registry.hpp"
+#include "eth_client.hpp"
 
 namespace dcn::registry
 {
@@ -39,6 +41,11 @@ namespace dcn::registry
      *     a periodic idle-time sweep (ProjectorRetryConfig::sweep_interval_ms) retries
      *     them and clears the bit once materialization succeeds. If the dead-letter
      *     mark itself cannot be written, the cursor stays parked.
+     *
+     * Dependency back-fill: with a chain client, a chain connector whose transformations
+     * or condition have no chain version in the registry (registered before the ingested
+     * block range) gets them read from the PT registry state at the connector's block and
+     * stored first, so the registry holds the connector's full dependency set.
      */
     class RegistryProjector final : public events::IEventProjector
     {
@@ -47,7 +54,8 @@ namespace dcn::registry
                 events::SQLiteHotStore & store,
                 Registry & registry,
                 const asio::strand<asio::io_context::executor_type> & write_strand,
-                events::ProjectorRetryConfig retry = {});
+                events::ProjectorRetryConfig retry = {},
+                std::shared_ptr<const rpc::EthClient> chain = nullptr);
 
             std::string_view id() const override;
 
@@ -66,10 +74,20 @@ namespace dcn::registry
             // and clears their bit on success. Returns the number of rows resolved.
             asio::awaitable<std::size_t> _sweepDeadLetters(std::size_t limit, std::int64_t now_ms);
 
+            // Stores the chain version of every transformation and condition `connector`
+            // uses that the registry lacks. False when one of them cannot be read.
+            asio::awaitable<bool> _backfillDependencies(
+                const EntitySource & source,
+                const std::string & block_hash,
+                const Connector & connector);
+
             events::SQLiteHotStore & _store;
             Registry & _registry;
             asio::strand<asio::io_context::executor_type> _write_strand;
             events::ProjectorRetryConfig _retry;
+            // ponytail: one client serves every chain source; key it by source_id when a
+            // second RPC source is added.
+            std::shared_ptr<const rpc::EthClient> _chain;
             std::int64_t _cursor{0};
 
             // Consecutive-failure tracking for the row currently at the cursor head.

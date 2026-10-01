@@ -481,7 +481,7 @@ TEST_F(UnitTest, API_Execute_RunsTheConnectorAsAGasCappedEthCallOnTheRunner)
     EXPECT_EQ(execute(&chain_access).getCode(), http::Code::ServiceUnavailable);
 }
 
-TEST_F(UnitTest, API_Simulate_ValidatesTheRequestAndRunsOnlyLocalConnectors)
+TEST_F(UnitTest, API_Simulate_ValidatesTheRequestAndRefusesUnavailableChainConnectors)
 {
     asio::io_context io_context;
     registry::Registry registry(io_context);
@@ -510,11 +510,11 @@ TEST_F(UnitTest, API_Simulate_ValidatesTheRequestAndRunsOnlyLocalConnectors)
 
     EXPECT_EQ(simulate(json{{"connector_name", "Missing"}, {"particles_count", 1}}).getCode(), http::Code::NotFound);
 
-    // A connector that exists only on chain is executed there, not simulated.
+    // A connector that exists only on chain cannot be simulated until its artifacts are available.
     ConnectorRecord record;
     record.set_owner(chain::addressToHex(makeAddressFromByte(0x42)));
     record.mutable_connector()->set_name("ChainOnly");
     record.mutable_connector()->add_dimensions();
     ASSERT_TRUE(runAwaitable(io_context, registry.addConnectorVersion(chainSource(), makeAddressFromByte(0x60), record)));
-    EXPECT_EQ(simulate(json{{"connector_name", "ChainOnly"}, {"particles_count", 1}}).getCode(), http::Code::NotFound);
+    EXPECT_EQ(simulate(json{{"connector_name", "ChainOnly"}, {"particles_count", 1}}).getCode(), http::Code::ServiceUnavailable);
 }

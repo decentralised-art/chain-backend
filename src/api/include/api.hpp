@@ -569,10 +569,11 @@ namespace dcn
         const ChainAccess * chain);
 
     /**
-     * @brief Handles POST /simulate: runs a connector created on this server on the local EVM.
+     * @brief Handles POST /simulate: runs a registered connector on the local EVM.
      *
-     * Only connectors with a local version qualify (404 otherwise); a connector that
-     * exists only on chain runs with POST /execute. No login is required.
+     * A connector that exists only on chain is first materialized in the local EVM with
+     * its dependencies, from their verified artifacts; 503 while those artifacts are not
+     * available. 404 for a connector the registry does not hold. No login is required.
      */
     asio::awaitable<http::Response> POST_simulate(
         const http::Request & request,

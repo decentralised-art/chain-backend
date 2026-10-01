@@ -284,6 +284,20 @@ flowchart LR
 | Condition | `conditions(name, owner, args_count)` | `owned_conditions` | Existing matching rows are idempotent; divergent rows are retried, then dead-lettered. |
 | Cursor | `materialization_cursor(singleton, last_change_seq)` | none | Last hot-store `change_seq` durably consumed by `RegistryProjector`. |
 
+A chain connector can use transformations and conditions registered before the
+ingested block range, so their events are never seen. With `--chain-rpc`, the
+projector reads each such dependency from the PT registry state at the
+connector's block (`getTransformation`/`getCondition`, `getEntityOwner`,
+`getEntityContentHash`, `getEntityMetadataHash`, the entity's `getArgsCount` and
+code hash) and stores it as a chain version before the connector, so the
+artifact runtime hydrates it too. A dependency that cannot be read fails the row
+under the normal retry/dead-letter policy. Composite and binding connectors are
+not back-filled.
+
+`POST /simulate` runs any registered connector: one that exists only on chain is
+first deployed into the local EVM with its dependencies from their verified
+artifacts, and answers 503 while those artifacts are unavailable.
+
 ## Failure Handling
 
 Both projectors share one failure policy: retry in place, then quarantine — never
