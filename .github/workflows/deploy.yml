@@ -16,13 +16,23 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     env:
-      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      DEPLOY_INSTALL_DIR: ${{ vars.DEPLOY_INSTALL_DIR }}
+      DEPLOY_SERVICE_NAME: ${{ vars.DEPLOY_SERVICE_NAME }}
     
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
+    - name: Check deployment variables
+      run: |
+        for name in DEPLOY_HOST DEPLOY_USER DEPLOY_INSTALL_DIR DEPLOY_SERVICE_NAME; do
+          if [[ -z "${!name}" ]]; then
+            echo "::error::Required repository variable $name is not set"
+            exit 1
+          fi
+        done
+
     - name: Install tools
       run: sudo apt update && sudo apt install -y sshpass rsync
 
@@ -59,23 +69,25 @@ jobs:
     - name: Stop server service
       uses: appleboy/ssh-action@v1.0.3
       with:
-        host: 34.118.118.250
-        username: hypermusic
+        host: ${{ env.DEPLOY_HOST }}
+        username: ${{ env.DEPLOY_USER }}
         key: ${{ secrets.SSH_PRIVATE_KEY }}
+        envs: DEPLOY_SERVICE_NAME
         script: |
-          sudo systemctl stop decentralised-art-server
+          sudo systemctl stop "$DEPLOY_SERVICE_NAME"
           echo "Service stopped"
     
     - name: Clear remote install directory
       uses: appleboy/ssh-action@v1.0.3
       with:
-        host: 34.118.118.250
-        username: hypermusic
+        host: ${{ env.DEPLOY_HOST }}
+        username: ${{ env.DEPLOY_USER }}
         key: ${{ secrets.SSH_PRIVATE_KEY }}
+        envs: DEPLOY_INSTALL_DIR
         script: |
-          echo "Clearing /home/hypermusic/decentralised-art-install..."
+          echo "Clearing $DEPLOY_INSTALL_DIR..."
           mkdir -p /tmp/empty-dir
-          rsync -a --delete --exclude 'storage' /tmp/empty-dir/ /home/hypermusic/decentralised-art-install/
+          rsync -a --delete --exclude 'storage' /tmp/empty-dir/ "$DEPLOY_INSTALL_DIR/"
 
     - name: Upload to server
       env:
@@ -88,7 +100,7 @@ jobs:
 
         # Use rsync to copy contents (not the 'install/' dir itself)
         rsync -az --delete --exclude 'storage' -e "ssh -i $KEY_FILE -o StrictHostKeyChecking=no" \
-          install/ hypermusic@34.118.118.250:/home/hypermusic/decentralised-art-install
+          install/ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_INSTALL_DIR/"
 
         # Clean up key file
         rm -f "$KEY_FILE"
@@ -97,10 +109,11 @@ jobs:
     - name: Restart server service
       uses: appleboy/ssh-action@v1.0.3
       with:
-        host: 34.118.118.250
-        username: hypermusic
+        host: ${{ env.DEPLOY_HOST }}
+        username: ${{ env.DEPLOY_USER }}
         key: ${{ secrets.SSH_PRIVATE_KEY }}
+        envs: DEPLOY_SERVICE_NAME
         script: |
-          sudo systemctl restart decentralised-art-server
-          sudo systemctl status decentralised-art-server --no-pager
+          sudo systemctl restart "$DEPLOY_SERVICE_NAME"
+          sudo systemctl status "$DEPLOY_SERVICE_NAME" --no-pager
           echo "Service restarted"
