@@ -47,7 +47,7 @@ namespace dcn::server
     asio::awaitable<void> Server::close()
     {
         co_await asio::dispatch(asio::bind_executor(_strand, asio::use_awaitable));
-        spdlog::debug("Decentralised Art server request close");
+        spdlog::debug("decentralised.art chain backend request close");
         _close = true;
         co_return;
     }
@@ -55,7 +55,7 @@ namespace dcn::server
     asio::awaitable<void> Server::listen()
     {
         co_await asio::dispatch(asio::bind_executor(_strand, asio::use_awaitable));
-        spdlog::info("Decentralised Art server listening on port {}", _acceptor.local_endpoint().port());
+        spdlog::info("decentralised.art chain backend listening on port {}", _acceptor.local_endpoint().port());
         std::chrono::steady_clock::time_point listen_deadline{};
 
         while (_close == false)

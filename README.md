@@ -1,14 +1,16 @@
-# Decentralised Art server
+# chain-backend
 
-[![Test (linux Debug)](https://github.com/hypermusic-ai/dcn-server/actions/workflows/test-linux-debug.yml/badge.svg)](https://github.com/hypermusic-ai/dcn-server/actions/workflows/test-linux-debug.yml) [![Test (Windows Debug)](https://github.com/hypermusic-ai/dcn-server/actions/workflows/test-windows-debug.yml/badge.svg)](https://github.com/hypermusic-ai/dcn-server/actions/workflows/test-windows-debug.yml) [![Test (macOS Debug)](https://github.com/hypermusic-ai/dcn-server/actions/workflows/test-macos-debug.yml/badge.svg)](https://github.com/hypermusic-ai/dcn-server/actions/workflows/test-macos-debug.yml)
+C++ chain API for decentralised.art.
+
+[![Test (linux Debug)](https://github.com/decentralised-art/chain-backend/actions/workflows/test-linux-debug.yml/badge.svg)](https://github.com/decentralised-art/chain-backend/actions/workflows/test-linux-debug.yml) [![Test (Windows Debug)](https://github.com/decentralised-art/chain-backend/actions/workflows/test-windows-debug.yml/badge.svg)](https://github.com/decentralised-art/chain-backend/actions/workflows/test-windows-debug.yml) [![Test (macOS Debug)](https://github.com/decentralised-art/chain-backend/actions/workflows/test-macos-debug.yml/badge.svg)](https://github.com/decentralised-art/chain-backend/actions/workflows/test-macos-debug.yml)
 
 ---
 
-[View docs](https://hypermusic-ai.github.io/dcn-server/) [![Docs](https://img.shields.io/badge/docs-online-blue)](https://hypermusic-ai.github.io/dcn-server/)
+[Public API documentation](https://decentralised.art/documentation/)
 
 ## Module docs
 
-- [Events Pipeline](https://hypermusic-ai.github.io/dcn-server/readme_src_events.html)
+- [Events Pipeline](src/events/README.md)
 
 ## Dependencies
 
@@ -43,14 +45,14 @@ This project requires the following libraries:
 To configure the project using CMake, run the following command:
 
 ```sh
-cmake -S . -B build -DCMAKE_INSTALL_PREFIX=install -DDECENTRALIZED_ART_BUILD_TESTS=ON
+cmake -S . -B build -DCMAKE_INSTALL_PREFIX=install -DDECENTRALISED_ART_BUILD_TESTS=ON
 ```
 
 - `-S .`: Specifies the source directory.
 - `-B build`: Specifies the build directory.
 - `-DCMAKE_INSTALL_PREFIX=install`: Specifies `<INSTALL_DIRECTORY>`.
-- `-DDECENTRALIZED_ART_BUILD_TESTS=ON`: Enables tests.
-- `-DDECENTRALIZED_ART_BUILD_STRESS_TESTS=ON`: Enables stress tests.
+- `-DDECENTRALISED_ART_BUILD_TESTS=ON`: Enables tests.
+- `-DDECENTRALISED_ART_BUILD_STRESS_TESTS=ON`: Enables stress tests.
 - `-DDECENTRALISED_ART_USE_SUBMODULE_PT=ON`: Enables use of local PT submodule.
 
 ---

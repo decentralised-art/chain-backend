@@ -2,13 +2,13 @@
 
 ## Scope
 
-Instructions in this file apply to the repository root (`dcn-server-cpp`) and all subdirectories.
+Instructions in this file apply to the repository root (`chain-backend`) and all subdirectories.
 
 ## Repository Structure
 
 Key directories in this repository:
 
-- `src/` - C++ implementation of the DCN server
+- `src/` - C++ implementation of the decentralised.art chain backend
 - `include/` - public/internal header files
 - `tests/` - unit/integration tests
 - `cmake/` - CMake helper modules
@@ -20,7 +20,7 @@ Key directories in this repository:
 This workspace contains two primary repositories with different ownership:
 
 - `submodule/pt` is the Solidity PT protocol and is the **source of truth** for protocol behavior.
-- `dcn-server-cpp` (this repository) is a C++ REST API server that interacts with the PT protocol.
+- `chain-backend` (this repository) is a C++ REST API server that interacts with the PT protocol.
 
 When protocol behavior is unclear, agents should treat `submodule/pt` as authoritative and ensure server-side behavior aligns with it.
 

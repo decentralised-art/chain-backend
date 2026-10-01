@@ -1,0 +1,16 @@
+[Unit]
+Description=decentralised.art Chain Backend
+After=network.target
+
+[Service]
+Type=simple
+User=hypermusic
+WorkingDirectory=/home/hypermusic/decentralised-art-chain-backend
+ExecStart=/home/hypermusic/decentralised-art-chain-backend/bin/DecentralisedArtServer
+Restart=no
+Environment=PORT=54321
+Environment=DECENTRALISED_ART_IMPORT_TRACE=1
+
+[Install]
+WantedBy=multi-user.target
+~
