@@ -343,6 +343,12 @@ TEST_F(UnitTest, Events_Concurrency_ReadersDuringWriter_DoNotCorruptState)
         }
     });
 
+    // Start writing only once the reader is live, so reads overlap the writes.
+    while(read_iterations.load() == 0)
+    {
+        std::this_thread::yield();
+    }
+
     for(int i = 0; i < 24; ++i)
     {
         const std::int64_t block = 2'000 + i;
