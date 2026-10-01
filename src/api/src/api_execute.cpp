@@ -220,14 +220,22 @@ namespace dcn
         if(!begun) co_return std::move(begun.error());
         const ExecuteRequest & execute_request = *begun;
 
-        if(!co_await registry.hasLocalEntity(pt::EntityKind::CONNECTOR, execute_request.connector_name()))
+        const std::string & connector_name = execute_request.connector_name();
+        if(!co_await registry.hasConnector(connector_name))
         {
             co_return failure(http::Code::NotFound, "Connector not found");
         }
 
-        if(!co_await loader::ensureConnectorDeployed(
-            evm, registry, execute_request.connector_name(), config.storage_path))
+        // A connector known only from a chain is materialized in the local EVM, together
+        // with its dependencies, from their verified artifacts.
+        const bool chain_only = !co_await registry.hasLocalEntity(pt::EntityKind::CONNECTOR, connector_name);
+        if(!co_await loader::ensureConnectorDeployed(evm, registry, connector_name, config.storage_path))
         {
+            if(chain_only)
+            {
+                co_return failure(http::Code::ServiceUnavailable,
+                    "Chain connector cannot be simulated yet: the verified artifacts of it or its dependencies are not available");
+            }
             co_return failure(http::Code::InternalServerError, "Connector deployment invariant failed");
         }
 

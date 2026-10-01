@@ -1,6 +1,7 @@
 #include "unit-tests.hpp"
 #include "events_test_harness.hpp"
 #include "events_sql_assertions.hpp"
+#include "fake_eth_node.hpp"
 
 #include "registry_projector.hpp"
 
@@ -226,6 +227,93 @@ TEST_F(UnitTest, Events_RegistryProjector_ChangelogCursor_MaterializesOnFinalize
     EXPECT_GE(projected_second, 1u);
     EXPECT_TRUE(runAw(io, registry.hasTransformation(name)));
     EXPECT_GT(projector.cursor(), cursor_after_skip); // cursor advanced beyond finalized row
+}
+
+// ---------------------------------------------------------------------------
+// A chain connector whose transformation and condition were registered before the
+// ingested block range gets them read from the registry state at the connector's block
+// and stored as chain versions, so the connector materializes with its dependencies.
+// ---------------------------------------------------------------------------
+TEST(RegistryProjection, ChainConnector_BackfillsMissingDependenciesFromRegistryState)
+{
+    using namespace dcn::tests::fake_eth;
+
+    const auto paths = makeTempEventsPaths("reg_proj_backfill");
+    asio::io_context io;
+    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    registry::Registry registry(io);
+    const std::string source_id = std::format("eip155:{}:{}", CHAIN_ID, REGISTRY_ADDRESS);
+
+    auto node = std::make_shared<FakeNode>();
+    node->call_override = [](const json & request) -> std::string
+    {
+        const std::string data = request.at("params").at(0).value("data", "");
+        if(data.starts_with(selectorOf("getEntityMetadataHash(uint8,string)"))) return rpcResult(request, wordOfFill(0xBB));
+        if(data.starts_with(selectorOf("getArgsCount()"))) return rpcResult(request, wordOfUint(2));
+        return {};
+    };
+
+    ConnectorRecord conn_record;
+    conn_record.set_owner(hexAddress(0x42));
+    conn_record.mutable_connector()->set_name("backfill_connector");
+    conn_record.mutable_connector()->set_condition_name("early_cond");
+    conn_record.mutable_connector()->add_dimensions()->add_transformations()->set_name("early_tf");
+    const auto enc = dcn::tests::encodeConnectorAddedForTest(conn_record);
+
+    events::DecodedEvent conn_event =
+        makeDecodedEvent(101, 0, 1, 0xCC, 0xDD, events::EventType::CONNECTOR_ADDED);
+    conn_event.raw.source_id = source_id;
+    conn_event.raw.address = REGISTRY_ADDRESS;
+    conn_event.raw.data_hex = enc.data_hex;
+    conn_event.raw.topics[0] = enc.topics_hex[0];
+    conn_event.raw.topics[1] = enc.topics_hex[1];
+    conn_event.raw.topics[2] = enc.topics_hex[2];
+    conn_event.name = "backfill_connector";
+
+    const events::ChainBlockInfo conn_block =
+        makeBlockInfo(101, conn_event.raw.block_hash, hexBytes(0x92, 32), 1'700'000'510, 1'700'000'511'000);
+    ASSERT_TRUE(awaitIngestBatchForSource(io, store, source_id, {conn_event}, {conn_block}, 102, 1'700'000'511'100));
+    ASSERT_TRUE(awaitApplyFinalityForSource(io, store, source_id, 200, 101, 101, 1'700'000'512'000));
+
+    const auto write_strand = asio::make_strand(io);
+    registry::RegistryProjector projector(store, registry, write_strand, {}, makeClient(node));
+    EXPECT_EQ(runAw(io, projector.projectBatch(10, 1'700'000'513'000)), 1u);
+    EXPECT_TRUE(runAw(io, registry.hasConnector("backfill_connector")));
+
+    for(const auto kind : {registry::EntityKind::TRANSFORMATION, registry::EntityKind::CONDITION})
+    {
+        const std::string name = kind == registry::EntityKind::TRANSFORMATION ? "early_tf" : "early_cond";
+        const auto location = runAw(io, registry.getEntityLocation(kind, name));
+        ASSERT_TRUE(location.has_value()) << name;
+        EXPECT_EQ(location->source.source_id, source_id);
+        EXPECT_EQ(location->source.content_hash, chain::bytes32ToHex(bytes32OfFill(0xAA)));
+        EXPECT_EQ(location->source.metadata_hash, chain::bytes32ToHex(bytes32OfFill(0xBB)));
+        EXPECT_EQ(location->source.runtime_code_hash, chain::bytes32ToHex(chain::keccakBytes(
+            std::vector<std::uint8_t>{0x60, 0x00, 0x60, 0x00}.data(), 4)));
+        EXPECT_EQ(location->address, makeAddressFromByte(0x55));
+    }
+    const auto transformation = runAw(io, registry.getTransformationRecordHandle("early_tf"));
+    ASSERT_TRUE(transformation.has_value());
+    EXPECT_EQ((**transformation).transformation().args_count(), 2u);
+    EXPECT_EQ(chain::normalizeHex((**transformation).owner()), hexAddress(0x42));
+
+    // Registry state is read at the block of the connector's event.
+    ASSERT_FALSE(node->calls.empty());
+    for(const auto & call : node->calls)
+    {
+        EXPECT_EQ(call.at(1).at("blockHash"), conn_event.raw.block_hash);
+    }
+
+    // A dependency the chain cannot answer for leaves the connector unmaterialized.
+    registry::Registry other_registry(io);
+    const auto other_paths = makeTempEventsPaths("reg_proj_backfill_fail");
+    events::SQLiteHotStore other_store(other_paths.hot_db, CHAIN_ID);
+    ASSERT_TRUE(awaitIngestBatchForSource(io, other_store, source_id, {conn_event}, {conn_block}, 102, 1'700'000'511'100));
+    ASSERT_TRUE(awaitApplyFinalityForSource(io, other_store, source_id, 200, 101, 101, 1'700'000'512'000));
+    auto silent_node = std::make_shared<FakeNode>();
+    registry::RegistryProjector failing(other_store, other_registry, write_strand, {}, makeClient(silent_node));
+    runAw(io, failing.projectBatch(10, 1'700'000'513'000));
+    EXPECT_FALSE(runAw(io, other_registry.hasConnector("backfill_connector")));
 }
 
 // ---------------------------------------------------------------------------
