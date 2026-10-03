@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -121,8 +122,20 @@ namespace dcn::pt
     /// The Publication a `publishTransformation`, `publishCondition` or `publishConnector`
     /// call carries, with the kind taken from the selector. Nullopt when the calldata is
     /// not one of those calls or its publication tuple is malformed. The creation code,
-    /// connector registration and owner signature are not decoded.
+    /// connector registration and owner signature are not decoded. A deadline beyond 64
+    /// bits, such as type(uint256).max, never expires and decodes as the largest uint64.
     std::optional<Publication> decodePublishCall(std::span<const std::uint8_t> calldata);
+
+    /// The creation code of every publish call found anywhere in `calldata`, keyed by the
+    /// address `registry` deploys it to with CREATE2: the transaction's own calldata when it
+    /// called the registry directly, or the inner calls a relay (a multisig, a smart account,
+    /// a multicall) embeds verbatim. The CREATE2 address binds the publication's salt fields
+    /// and the creation code itself, so the code found for an entity's address is the code
+    /// it was deployed from, whether or not that copy of the call is the one that executed.
+    /// Empty when no publish call is present, e.g. a relay that builds the call on chain.
+    std::map<chain::Address, std::vector<std::uint8_t>> findPublishedCreationCodes(
+        std::span<const std::uint8_t> calldata,
+        const chain::Address & registry);
 
     /// Calldata for `publicationNonce(address)`.
     std::vector<std::uint8_t> encodePublicationNonceCall(const chain::Address & owner);

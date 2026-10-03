@@ -269,7 +269,6 @@ namespace dcn
             .publication = std::move(prepared->publication),
             .creation_code = std::move(prepared->creation_code),
             .registration = std::move(prepared->registration),
-            .artifact_bytes = std::move(prepared->artifact_bytes),
             .dependencies = std::move(prepared->dependencies)},
             relay);
         if(!transaction) co_return publishFailure(transaction.error());

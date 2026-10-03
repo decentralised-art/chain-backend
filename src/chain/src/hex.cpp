@@ -23,13 +23,10 @@ namespace dcn::chain
         return utils::toLower(withHexPrefix(std::move(value)));
     }
 
-    std::string toHexQuantity(const std::int64_t value)
+    bool isBytes32Hex(const std::string & value)
     {
-        if(value < 0)
-        {
-            return "0x0";
-        }
-        return std::format("0x{:x}", static_cast<std::uint64_t>(value));
+        const auto bytes = evmc::from_hex(value);
+        return bytes.has_value() && bytes->size() == 32;
     }
 
     std::string bytesToHex(const std::span<const std::uint8_t> bytes)

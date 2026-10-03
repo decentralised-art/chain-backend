@@ -16,7 +16,7 @@ struct secp256k1_context_struct;
 
 namespace dcn::publish
 {
-    /// Holds the operator key used to bootstrap a PT deployment and is the only
+    /// Holds the operator key used to deploy or upgrade PT contracts and is the only
     /// component that can sign with it. The key never leaves this object: it is not
     /// logged, not copied into configuration and not persisted anywhere else, and the
     /// buffers it passed through while loading are wiped.

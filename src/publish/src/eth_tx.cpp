@@ -40,11 +40,6 @@ namespace dcn::publish
             return out;
         }
 
-        evmc::bytes32 keccak(std::span<const std::uint8_t> bytes)
-        {
-            return chain::keccakBytes(bytes.data(), bytes.size());
-        }
-
         // The nine fields every type-2 transaction carries, signed and unsigned alike.
         std::vector<std::vector<std::uint8_t>> payloadFields(const Transaction & transaction)
         {
@@ -172,7 +167,7 @@ namespace dcn::publish
         std::vector<std::uint8_t> preimage{0x02};
         const std::vector<std::uint8_t> body = rlp::encodeList(payloadFields(transaction));
         preimage.insert(preimage.end(), body.begin(), body.end());
-        return keccak(preimage);
+        return chain::keccakBytes(preimage);
     }
 
     std::string encodeSignedTransaction(
@@ -211,7 +206,7 @@ namespace dcn::publish
     {
         const auto bytes = evmc::from_hex(std::string(raw_tx_hex));
         if(!bytes) return {};
-        return chain::bytes32ToHex(chain::keccakBytes(bytes->data(), bytes->size()));
+        return chain::bytes32ToHex(chain::keccakBytes(*bytes));
     }
 
     std::expected<SignedTransaction, std::string> decodeSignedTransaction(const std::string_view raw_tx_hex)
@@ -312,7 +307,7 @@ namespace dcn::publish
         return SignedTransaction{
             .transaction = std::move(transaction),
             .sender = *sender,
-            .tx_hash = chain::bytes32ToHex(chain::keccakBytes(raw->data(), raw->size()))
+            .tx_hash = chain::bytes32ToHex(chain::keccakBytes(*raw))
         };
     }
 }

@@ -54,6 +54,11 @@ namespace dcn::chain
         return out;
     }
 
+    evmc::bytes32 keccakBytes(const std::span<const std::uint8_t> bytes)
+    {
+        return keccakBytes(bytes.data(), bytes.size());
+    }
+
     evmc::bytes32 keccakString(std::string_view value)
     {
         return keccakBytes(

@@ -485,37 +485,19 @@ namespace
     }
 
     std::vector<std::uint8_t> makeRunnerGenInput(
+        const chain::Address & registry,
         const std::string & connector_name,
         std::uint32_t particles_count,
         const std::vector<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>> & dynamic_ri)
     {
-        std::vector<std::uint8_t> input_data;
-
-        const auto selector = chain::constructSelector("gen(string,uint32,(uint32,uint32,uint32)[])");
-        input_data.insert(input_data.end(), selector.begin(), selector.end());
-
-        std::vector<std::uint8_t> offset_to_string(32, 0);
-        offset_to_string[31] = 0x60;
-        input_data.insert(input_data.end(), offset_to_string.begin(), offset_to_string.end());
-
-        const auto particles_count_arg = evm::encodeAsArg(particles_count);
-        input_data.insert(input_data.end(), particles_count_arg.begin(), particles_count_arg.end());
-
-        const auto connector_name_arg = evm::encodeAsArg(connector_name);
-
-        std::vector<std::uint8_t> offset_to_tuple(32, 0);
-        const std::size_t tuple_offset = 0x60 + connector_name_arg.size();
-        for(std::size_t i = 0; i < sizeof(std::size_t); ++i)
-        {
-            offset_to_tuple[31 - i] = static_cast<std::uint8_t>((tuple_offset >> (8 * i)) & 0xFFu);
-        }
-        input_data.insert(input_data.end(), offset_to_tuple.begin(), offset_to_tuple.end());
-
-        input_data.insert(input_data.end(), connector_name_arg.begin(), connector_name_arg.end());
-
-        const auto dynamic_ri_arg = evm::encodeAsArg(dynamic_ri);
-        input_data.insert(input_data.end(), dynamic_ri_arg.begin(), dynamic_ri_arg.end());
-
+        std::vector<std::uint8_t> input_data =
+            chain::constructSelector("gen(address,string,uint32,(uint32,uint32,uint32)[])");
+        const std::vector<std::uint8_t> arguments = pt::abi::encodeTuple({
+            pt::abi::addressComponent(registry),
+            pt::abi::stringComponent(connector_name),
+            pt::abi::uintComponent(particles_count),
+            pt::abi::Component{.dynamic = true, .data = evm::encodeAsArg(dynamic_ri)}});
+        input_data.insert(input_data.end(), arguments.begin(), arguments.end());
         return input_data;
     }
 
@@ -526,7 +508,7 @@ namespace
         const std::string & connector_name,
         std::uint32_t particles_count)
     {
-        const auto input_data = makeRunnerGenInput(connector_name, particles_count, {});
+        const auto input_data = makeRunnerGenInput(evm_instance.getRegistryAddress(), connector_name, particles_count, {});
         auto execute_result = runAwaitable(
             io_context,
             evm_instance.execute(
@@ -558,7 +540,7 @@ namespace
         std::uint32_t particles_count,
         const std::vector<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>> & dynamic_ri)
     {
-        const auto input_data = makeRunnerGenInput(connector_name, particles_count, dynamic_ri);
+        const auto input_data = makeRunnerGenInput(evm_instance.getRegistryAddress(), connector_name, particles_count, dynamic_ri);
         auto execute_result = runAwaitable(
             io_context,
             evm_instance.execute(
@@ -2240,6 +2222,71 @@ TEST_F(UnitTest, PT_Bindings_RunnerCyclesMultipleTransformationsPerDimension)
     //   space[7] = 20 + 2 = 22
     const std::array<std::uint32_t, kSampleCount> expected{0, 2, 6, 5, 7, 21, 20, 22};
 
+    ASSERT_EQ(particles[0].data_size(), static_cast<int>(kSampleCount));
+    for(std::uint32_t i = 0; i < kSampleCount; ++i)
+    {
+        EXPECT_EQ(particles[0].data(static_cast<int>(i)), expected[i]) << "i=" << i;
+    }
+}
+
+TEST_F(UnitTest, PT_Bindings_RunnerSamplesChildWithUnsortedIndexesExceedingEarlierPeak)
+{
+    ASSERT_TRUE(std::filesystem::exists(solcPath())) << std::format("Missing Solidity compiler at '{}'", solcPath().string());
+    ASSERT_TRUE(std::filesystem::exists(ptPath() / "contracts")) << std::format("Missing PT contracts at '{}'", (ptPath() / "contracts").string());
+
+    const BindingStorageScope storage_scope(makeBindingStoragePath());
+    const std::filesystem::path & storage_path = storage_scope.storage_path;
+    ASSERT_TRUE(prepareBindingStorageDirectories(storage_path));
+
+    asio::io_context io_context;
+    evm::EVM evm_instance(io_context, EVMC_SHANGHAI, solcPath(), ptPath());
+    io_context.run();
+
+    registry::Registry registry(io_context);
+    const chain::Address owner = makeAddressFromSuffix("binding_runtime_owner");
+    const std::string owner_hex = evmc::hex(owner);
+
+    runAwaitable(io_context, evm_instance.addAccount(owner, evm::DEFAULT_GAS_LIMIT));
+    runAwaitable(io_context, evm_instance.setGas(owner, evm::DEFAULT_GAS_LIMIT));
+
+    constexpr const char * kAddFiveTransformationName = "AddFiveTx";
+    constexpr const char * kSubTwoTransformationName = "SubTwoTx";
+    constexpr const char * kAddSixTransformationName = "AddSixTx";
+    constexpr const char * kAddTwoTransformationName = "AddTwoTx";
+
+    for(const auto & [name, body] : std::initializer_list<std::pair<const char *, const char *>>{
+            {kAddFiveTransformationName, "return x + 5;"},
+            {kSubTwoTransformationName, "return x - 2;"},
+            {kAddSixTransformationName, "return x + 6;"},
+            {kAddTwoTransformationName, "return x + 2;"}})
+    {
+        const auto deploy_result = deployTransformationRecord(
+            io_context, evm_instance, registry,
+            makeTransformationRecord(name, body, owner_hex),
+            storage_path);
+        ASSERT_TRUE(deploy_result.has_value()) << name << ": " << deploy_result.error();
+    }
+
+    ConnectorRecord leaf = makeConnectorRecord("UNSORTED_LEAF", owner_hex);
+    addDimensionWithTransformation(leaf, "", kAddTwoTransformationName);
+    ASSERT_TRUE(deployConnectorRecord(io_context, evm_instance, registry, std::move(leaf), storage_path).has_value());
+
+    // Parent space cycles [+5, -2, +6]: [0, 5, 3, 9]. These become indexes
+    // into UNSORTED_LEAF: unsorted after 5 -> 3, then 9 exceeds the earlier peak.
+    ConnectorRecord parent = makeConnectorRecord("UNSORTED_PARENT", owner_hex);
+    addCycleDimension(parent, "UNSORTED_LEAF", {kAddFiveTransformationName, kSubTwoTransformationName, kAddSixTransformationName});
+    ASSERT_TRUE(deployConnectorRecord(io_context, evm_instance, registry, std::move(parent), storage_path).has_value());
+
+    constexpr std::uint32_t kSampleCount = 4;
+    const auto particles_result = runGeneration(io_context, evm_instance, owner, "UNSORTED_PARENT", kSampleCount);
+    ASSERT_TRUE(particles_result.has_value()) << particles_result.error();
+
+    const auto & particles = particles_result.value();
+    ASSERT_EQ(particles.size(), 1u);
+    EXPECT_EQ(particles[0].path(), "/UNSORTED_PARENT:0/UNSORTED_LEAF:0");
+
+    // UNSORTED_LEAF space[k] = 2k, sampled at [0, 5, 3, 9].
+    const std::array<std::uint32_t, kSampleCount> expected{0, 10, 6, 18};
     ASSERT_EQ(particles[0].data_size(), static_cast<int>(kSampleCount));
     for(std::uint32_t i = 0; i < kSampleCount; ++i)
     {

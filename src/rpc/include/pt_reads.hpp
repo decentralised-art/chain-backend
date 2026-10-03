@@ -2,12 +2,16 @@
 
 #include <cstdint>
 #include <expected>
+#include <map>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <asio.hpp>
 
 #include "eth_client.hpp"
+#include "publication.hpp"
 
 namespace dcn::pt
 {
@@ -17,6 +21,35 @@ namespace dcn::pt
 namespace dcn::rpc
 {
     // PT protocol reads over eth_call against a registry or runner proxy.
+
+    // The creation code of every publish call in the calldata of `tx_hash`, which emitted
+    // its registry events in the block with `block_hash`, keyed by the address `registry`
+    // deployed it to (see pt::findPublishedCreationCodes). Empty when the calldata holds
+    // none (a relay that builds the call on chain). An unknown transaction, or one mined in
+    // another block, is an error: the event names it.
+    asio::awaitable<std::expected<std::map<chain::Address, std::vector<std::uint8_t>>, RpcError>> readPublishedCreationCodes(
+        const EthClient & client,
+        std::string_view tx_hash,
+        std::string_view block_hash,
+        const chain::Address & registry);
+
+    // The transaction and block of the registry event that published the transformation or
+    // condition `name` at `entity_address`, no later than `latest_block`. The entity's code
+    // first appears in the block it was published in, which a binary search over historical
+    // eth_getCode finds; that block's logs then name the transaction. Needs a node serving
+    // historical state. nullopt when no such publication is found.
+    struct PublicationLocation
+    {
+        std::string tx_hash;
+        std::string block_hash;
+    };
+    asio::awaitable<std::expected<std::optional<PublicationLocation>, RpcError>> findEntityPublication(
+        const EthClient & client,
+        std::string_view registry_address,
+        pt::EntityKind kind,
+        std::string_view name,
+        const chain::Address & entity_address,
+        std::int64_t latest_block);
 
     struct PtIdentity
     {
@@ -40,23 +73,17 @@ namespace dcn::rpc
         std::uint64_t expected_chain_id,
         std::string_view registry_address);
 
-    // Positively identifies a configured runner proxy: PT protocol identity and version,
-    // and a registry() link to `registry_address`. Returns a human-readable reason on
-    // rejection.
+    // Positively identifies a configured runner proxy by its PT protocol identity and
+    // version. A runner serves any registry passed to Runner.gen, so it carries no link to
+    // check. Returns a human-readable reason on rejection.
     asio::awaitable<std::expected<void, std::string>> verifyPtRunner(
         const EthClient & client,
-        std::string_view runner_address,
-        std::string_view registry_address);
+        std::string_view runner_address);
 
     // OwnableBase `getOwner()` of the registry or runner proxy.
     asio::awaitable<std::expected<std::string, RpcError>> readOwner(
         const EthClient & client,
         std::string_view contract_address);
-
-    // `Runner.registry()`.
-    asio::awaitable<std::expected<std::string, RpcError>> readRunnerRegistry(
-        const EthClient & client,
-        std::string_view runner_address);
 
     // `publicationNonce(owner)`.
     asio::awaitable<std::expected<std::uint64_t, RpcError>> readPublicationNonce(

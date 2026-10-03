@@ -31,6 +31,8 @@ Agents must use a build directory for all work:
 - `build-agent` for CMake build files
 - `install-agent` for install output (`-DCMAKE_INSTALL_PREFIX=install-agent`)
 
+These directories are the agent's own workspace: delete, overwrite, or reconfigure them freely. If their CMake cache is stale or was created for another source path, remove the directory and configure it from scratch. Do not keep old caches.
+
 ## Build/Test Flags
 
 When building tests, always configure CMake with these options:

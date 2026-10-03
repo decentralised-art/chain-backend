@@ -8,6 +8,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include "utils.hpp"
+
 namespace dcn::rpc
 {
     namespace
@@ -16,17 +18,6 @@ namespace dcn::rpc
         constexpr int JSON_RPC_INTERNAL_ERROR = -32603;
         constexpr int JSON_RPC_LIMIT_EXCEEDED = -32005;
         constexpr int HTTP_TOO_MANY_REQUESTS = 429;
-
-        std::string _toLower(std::string_view text)
-        {
-            std::string lowered;
-            lowered.reserve(text.size());
-            for(const char c : text)
-            {
-                lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-            }
-            return lowered;
-        }
 
         template<std::size_t N>
         bool _mentionsAny(const std::string & text, const std::array<std::string_view, N> & needles)
@@ -49,15 +40,27 @@ namespace dcn::rpc
             "exceed maximum block range",
             "query timeout"};
 
+        // The caller's plan allowance is used up until the provider's period resets.
+        constexpr std::array<std::string_view, 5> QUOTA_MESSAGES{
+            "monthly",
+            "daily request count",
+            "quota",
+            "usage limit",
+            "credit limit"};
+
         // The provider refuses the caller, not the request.
-        constexpr std::array<std::string_view, 7> RATE_LIMIT_MESSAGES{
+        constexpr std::array<std::string_view, 6> RATE_LIMIT_MESSAGES{
             "rate limit",
             "too many requests",
             "request rate",
             "compute units",
             "capacity",
-            "throttl",
-            "daily request count"};
+            "throttl"};
+
+        constexpr std::array<std::string_view, 3> ALREADY_KNOWN_MESSAGES{
+            "already known",
+            "known transaction",
+            "already imported"};
 
         // The provider could not answer right now; the same request can succeed later.
         constexpr std::array<std::string_view, 8> TRANSIENT_MESSAGES{
@@ -108,11 +111,15 @@ namespace dcn::rpc
             }
         }
 
-        const std::string text = _toLower(out.message);
+        const std::string text = utils::toLower(out.message);
 
         if(_mentionsAny(text, SIZE_LIMIT_MESSAGES))
         {
             out.kind = RpcError::Kind::LIMIT;
+        }
+        else if(_mentionsAny(text, QUOTA_MESSAGES))
+        {
+            out.kind = RpcError::Kind::QUOTA;
         }
         else if(out.code == JSON_RPC_LIMIT_EXCEEDED || out.code == HTTP_TOO_MANY_REQUESTS
                 || _mentionsAny(text, RATE_LIMIT_MESSAGES))
@@ -132,6 +139,27 @@ namespace dcn::rpc
         return kind == Kind::TRANSPORT || kind == Kind::TIMEOUT || kind == Kind::THROTTLED;
     }
 
+    RpcError RpcError::protocol(std::string message)
+    {
+        return RpcError{.kind = Kind::PROTOCOL, .code = 0, .message = std::move(message)};
+    }
+
+    bool mentions(const RpcError & error, const std::string_view needle)
+    {
+        return utils::toLower(error.message).find(needle) != std::string::npos;
+    }
+
+    bool mentionsQuotaExhausted(const std::string_view provider_text)
+    {
+        return _mentionsAny(utils::toLower(std::string(provider_text)), QUOTA_MESSAGES);
+    }
+
+    bool isAlreadyKnown(const RpcError & error)
+    {
+        const std::string text = utils::toLower(error.message);
+        return _mentionsAny(text, ALREADY_KNOWN_MESSAGES);
+    }
+
     std::string toString(const RpcError::Kind kind)
     {
         switch(kind)
@@ -139,6 +167,7 @@ namespace dcn::rpc
         case RpcError::Kind::TRANSPORT: return "transport";
         case RpcError::Kind::TIMEOUT:   return "timeout";
         case RpcError::Kind::THROTTLED: return "throttled";
+        case RpcError::Kind::QUOTA:     return "quota";
         case RpcError::Kind::LIMIT:     return "limit";
         case RpcError::Kind::PROTOCOL:  return "protocol";
         case RpcError::Kind::EXECUTION: return "execution";

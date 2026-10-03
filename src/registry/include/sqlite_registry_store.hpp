@@ -16,6 +16,8 @@ namespace dcn::registry
             explicit SQLiteRegistryStore(const std::string & db_path);
             ~SQLiteRegistryStore() override;
 
+            bool selectRemoteSource(const std::string & source_id) override;
+
             SQLiteRegistryStore(const SQLiteRegistryStore &) = delete;
             SQLiteRegistryStore & operator=(const SQLiteRegistryStore &) = delete;
 
@@ -97,15 +99,22 @@ namespace dcn::registry
                 const std::string & name,
                 const chain::Address & old_owner,
                 const chain::Address & new_owner) override;
-            std::vector<ArtifactReference> getArtifactsDue(
-                std::int64_t now_ms,
-                std::size_t limit) const override;
-            bool setArtifactState(
-                EntityKind kind,
+
+            bool putRuntimeCode(const std::string & code_hash, const std::vector<std::uint8_t> & code) override;
+            std::optional<std::vector<std::uint8_t>> getRuntimeCode(const std::string & code_hash) const override;
+            bool hasRuntimeCode(const std::string & code_hash) const override;
+
+            bool putChainCreationCode(
                 const std::string & source_id,
-                const std::string & name,
-                pt::ArtifactState state,
-                std::int64_t retry_at_ms) override;
+                const chain::Address & entity,
+                const std::vector<std::uint8_t> & code) override;
+            std::optional<std::vector<std::uint8_t>> getChainCreationCode(
+                const std::string & source_id,
+                const chain::Address & entity) const override;
+            bool hasChainCreationCode(const std::string & source_id, const chain::Address & entity) const override;
+
+            bool updateLocalVersionHashes(EntityKind kind, const std::string & name, const EntitySource & source) override;
+
 
             bool addConditionsBatch(
                 const std::vector<ConditionBatchItem> & items,

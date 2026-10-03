@@ -62,6 +62,22 @@ namespace dcn::evm
     /// Upper bound on one solc run; a compilation still running then is killed.
     inline constexpr std::chrono::seconds SOLC_TIMEOUT{120};
 
+    struct CompileError
+    {
+        enum class Kind : std::uint8_t
+        {
+            // solc ran and did not build the contract: compiler errors, a crash, no usable
+            // output or SOLC_TIMEOUT. The same source fails the same way again.
+            REJECTED,
+            // The compilation could not be carried out here: the work directory, the source
+            // file or the solc process could not be set up. Worth retrying.
+            FAILED
+        };
+
+        Kind kind = Kind::FAILED;
+        std::string message;
+    };
+
     struct CompiledContract
     {
         std::vector<std::uint8_t> creation_code;
@@ -100,7 +116,7 @@ namespace dcn::evm
         // `contract_name`'s code. The unit sits on an include path, so its name carries no
         // machine-specific directory: the bytecode metadata, and with it the bytecode, is
         // the same wherever the source is compiled.
-        asio::awaitable<std::expected<CompiledContract, std::string>> compileSource(
+        asio::awaitable<std::expected<CompiledContract, CompileError>> compileSource(
                 std::string unit_name,
                 std::string source,
                 std::string contract_name,

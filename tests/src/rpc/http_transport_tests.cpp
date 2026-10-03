@@ -190,14 +190,16 @@ TEST_F(UnitTest, Rpc_HttpTransport_MapsHttpStatusToTheJsonRpcErrorModel)
         httpResponse(400, "Bad Request", R"({"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}})"),
         httpResponse(429, "Too Many Requests", "{}"),
         httpResponse(503, "Service Unavailable", "{}"),
-        httpResponse(404, "Not Found", "<html>not found</html>")});
+        httpResponse(404, "Not Found", "<html>not found</html>"),
+        httpResponse(429, "Too Many Requests",
+            R"({"jsonrpc":"2.0","id":1,"error":{"code":429,"message":"Monthly capacity limit exceeded."}})")});
 
     const auto transport = rpc::makeHttpTransport(
         io_context, std::format("http://127.0.0.1:{}/rpc", server.endpoint().port));
     ASSERT_NE(transport, nullptr);
 
-    const auto responses = sequentially(io_context, 4, [&transport]() { return transport->post("{}"); });
-    ASSERT_EQ(responses.size(), 4u);
+    const auto responses = sequentially(io_context, 5, [&transport]() { return transport->post("{}"); });
+    ASSERT_EQ(responses.size(), 5u);
 
     const auto & error_body = responses[0];
     ASSERT_TRUE(error_body.has_value());
@@ -212,6 +214,26 @@ TEST_F(UnitTest, Rpc_HttpTransport_MapsHttpStatusToTheJsonRpcErrorModel)
     ASSERT_FALSE(responses[3].has_value());
     EXPECT_EQ(responses[3].error().kind, rpc::RpcError::Kind::PROTOCOL);
 
+    // A used-up plan allowance is told apart from a short-term rate limit.
+    ASSERT_FALSE(responses[4].has_value());
+    EXPECT_EQ(responses[4].error().kind, rpc::RpcError::Kind::QUOTA);
+
     // The description never carries the URL target, which commonly holds an API key.
     EXPECT_EQ(std::string(transport->describe()).find("/rpc"), std::string::npos);
+}
+
+TEST_F(UnitTest, Rpc_ProviderMessageMatching_IsCaseInsensitive)
+{
+    EXPECT_TRUE(rpc::isAlreadyKnown(rpc::RpcError{.message = "ALREADY KNOWN"}));
+    EXPECT_TRUE(rpc::isAlreadyKnown(rpc::RpcError{.message = "Known transaction: 0xabc"}));
+    EXPECT_TRUE(rpc::isAlreadyKnown(rpc::RpcError{.message = "transaction already imported"}));
+    EXPECT_FALSE(rpc::isAlreadyKnown(rpc::RpcError{.message = "nonce too low"}));
+
+    EXPECT_TRUE(rpc::mentions(rpc::RpcError{.message = "Nonce Too Low"}, "nonce too low"));
+    EXPECT_FALSE(rpc::mentions(rpc::RpcError{.message = "insufficient funds"}, "nonce too low"));
+
+    const rpc::RpcError protocol = rpc::RpcError::protocol("bad");
+    EXPECT_EQ(protocol.kind, rpc::RpcError::Kind::PROTOCOL);
+    EXPECT_EQ(protocol.message, "bad");
+    EXPECT_FALSE(protocol.retryable());
 }

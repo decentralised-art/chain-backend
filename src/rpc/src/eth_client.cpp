@@ -18,11 +18,6 @@ namespace dcn::rpc
         // Fallback tip when the provider does not implement eth_maxPriorityFeePerGas.
         constexpr std::uint64_t DEFAULT_PRIORITY_FEE_WEI = 1'500'000'000;
 
-        RpcError _protocolError(std::string message)
-        {
-            return RpcError{.kind = RpcError::Kind::PROTOCOL, .code = 0, .message = std::move(message)};
-        }
-
         bool _isHexDigits(const std::string_view value)
         {
             return std::ranges::all_of(value, [](const char c)
@@ -37,19 +32,19 @@ namespace dcn::rpc
         {
             if(!value.is_string())
             {
-                return std::unexpected(_protocolError(std::format("{} is not a quantity string", field)));
+                return std::unexpected(RpcError::protocol(std::format("{} is not a quantity string", field)));
             }
 
             const std::string text = value.get<std::string>();
             if(text.size() < 3 || !text.starts_with("0x") || !_isHexDigits(std::string_view(text).substr(2)))
             {
-                return std::unexpected(_protocolError(std::format("{} is not a 0x-prefixed quantity", field)));
+                return std::unexpected(RpcError::protocol(std::format("{} is not a 0x-prefixed quantity", field)));
             }
 
             const auto parsed = parse::parseHexQuantity(text);
             if(!parsed)
             {
-                return std::unexpected(_protocolError(std::format("{} is out of range", field)));
+                return std::unexpected(RpcError::protocol(std::format("{} is out of range", field)));
             }
 
             return *parsed;
@@ -60,7 +55,7 @@ namespace dcn::rpc
         {
             if(!value.is_string())
             {
-                return std::unexpected(_protocolError(std::format("{} is not a data string", field)));
+                return std::unexpected(RpcError::protocol(std::format("{} is not a data string", field)));
             }
 
             std::string out = value.get<std::string>();
@@ -73,7 +68,7 @@ namespace dcn::rpc
             const std::string_view digits = std::string_view(out).substr(std::min<std::size_t>(2, out.size()));
             if(!out.starts_with("0x") || (digits.size() % 2) != 0 || !_isHexDigits(digits))
             {
-                return std::unexpected(_protocolError(std::format("{} is not 0x-prefixed hex data", field)));
+                return std::unexpected(RpcError::protocol(std::format("{} is not 0x-prefixed hex data", field)));
             }
 
             return out;
@@ -89,7 +84,7 @@ namespace dcn::rpc
         {
             if(!block.is_object())
             {
-                return std::unexpected(_protocolError("block is not an object"));
+                return std::unexpected(RpcError::protocol("block is not an object"));
             }
 
             const auto number = _quantity(_member(block, "number"), "block.number");
@@ -110,11 +105,6 @@ namespace dcn::rpc
                 .parent_hash = chain::normalizeHex(*parent_hash),
                 .timestamp = *timestamp
             };
-        }
-
-        std::string _quantityHex(const std::uint64_t value)
-        {
-            return std::format("0x{:x}", value);
         }
 
         asio::awaitable<std::expected<std::optional<BlockHeader>, RpcError>> _block(
@@ -144,13 +134,13 @@ namespace dcn::rpc
         const auto bytes = evmc::from_hex(word_hex);
         if(!bytes || bytes->size() != 32)
         {
-            return std::unexpected(_protocolError(std::format("{} did not return one word", field)));
+            return std::unexpected(RpcError::protocol(std::format("{} did not return one word", field)));
         }
 
         const auto address = chain::readAddressWord(bytes->data(), bytes->size(), 0);
         if(!address)
         {
-            return std::unexpected(_protocolError(std::format("{} is not an ABI address", field)));
+            return std::unexpected(RpcError::protocol(std::format("{} is not an ABI address", field)));
         }
         return chain::addressToHex(*address);
     }
@@ -160,21 +150,16 @@ namespace dcn::rpc
         const auto bytes = evmc::from_hex(word_hex);
         if(!bytes || bytes->size() != 32)
         {
-            return std::unexpected(_protocolError(std::format("{} did not return one word", field)));
+            return std::unexpected(RpcError::protocol(std::format("{} did not return one word", field)));
         }
 
         // Silently truncating a larger value would act on a number the contract never held.
-        if(std::any_of(bytes->begin(), bytes->begin() + 24, [](const std::uint8_t b) { return b != 0; }))
+        const auto value = chain::readUint64Word(bytes->data(), bytes->size(), 0);
+        if(!value)
         {
-            return std::unexpected(_protocolError(std::format("{} is out of supported range", field)));
+            return std::unexpected(RpcError::protocol(std::format("{} is out of supported range", field)));
         }
-
-        std::uint64_t value = 0;
-        for(std::size_t i = 24; i < 32; ++i)
-        {
-            value = (value << 8) | (*bytes)[i];
-        }
-        return value;
+        return *value;
     }
 
     EthClient::EthClient(std::shared_ptr<JsonRpcClient> client)
@@ -202,7 +187,7 @@ namespace dcn::rpc
 
         if(*value <= 0)
         {
-            co_return std::unexpected(_protocolError("eth_chainId is zero"));
+            co_return std::unexpected(RpcError::protocol("eth_chainId is zero"));
         }
 
         co_return static_cast<std::uint64_t>(*value);
@@ -239,6 +224,19 @@ namespace dcn::rpc
         co_return _dataString(*result, "eth_getCode");
     }
 
+    asio::awaitable<std::expected<std::string, RpcError>> EthClient::getCodeAtBlock(
+        const std::string_view address,
+        const std::string_view block_hash) const
+    {
+        json params = json::array({
+            std::string(address),
+            json{{"blockHash", std::string(block_hash)}, {"requireCanonical", true}}});
+        auto result = co_await _client->call("eth_getCode", std::move(params));
+        if(!result) co_return std::unexpected(result.error());
+
+        co_return _dataString(*result, "eth_getCode");
+    }
+
     asio::awaitable<std::expected<std::vector<json>, RpcError>> EthClient::getLogs(const LogFilter & filter) const
     {
         json filter_object{
@@ -262,7 +260,7 @@ namespace dcn::rpc
 
         if(!result->is_array())
         {
-            co_return std::unexpected(_protocolError("eth_getLogs result is not an array"));
+            co_return std::unexpected(RpcError::protocol("eth_getLogs result is not an array"));
         }
 
         if(result->size() > MAX_LOGS_PER_RESPONSE)
@@ -283,6 +281,35 @@ namespace dcn::rpc
         co_return logs;
     }
 
+    asio::awaitable<std::expected<std::optional<TransactionInfo>, RpcError>> EthClient::transactionByHash(
+        const std::string_view tx_hash) const
+    {
+        json params = json::array({std::string(tx_hash)});
+        auto result = co_await _client->call("eth_getTransactionByHash", std::move(params));
+        if(!result) co_return std::unexpected(result.error());
+
+        if(result->is_null()) co_return std::optional<TransactionInfo>{};
+        if(!result->is_object())
+        {
+            co_return std::unexpected(RpcError::protocol("eth_getTransactionByHash is not an object"));
+        }
+
+        const auto hash = _dataString(_member(*result, "hash"), "transaction.hash");
+        if(!hash) co_return std::unexpected(hash.error());
+        const auto input = _dataString(_member(*result, "input"), "transaction.input");
+        if(!input) co_return std::unexpected(input.error());
+
+        TransactionInfo transaction{.tx_hash = *hash, .input = *input};
+        const json block_hash = _member(*result, "blockHash");
+        if(!block_hash.is_null())
+        {
+            const auto parsed = _dataString(block_hash, "transaction.blockHash");
+            if(!parsed) co_return std::unexpected(parsed.error());
+            transaction.block_hash = *parsed;
+        }
+        co_return std::optional<TransactionInfo>{std::move(transaction)};
+    }
+
     asio::awaitable<std::expected<std::string, RpcError>> EthClient::call(
         const std::string_view to,
         const std::string_view data_hex,
@@ -295,7 +322,7 @@ namespace dcn::rpc
         };
         if(gas)
         {
-            call_object["gas"] = _quantityHex(*gas);
+            call_object["gas"] = chain::toHexQuantity(*gas);
         }
 
         json params = json::array({std::move(call_object), std::string(tag)});
@@ -317,7 +344,7 @@ namespace dcn::rpc
         };
         if(gas)
         {
-            call_object["gas"] = _quantityHex(*gas);
+            call_object["gas"] = chain::toHexQuantity(*gas);
         }
 
         json params = json::array({
@@ -386,7 +413,7 @@ namespace dcn::rpc
 
         if(!head_block->is_object() || !head_block->contains("baseFeePerGas"))
         {
-            co_return std::unexpected(_protocolError("head block carries no EIP-1559 base fee"));
+            co_return std::unexpected(RpcError::protocol("head block carries no EIP-1559 base fee"));
         }
 
         const auto base_fee = _quantity(head_block->at("baseFeePerGas"), "block.baseFeePerGas");
@@ -441,7 +468,7 @@ namespace dcn::rpc
 
         if(!result->is_object())
         {
-            co_return std::unexpected(_protocolError("eth_getTransactionReceipt is not an object"));
+            co_return std::unexpected(RpcError::protocol("eth_getTransactionReceipt is not an object"));
         }
 
         const auto status = _quantity(_member(*result, "status"), "receipt.status");
@@ -461,7 +488,7 @@ namespace dcn::rpc
 
         if(chain::normalizeHex(*receipt_tx_hash) != chain::normalizeHex(std::string(tx_hash)))
         {
-            co_return std::unexpected(_protocolError("receipt belongs to a different transaction"));
+            co_return std::unexpected(RpcError::protocol("receipt belongs to a different transaction"));
         }
 
         TransactionReceipt receipt{
@@ -514,7 +541,7 @@ namespace dcn::rpc
         if(!code) co_return std::unexpected(code.error());
 
         const auto bytes = evmc::from_hex(*code);
-        if(!bytes) co_return std::unexpected(_protocolError("eth_getCode is not hex data"));
+        if(!bytes) co_return std::unexpected(RpcError::protocol("eth_getCode is not hex data"));
         if(bytes->empty()) co_return std::optional<std::string>{};
 
         co_return std::optional<std::string>{

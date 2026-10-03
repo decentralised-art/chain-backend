@@ -20,7 +20,9 @@ namespace dcn::chain
     std::optional<std::vector<evmc::bytes32>> decodeTopicWords(const std::vector<std::string> & topics_hex);
 
 
-    std::uint64_t readUint256(const std::vector<std::uint8_t> & bytes, std::size_t offset);
+    // ABI uint256 word that fits in 64 bits; larger values and short input are rejected.
+    std::optional<std::uint64_t> readUint64Word(const std::uint8_t* data, std::size_t data_size, std::size_t offset);
+    std::optional<std::uint64_t> readUint64Word(const std::vector<std::uint8_t> & data, std::size_t offset = 0);
 
     std::optional<std::size_t> readWordAsSizeT(const std::uint8_t* data, std::size_t data_size, std::size_t offset);
 

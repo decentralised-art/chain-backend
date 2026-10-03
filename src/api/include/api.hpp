@@ -39,8 +39,8 @@ namespace dcn
     struct ChainAccess
     {
         std::shared_ptr<rpc::EthClient> client;
-        std::string registry;   //!< PT registry proxy address
-        std::string runner;     //!< Runner proxy bound to `registry`
+        chain::Address registry{};   //!< PT registry proxy
+        std::string runner;     //!< Runner proxy; Runner.gen looks connectors up in `registry`
         std::uint64_t execute_max_gas = 100'000'000;
         std::string execute_block_tag = std::string(rpc::BLOCK_TAG_SAFE);
     };
@@ -481,16 +481,16 @@ namespace dcn
         const ChainAccess * chain = nullptr);
 
     /**
-     * @brief Handles OPTIONS requests for the /publish/* endpoints.
+     * @brief Handles OPTIONS requests for the /publish/ endpoints.
      */
     asio::awaitable<http::Response> OPTIONS_publish(const http::Request & request, std::vector<server::RouteArg> route_args, server::QueryArgsList query_args);
 
     /**
      * @brief Handles POST /publish/<kind>/prepare, kind = transformation | condition | connector.
      *
-     * Body {"name", "relay"?}. Rebuilds the caller's own local entity from its retained definition,
-     * stores the artifact durably and answers 200 with the unsigned registry transaction
-     * the owner's wallet sends; the owner pays for it. With "relay": true the answer also
+     * Body {"name", "relay"?}. Rebuilds the caller's own local entity from its retained definition
+     * and answers 200 with the unsigned registry transaction the owner's wallet sends; the
+     * owner pays for it. With "relay": true the answer also
      * carries `signing` (account nonce, fees, type, value), which makes the transaction
      * signable offline for POST /publish/<kind>/send. Answers 200 with status
      * "published" when the registry already holds this exact publication, and 409 with
@@ -572,8 +572,12 @@ namespace dcn
      * @brief Handles POST /simulate: runs a registered connector on the local EVM.
      *
      * A connector that exists only on chain is first materialized in the local EVM with
-     * its dependencies, from their verified artifacts; 503 while those artifacts are not
-     * available. 404 for a connector the registry does not hold. No login is required.
+     * its dependencies: each chain entity is replayed from the creation code the chain
+     * deployed it from, as projected into the registry, so its code and constructor state
+     * are the chain's. No chain is contacted and no compiler is involved. 503, naming the
+     * entity and the reason, while a chain entity has no creation code (its projection is
+     * incomplete, or its publication could not be recovered). 404 for a connector the
+     * registry does not hold. No login is required.
      */
     asio::awaitable<http::Response> POST_simulate(
         const http::Request & request,
