@@ -481,7 +481,7 @@ namespace dcn
         const ChainAccess * chain = nullptr);
 
     /**
-     * @brief Handles OPTIONS requests for the /publish/* endpoints.
+     * @brief Handles OPTIONS requests for the /publish/ endpoints.
      */
     asio::awaitable<http::Response> OPTIONS_publish(const http::Request & request, std::vector<server::RouteArg> route_args, server::QueryArgsList query_args);
 

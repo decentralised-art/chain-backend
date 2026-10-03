@@ -375,7 +375,7 @@ TEST_F(UnitTest, API_PublishPrepare_RebuildsTheCallersLocalEntityIntoAnOwnerPaid
 
     // The registry already holds exactly this publication: there is nothing to send.
     node->contains_entity = true;
-    node->entity_content_hash = content_hash;
+    node->entity_content_hash = body["content_hash"].get<std::string>();
     const auto published = prepare(owner, "PubTx");
     ASSERT_EQ(published.getCode(), http::Code::OK) << published.getBody();
     EXPECT_EQ(bodyOf(published)["status"], "published");
