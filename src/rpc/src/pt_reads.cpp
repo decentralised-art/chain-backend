@@ -68,11 +68,14 @@ namespace dcn::rpc
             else low = middle + 1;
         }
 
-        const auto logs = co_await client.getLogs(LogFilter{
+        // The filter is built before the co_await: GCC cannot compile an initializer_list
+        // that lives across one.
+        const LogFilter filter{
             .from_block = low,
             .to_block = low,
             .address = std::string(registry_address),
-            .topic0 = {pt::eventTopic(pt::addedEventSignature(kind))}});
+            .topic0 = {pt::eventTopic(pt::addedEventSignature(kind))}};
+        const auto logs = co_await client.getLogs(filter);
         if(!logs) co_return std::unexpected(logs.error());
 
         for(const json & log : *logs)
