@@ -22,6 +22,7 @@
 #include "format_hash.hpp"
 #include "hex.hpp"
 #include "async.hpp"
+#include "pt_reads.hpp"
 
 namespace dcn::registry
 {
