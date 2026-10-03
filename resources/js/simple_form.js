@@ -3006,6 +3006,7 @@ export async function loginWithMetaMask()
         if (result.access_token) {
             loginStatusDiv.innerHTML = `<p style="color: green;">✅ Authenticated as ${address}</p>`;
             setAccessToken(result.access_token);
+            window.dispatchEvent(new CustomEvent('site-nav:auth', { detail: { address } }));
             return true;
         }
         else {
@@ -3019,3 +3020,95 @@ export async function loginWithMetaMask()
     return false;
 }
 configureLoginHandler(loginWithMetaMask);
+
+// --------------------------------------------------------------------------
+// Site header
+// --------------------------------------------------------------------------
+
+// Site header — mirrors studio-frontend/src/lib/site/SiteNav.svelte.
+// `login` runs this page's MetaMask flow; on success the page dispatches
+// a "site-nav:auth" event with the address so the header can show it.
+export function initSiteNav({ login } = {}) {
+    const nav = document.getElementById("siteNav");
+    const navToggle = document.getElementById("siteNavToggle");
+    const backdrop = document.getElementById("siteNavBackdrop");
+    const docsTrigger = document.getElementById("siteDocsTrigger");
+    const docsMenu = document.getElementById("siteDocsMenu");
+    const walletLogin = document.getElementById("siteWalletLogin");
+    const walletAccount = document.getElementById("siteWalletAccount");
+    if (!nav || !navToggle) {
+        return;
+    }
+
+    const isMenuOpen = () => nav.classList.contains("is-open");
+    const isDocsOpen = () => Boolean(docsMenu && !docsMenu.hidden);
+
+    const setMenuOpen = (open) => {
+        nav.classList.toggle("is-open", open);
+        navToggle.setAttribute("aria-expanded", open ? "true" : "false");
+        document.body.classList.toggle("nav-menu-open", open);
+        if (backdrop) backdrop.classList.toggle("is-visible", open);
+    };
+
+    const setDocsOpen = (open) => {
+        if (!docsTrigger || !docsMenu) return;
+        docsMenu.hidden = !open;
+        docsTrigger.setAttribute("aria-expanded", open ? "true" : "false");
+    };
+
+    const closeMenu = () => {
+        setMenuOpen(false);
+        setDocsOpen(false);
+    };
+
+    navToggle.addEventListener("click", () => setMenuOpen(!isMenuOpen()));
+    if (docsTrigger) docsTrigger.addEventListener("click", () => setDocsOpen(!isDocsOpen()));
+    if (backdrop) backdrop.addEventListener("click", closeMenu);
+    nav.querySelectorAll(".site-links a").forEach((anchor) => {
+        anchor.addEventListener("click", closeMenu);
+    });
+
+    document.addEventListener(
+        "pointerdown",
+        (event) => {
+            if (!isMenuOpen() && !isDocsOpen()) return;
+            if (event.target instanceof Node && nav.contains(event.target)) return;
+            closeMenu();
+        },
+        true,
+    );
+    document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") closeMenu();
+    });
+    window.addEventListener("resize", () => {
+        if (window.innerWidth > 900) setMenuOpen(false);
+    });
+
+    const shortAddress = (address) => {
+        const normalized = String(address || "").trim().toLowerCase();
+        if (normalized.length < 14) return normalized;
+        return `${normalized.slice(0, 8)}...${normalized.slice(-4)}`;
+    };
+
+    window.addEventListener("site-nav:auth", (event) => {
+        const address = event.detail && event.detail.address;
+        if (!address || !walletAccount) return;
+        walletAccount.textContent = shortAddress(address);
+        walletAccount.title = address;
+        walletAccount.hidden = false;
+        if (walletLogin) walletLogin.hidden = true;
+    });
+
+    if (walletLogin && typeof login === "function") {
+        walletLogin.addEventListener("click", async () => {
+            walletLogin.disabled = true;
+            walletLogin.textContent = "Signing in...";
+            try {
+                await login();
+            } finally {
+                walletLogin.disabled = false;
+                walletLogin.textContent = "Login with MetaMask";
+            }
+        });
+    }
+}

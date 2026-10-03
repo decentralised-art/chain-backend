@@ -60,7 +60,9 @@
             nextHistoryPage,
 
             updateExecuteActionAvailability,
-            copyTextFromElement
+            copyTextFromElement,
+
+            initSiteNav
         } from './js/simple_form';
 
         import {
@@ -133,28 +135,7 @@
         document.getElementById('btn_fetchHistoryEvents').addEventListener('click', fetchHistoryEvents);
         document.getElementById('btn_nextHistoryPage').addEventListener('click', nextHistoryPage);
 
-        const nav = document.getElementById('siteNav');
-        const navToggle = document.getElementById('siteNavToggle');
-        if (nav && navToggle) {
-            navToggle.addEventListener('click', () => {
-                const open = nav.classList.toggle('is-open');
-                navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-            });
-
-            nav.querySelectorAll('.site-links a').forEach((anchor) => {
-                anchor.addEventListener('click', () => {
-                    nav.classList.remove('is-open');
-                    navToggle.setAttribute('aria-expanded', 'false');
-                });
-            });
-
-            window.addEventListener('resize', () => {
-                if (window.innerWidth > 900) {
-                    nav.classList.remove('is-open');
-                    navToggle.setAttribute('aria-expanded', 'false');
-                }
-            });
-        }
+        initSiteNav({ login: loginWithMetaMask });
 
         const tabs = Array.from(document.querySelectorAll('.group-tab'));
         const panels = Array.from(document.querySelectorAll('.tab-panel'));
@@ -185,26 +166,67 @@
 
 <body>
     <header class="site-nav" id="siteNav">
-        <div class="site-nav-inner">
-            <a href="https://decentralised.art/" class="site-brand">decentralised.art</a>
-            <button
-                type="button"
-                class="site-nav-toggle"
-                id="siteNavToggle"
-                aria-expanded="false"
-                aria-label="Toggle navigation menu"
-            >
-                <span class="site-nav-toggle-open">☰</span>
-                <span class="site-nav-toggle-close">✕</span>
-            </button>
-            <nav class="site-links" aria-label="Primary">
-                <a href="https://decentralised.art/">Home</a>
-                <a href="https://decentralised.art/tutorial/">Tutorial</a>
-                <a href="https://decentralised.art/documentation/">API Docs</a>
-                <a href="https://decentralised.art/app/" class="site-link-open-network">Network</a>
+        <div class="site-nav-container">
+            <nav class="site-nav-inner" aria-label="Primary">
+                <div class="site-brand-lockup">
+                    <a href="https://decentralised.art/" class="site-brand" aria-label="decentralised.art home">decentralised.art</a>
+                    <span class="brand-strapline">Collective performative intelligence</span>
+                </div>
+
+                <button
+                    type="button"
+                    class="site-nav-toggle"
+                    id="siteNavToggle"
+                    aria-expanded="false"
+                    aria-controls="site-primary-links"
+                    aria-label="Toggle navigation menu"
+                >
+                    <span class="site-nav-toggle-open" aria-hidden="true">☰</span>
+                    <span class="site-nav-toggle-close" aria-hidden="true">✕</span>
+                </button>
+
+                <div class="site-links" id="site-primary-links">
+                    <a class="site-link" href="https://decentralised.art/">Worlds</a>
+                    <a class="site-link" href="https://decentralised.art/studio">Studio</a>
+
+                    <div class="site-docs-menu">
+                        <button
+                            type="button"
+                            class="site-link site-docs-trigger"
+                            id="siteDocsTrigger"
+                            aria-haspopup="menu"
+                            aria-expanded="false"
+                            aria-controls="siteDocsMenu"
+                        >
+                            <span>Docs</span>
+                            <span class="site-docs-caret" aria-hidden="true"></span>
+                        </button>
+
+                        <div class="site-docs-menu-list" id="siteDocsMenu" role="menu" hidden>
+                            <a class="site-docs-menu-item" role="menuitem" href="https://decentralised.art/about">About</a>
+                            <a class="site-docs-menu-item" role="menuitem" href="https://decentralised.art/sdk">SDK</a>
+                            <a class="site-docs-menu-item" role="menuitem" href="https://decentralised.art/mcp">MCP</a>
+                            <a class="site-docs-menu-item" role="menuitem" href="https://decentralised.art/api-reference">API reference</a>
+                            <a class="site-docs-menu-item" role="menuitem" href="https://decentralised.art/api-status">API status</a>
+                            <a class="site-docs-menu-item" role="menuitem" href="https://decentralised.art/roadmap">Roadmap</a>
+                        </div>
+                    </div>
+
+                    <div class="site-wallet-auth">
+                        <button type="button" class="site-wallet-login" id="siteWalletLogin">Login with MetaMask</button>
+                        <span class="site-wallet-account" id="siteWalletAccount" hidden></span>
+                    </div>
+                </div>
             </nav>
         </div>
     </header>
+    <button
+        type="button"
+        class="site-nav-backdrop"
+        id="siteNavBackdrop"
+        aria-label="Close navigation menu"
+        tabindex="-1"
+    ></button>
 
     <main class="api-shell">
         <section class="api-panel">
