@@ -343,6 +343,10 @@ namespace
 static std::expected<std::shared_ptr<dcn::publish::Signer>, std::string> _loadDeployerSigner(
     const dcn::config::Config & cfg)
 {
+    if(cfg.publish.deployer_key_file.empty() && cfg.publish.deployer_key_env.empty())
+    {
+        return std::unexpected("no deployer key is configured: pass --deployer-key-file or --deployer-key-env");
+    }
     auto signer = cfg.publish.deployer_key_file.empty()
         ? dcn::publish::Signer::fromEnvironment(cfg.publish.deployer_key_env)
         : dcn::publish::Signer::fromKeyFile(cfg.publish.deployer_key_file);
@@ -677,7 +681,7 @@ int main(int argc, char* argv[])
     arg_parser.addArg<bool>("--publish-upgrade-registry", "Upgrade the manifest registry proxy to a new implementation with the deployer key and rewrite the manifest before starting");
     arg_parser.addArg<bool>("--publish-upgrade-runner", "Upgrade the manifest runner proxy to a new implementation with the deployer key and rewrite the manifest before starting");
     arg_parser.addArg<std::filesystem::path>("--deployer-key-file", "File holding the deployer private key in hex");
-    arg_parser.addArg<std::string>("--deployer-key-env", "Environment variable holding the deployer private key");
+    arg_parser.addArg<std::string>("--deployer-key-env", "Environment variable holding the deployer private key (unset by default)");
     arg_parser.addArg<unsigned int>("--deployer-max-gas", "Maximum gas the deployer signs for one transaction");
     arg_parser.addArg<unsigned int>("--deployer-max-fee-gwei", "Maximum total fee per gas the deployer signs");
 
@@ -789,7 +793,7 @@ int main(int argc, char* argv[])
         return 1;
     }
     cfg.publish.deployer_key_file = arg_parser.getArg<std::filesystem::path>("--deployer-key-file").value_or("");
-    cfg.publish.deployer_key_env = arg_parser.getArg<std::string>("--deployer-key-env").value_or("DCN_DEPLOYER_KEY");
+    cfg.publish.deployer_key_env = arg_parser.getArg<std::string>("--deployer-key-env").value_or(cfg.publish.deployer_key_env);
     cfg.publish.deployer_max_gas = arg_parser.getArg<unsigned int>("--deployer-max-gas").value_or(12'000'000);
     cfg.publish.deployer_max_fee_per_gas_wei =
         static_cast<std::uint64_t>(arg_parser.getArg<unsigned int>("--deployer-max-fee-gwei").value_or(200))

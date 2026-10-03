@@ -203,6 +203,34 @@ namespace
         return artifacts;
     }
 
+    // The field payloads of a raw type-2 transaction. decodeSignedTransaction refuses
+    // contract creations, which are exactly what a deployment sends.
+    std::vector<std::vector<std::uint8_t>> rawTransactionFields(const std::string & raw_hex)
+    {
+        const auto raw = evmc::from_hex(raw_hex).value();
+        std::size_t pos = 1;  // past the type byte
+        const auto readLength = [&]()
+        {
+            const std::uint8_t prefix = raw[pos];
+            if(prefix < 0x80) return std::size_t{1};  // a single byte is its own payload
+            ++pos;
+            const std::uint8_t base = prefix >= 0xC0 ? 0xC0 : 0x80;
+            if(prefix - base <= 55) return static_cast<std::size_t>(prefix - base);
+            std::size_t length = 0;
+            for(int width = prefix - base - 55; width > 0; --width) length = (length << 8) | raw[pos++];
+            return length;
+        };
+        const std::size_t end = pos + readLength();
+        std::vector<std::vector<std::uint8_t>> fields;
+        while(pos < end)
+        {
+            const std::size_t length = readLength();
+            fields.emplace_back(raw.begin() + pos, raw.begin() + pos + length);
+            pos += length;
+        }
+        return fields;
+    }
+
     publish::DeploymentManifest withoutRunner(publish::DeploymentManifest manifest)
     {
         manifest.runner.clear();
@@ -263,6 +291,13 @@ TEST(PublishSigner, DerivesAddressAndProducesRecoverableSignatures)
     const auto recovered = pt::recoverSigner(digest, *signature);
     ASSERT_TRUE(recovered.has_value());
     EXPECT_EQ(*recovered, signer->address());
+}
+
+TEST(PublishSigner, DeployerEnvironmentIsUnsetByDefault)
+{
+    const config::PublishConfig cfg;
+    ASSERT_TRUE(cfg.deployer_key_env.empty());
+    EXPECT_FALSE(publish::Signer::fromEnvironment(cfg.deployer_key_env).has_value());
 }
 
 TEST(PublishSigner, RejectsMalformedKeyMaterial)
@@ -1285,20 +1320,21 @@ TEST(PublishDeploy, DeploysARegistryThenARunnerWithSequentialNoncesAndVerifiesTh
     EXPECT_EQ(deployed->registry, hexAddress(0xA1));
     EXPECT_EQ(deployed->deployment_block, 52);
 
-    // One transaction per contract, with consecutive nonces.
+    // One contract creation per contract, with consecutive nonces.
     ASSERT_EQ(node->sent_raw_transactions.size(), 4u);
     for(std::size_t i = 0; i < node->sent_raw_transactions.size(); ++i)
     {
-        const auto sent = publish::decodeSignedTransaction(node->sent_raw_transactions[i]);
-        ASSERT_TRUE(sent.has_value()) << (sent ? "" : sent.error());
-        EXPECT_EQ(sent->transaction.nonce, 7u + i);
+        const auto fields = rawTransactionFields(node->sent_raw_transactions[i]);
+        ASSERT_EQ(fields.size(), 12u);
+        std::uint64_t nonce = 0;
+        for(const std::uint8_t byte : fields[1]) nonce = (nonce << 8) | byte;
+        EXPECT_EQ(nonce, 7u + i);
+        EXPECT_TRUE(fields[5].empty());
     }
 
     // The runner proxy is created with its implementation as the only constructor
     // argument: it is bound to no registry.
-    const auto runner_proxy = publish::decodeSignedTransaction(node->sent_raw_transactions[3]);
-    ASSERT_TRUE(runner_proxy.has_value());
-    const auto & creation = runner_proxy->transaction.data;
+    const auto creation = rawTransactionFields(node->sent_raw_transactions[3])[7];
     const auto implementation_word = encodeAddressWord(makeAddressFromByte(0xA2));
     ASSERT_GE(creation.size(), implementation_word.size());
     EXPECT_TRUE(std::equal(implementation_word.begin(), implementation_word.end(), creation.end() - 32));

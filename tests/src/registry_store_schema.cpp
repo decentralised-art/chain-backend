@@ -248,9 +248,9 @@ TEST_F(UnitTest, SQLiteRegistryStore_SourceSelectionScopesReadsAndRetainsDeploym
         const auto transformation = store.getTransformationRecordHandle("SharedTransformation");
         const auto condition = store.getConditionRecordHandle("SharedCondition");
         ASSERT_TRUE(connector && transformation && condition);
-        EXPECT_EQ((*connector)->owner(), chain::addressToHex(second_owner));
-        EXPECT_EQ((*transformation)->owner(), chain::addressToHex(second_owner));
-        EXPECT_EQ((*condition)->owner(), chain::addressToHex(second_owner));
+        EXPECT_EQ(chain::normalizeHex((*connector)->owner()), chain::addressToHex(second_owner));
+        EXPECT_EQ(chain::normalizeHex((*transformation)->owner()), chain::addressToHex(second_owner));
+        EXPECT_EQ(chain::normalizeHex((*condition)->owner()), chain::addressToHex(second_owner));
         EXPECT_TRUE(store.hasConnector("LocalConnector"));
         EXPECT_TRUE(store.hasTransformation("LocalTransformation"));
         EXPECT_TRUE(store.hasCondition("LocalCondition"));
@@ -291,6 +291,6 @@ TEST_F(UnitTest, SQLiteRegistryStore_SourceSelectionScopesReadsAndRetainsDeploym
     EXPECT_FALSE(reopened.hasCondition("RetainedCondition"));
     const auto restored = reopened.getTransformationRecordHandle("SharedTransformation");
     ASSERT_TRUE(restored);
-    EXPECT_EQ((*restored)->owner(), chain::addressToHex(first_owner));
+    EXPECT_EQ(chain::normalizeHex((*restored)->owner()), chain::addressToHex(first_owner));
     EXPECT_EQ(reopened.getMaterializationCursor(), 123);
 }

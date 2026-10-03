@@ -629,6 +629,8 @@ TEST(RegistryProjection, LocalTransformation_RebuiltWithOtherCodeTakesTheNewHash
         EXPECT_TRUE(awaitIngestBatch(io, store, CHAIN_ID, {event}, {block}, 101, 1'700'000'501'100));
         EXPECT_TRUE(awaitApplyFinality(io, store, CHAIN_ID, 200, 100, 100, 1'700'000'502'000));
 
+        // Each fresh hot store numbers its changes from the start.
+        EXPECT_TRUE(runAw(io, registry.setMaterializationCursor(0)));
         registry::RegistryProjector projector(store, registry, write_strand);
         EXPECT_GE(runAw(io, projector.projectBatch(10, 1'700'000'503'000)), 1u);
         return *event.runtime_code_hash;

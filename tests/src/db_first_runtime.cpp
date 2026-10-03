@@ -634,9 +634,9 @@ TEST_F(UnitTest, Registry_SourceSelectionRefreshesCachesAndNameAdmission)
         const auto transformation = runAwaitable(io, registry.getTransformationRecordHandle("ScopedTx"));
         const auto condition = runAwaitable(io, registry.getConditionRecordHandle("ScopedCondition"));
         ASSERT_TRUE(connector && transformation && condition);
-        EXPECT_EQ((*connector)->owner(), owner);
-        EXPECT_EQ((*transformation)->owner(), owner);
-        EXPECT_EQ((*condition)->owner(), owner);
+        EXPECT_EQ(chain::normalizeHex((*connector)->owner()), owner);
+        EXPECT_EQ(chain::normalizeHex((*transformation)->owner()), owner);
+        EXPECT_EQ(chain::normalizeHex((*condition)->owner()), owner);
     };
 
     ASSERT_TRUE(runAwaitable(io, registry.selectRemoteSource(first.source_id)));

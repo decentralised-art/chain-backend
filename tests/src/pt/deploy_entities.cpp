@@ -579,7 +579,7 @@ TEST_F(UnitTest, PT_Deploy_TransformationAndCondition_StoreTheirRuntimeCodeInThe
     evm::EVM evm_instance(io_context, EVMC_SHANGHAI, solcPath(), ptPath());
     io_context.run();
     registry::Registry registry(io_context);
-    const std::string owner_hex = evmc::hex(makeAddressFromSuffix("pt_runtime_code_owner"));
+    const std::string owner_hex = evmc::hex(makeAddressFromSuffix("pt_code_owner"));
 
     TransformationRecord transformation;
     transformation.mutable_transformation()->set_name("StoredCodeAdd");

@@ -54,7 +54,7 @@ namespace dcn::config
         // The deployer key is accepted only from a protected file or an environment
         // secret; a command-line value would be visible in the process table.
         std::filesystem::path deployer_key_file;
-        std::string deployer_key_env = "DCN_DEPLOYER_KEY";
+        std::string deployer_key_env;
         std::uint64_t deployer_max_gas = 12'000'000;
         std::uint64_t deployer_max_fee_per_gas_wei = 200'000'000'000;
 

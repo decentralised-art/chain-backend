@@ -11,6 +11,7 @@
 #include "execute.hpp"
 #include "particles.hpp"
 #include "publication.hpp"
+#include "registry_events.hpp"
 #include "artifact.hpp"
 #include "error.hpp"
 #include "crypto.hpp"

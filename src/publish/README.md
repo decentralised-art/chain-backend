@@ -122,10 +122,11 @@ owner, and keeps confirming while the transaction is pending.
 | `--publish-upgrade-runner` | The same for the manifest runner proxy. |
 | `--publish-upgrade` | Both of the above. |
 | `--deployer-key-file` | File holding the deployer key in hex, readable only by its owner. Preferred form. |
-| `--deployer-key-env` | Environment variable holding the deployer key (default `DCN_DEPLOYER_KEY`), used when no key file is given. |
+| `--deployer-key-env` | Explicitly named environment variable holding the deployer key (unset by default), used when no key file is given. |
 | `--deployer-max-gas`, `--deployer-max-fee-gwei` | Ceilings the deployer signs under; an estimate or network fee above them fails the action instead of being clamped. |
 
-Deployment actions run at every startup that passes them, registry before runner,
+Deployment actions require `--deployer-key-file` or `--deployer-key-env` and an
+RPC endpoint. They run at every startup that passes them, registry before runner,
 then the server starts on the deployment the manifest now describes. The manifest
 is rewritten after each action, so a later failure never loses a contract that
 already exists on chain. Deploying and upgrading the same contract in one run is
