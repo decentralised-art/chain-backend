@@ -137,12 +137,14 @@ namespace dcn::events
         Heights heights{.head = **latest};
         const std::int64_t head = heights.head.number;
 
-        if(!_finality_tags_supported && std::chrono::steady_clock::now() >= _finality_tags_retry_at)
+        const auto now = std::chrono::steady_clock::now();
+        if(!_finality_tags_supported && now >= _finality_tags_retry_at)
         {
             _finality_tags_supported = true;
         }
 
-        if(_finality_tags_supported)
+        if(_finality_tags_supported
+           && (!_finality_tags || now >= _finality_tags_read_at + _config.finality_refresh_interval))
         {
             const auto safe = co_await _client->blockByTag(rpc::BLOCK_TAG_SAFE);
             const auto finalized = co_await _client->blockByTag(rpc::BLOCK_TAG_FINALIZED);
@@ -155,22 +157,31 @@ namespace dcn::events
 
             if(safe && finalized && safe->has_value() && finalized->has_value())
             {
-                // A load-balanced provider can report finality from a node ahead of the one
-                // that answered "latest"; nothing beyond the known head counts.
-                const rpc::BlockHeader & finalized_header = **finalized;
-                heights.finalized = std::min(finalized_header.number, head);
-                heights.finalized_hash = finalized_header.number <= head ? finalized_header.hash : std::string{};
-                heights.safe = std::clamp((*safe)->number, heights.finalized, head);
-                co_return heights;
+                _finality_tags = FinalityTags{.safe = **safe, .finalized = **finalized};
+                _finality_tags_read_at = now;
             }
+            else
+            {
+                _finality_tags.reset();
+                _finality_tags_supported = false;
+                _finality_tags_retry_at = now + FINALITY_TAG_RETRY;
+                spdlog::warn(
+                    "rpc source {}: endpoint does not serve safe/finalized block tags, "
+                    "falling back to head - {} confirmations",
+                    _config.source_id,
+                    _config.confirmations);
+            }
+        }
 
-            _finality_tags_supported = false;
-            _finality_tags_retry_at = std::chrono::steady_clock::now() + FINALITY_TAG_RETRY;
-            spdlog::warn(
-                "rpc source {}: endpoint does not serve safe/finalized block tags, "
-                "falling back to head - {} confirmations",
-                _config.source_id,
-                _config.confirmations);
+        if(_finality_tags_supported && _finality_tags)
+        {
+            // A load-balanced provider can report finality from a node ahead of the one
+            // that answered "latest"; nothing beyond the known head counts.
+            const rpc::BlockHeader & finalized_header = _finality_tags->finalized;
+            heights.finalized = std::min(finalized_header.number, head);
+            heights.finalized_hash = finalized_header.number <= head ? finalized_header.hash : std::string{};
+            heights.safe = std::clamp(_finality_tags->safe.number, heights.finalized, head);
+            co_return heights;
         }
 
         heights.finalized = head - static_cast<std::int64_t>(_config.confirmations);
@@ -178,11 +189,17 @@ namespace dcn::events
         co_return heights;
     }
 
-    asio::awaitable<std::optional<bool>> RpcLogSource::_anchorHolds(const std::int64_t head)
+    asio::awaitable<std::optional<bool>> RpcLogSource::_anchorHolds(const Heights & heights)
     {
-        if(_cycle.anchor_hash.empty() || _cycle.applied_finalized < 0 || _cycle.applied_finalized > head)
+        if(_cycle.anchor_hash.empty() || _cycle.applied_finalized < 0 || _cycle.applied_finalized > heights.head.number)
         {
             co_return true;
+        }
+
+        // The finalized tag already names the current hash of the anchor block.
+        if(_cycle.applied_finalized == heights.finalized && !heights.finalized_hash.empty())
+        {
+            co_return heights.finalized_hash == _cycle.anchor_hash;
         }
 
         const auto header = co_await _client->blockByNumber(_cycle.applied_finalized);
@@ -344,7 +361,7 @@ namespace dcn::events
         const std::int64_t head = heights->head.number;
         _metrics.last_head = head;
 
-        const auto anchor = co_await _anchorHolds(head);
+        const auto anchor = co_await _anchorHolds(*heights);
         if(!anchor)
         {
             ++_metrics.failed_polls;
@@ -401,15 +418,21 @@ namespace dcn::events
 
         // A load-balanced provider can answer the log query from a node that has not seen
         // the whole range; the range only counts once the provider shows its last block.
-        const auto end_header = co_await _client->blockByNumber(scanned_to);
-        if(!end_header || !end_header->has_value())
+        // A range ending at the head was already shown by the head read.
+        rpc::BlockHeader end_header = heights->head;
+        if(scanned_to != head)
         {
-            ++_metrics.failed_polls;
-            spdlog::info(
-                "rpc source {}: provider does not serve block {} yet, rescanning",
-                _config.source_id,
-                scanned_to);
-            co_return poll;
+            const auto fetched = co_await _client->blockByNumber(scanned_to);
+            if(!fetched || !fetched->has_value())
+            {
+                ++_metrics.failed_polls;
+                spdlog::info(
+                    "rpc source {}: provider does not serve block {} yet, rescanning",
+                    _config.source_id,
+                    scanned_to);
+                co_return poll;
+            }
+            end_header = **fetched;
         }
 
         _metrics.scanned_blocks += static_cast<std::uint64_t>(scanned_to - from_block + 1);
@@ -480,7 +503,7 @@ namespace dcn::events
         blocks_needing_header.erase(duplicates.begin(), duplicates.end());
 
         std::unordered_map<std::int64_t, rpc::BlockHeader> headers;
-        headers.emplace(scanned_to, **end_header);
+        headers.emplace(scanned_to, end_header);
         for(const std::int64_t block_number : blocks_needing_header)
         {
             if(headers.contains(block_number))
@@ -552,7 +575,7 @@ namespace dcn::events
             cycle.anchor_hash.clear();
             if(cycle.applied_finalized == scanned_to)
             {
-                cycle.anchor_hash = (*end_header)->hash;
+                cycle.anchor_hash = end_header.hash;
             }
             else if(cycle.applied_finalized == heights->finalized && !heights->finalized_hash.empty())
             {

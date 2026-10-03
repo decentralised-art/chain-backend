@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstring>
 #include <format>
+#include <limits>
 #include <tuple>
 #include <utility>
 
@@ -9,6 +10,7 @@
 #include <secp256k1_recovery.h>
 
 #include "crypto.hpp"
+#include "parser.hpp"
 
 #include "publication.hpp"
 
@@ -229,11 +231,6 @@ namespace dcn::pt
             out.insert(out.end(), body.begin(), body.end());
             return out;
         }
-
-        evmc::bytes32 keccak(std::span<const std::uint8_t> bytes)
-        {
-            return chain::keccakBytes(bytes.data(), bytes.size());
-        }
     }
 
     std::optional<ConnectorRegistration> buildConnectorRegistration(const Connector & connector)
@@ -322,7 +319,7 @@ namespace dcn::pt
     {
         // abi.encode of one struct argument: the offset word, then the tuple.
         const std::vector<std::uint8_t> encoded = abi::encodeTuple({registrationComponent(registration)});
-        return keccak(encoded);
+        return chain::keccakBytes(encoded);
     }
 
     evmc::bytes32 computeContentHash(const std::string & artifact_bytes)
@@ -332,11 +329,11 @@ namespace dcn::pt
 
     evmc::bytes32 computeMetadataHash(const EntityKind kind, const std::string & name)
     {
-        const std::string canonical = nlohmann::json{
+        const std::string canonical = parse::dumpJsonLossy(nlohmann::json{
             {"entity_type", std::string(entityKindName(kind))},
             {"name", name},
             {"schema_version", 1}
-        }.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+        });
         return chain::keccakString(canonical);
     }
 
@@ -352,15 +349,15 @@ namespace dcn::pt
             abi::addressComponent(publication.owner),
             abi::bytes32Component(publication.content_hash),
             abi::uintComponent(publication.nonce)});
-        const evmc::bytes32 salt = keccak(salt_preimage);
-        const evmc::bytes32 code_hash = keccak(creation_code);
+        const evmc::bytes32 salt = chain::keccakBytes(salt_preimage);
+        const evmc::bytes32 code_hash = chain::keccakBytes(creation_code);
 
         std::vector<std::uint8_t> preimage{0xFF};
         preimage.insert(preimage.end(), registry_address.bytes, registry_address.bytes + 20);
         preimage.insert(preimage.end(), salt.bytes, salt.bytes + 32);
         preimage.insert(preimage.end(), code_hash.bytes, code_hash.bytes + 32);
 
-        const evmc::bytes32 digest = keccak(preimage);
+        const evmc::bytes32 digest = chain::keccakBytes(preimage);
         chain::Address address{};
         std::copy(digest.bytes + 12, digest.bytes + 32, address.bytes);
         return address;
@@ -402,6 +399,44 @@ namespace dcn::pt
              publicationComponent(publication),
              registrationComponent(registration),
              abi::bytesComponent(owner_signature)});
+    }
+
+    std::map<chain::Address, std::vector<std::uint8_t>> findPublishedCreationCodes(
+        const std::span<const std::uint8_t> calldata,
+        const chain::Address & registry)
+    {
+        std::vector<std::vector<std::uint8_t>> selectors;
+        for(const EntityKind kind : {EntityKind::TRANSFORMATION, EntityKind::CONDITION, EntityKind::CONNECTOR})
+        {
+            selectors.push_back(chain::constructSelector(publishSignature(kind)));
+        }
+
+        std::map<chain::Address, std::vector<std::uint8_t>> codes;
+        for(std::size_t offset = 0; offset + 4 <= calldata.size(); ++offset)
+        {
+            const auto at = calldata.begin() + static_cast<std::ptrdiff_t>(offset);
+            if(std::none_of(selectors.begin(), selectors.end(),
+                   [&](const auto & selector) { return std::equal(selector.begin(), selector.end(), at); }))
+            {
+                continue;
+            }
+
+            const std::span<const std::uint8_t> call = calldata.subspan(offset);
+            const auto publication = decodePublishCall(call);
+            if(!publication) continue;
+
+            // The creation code is the first argument; an ABI bytes value is encoded as a string.
+            const std::uint8_t * arguments = call.data() + 4;
+            const std::size_t arguments_size = call.size() - 4;
+            const auto code_offset = chain::readWordAsSizeT(arguments, arguments_size, 0);
+            const auto code = code_offset ? chain::decodeAbiString(arguments, arguments_size, *code_offset) : std::nullopt;
+            if(!code || code->empty()) continue;
+
+            std::vector<std::uint8_t> creation_code(code->begin(), code->end());
+            const chain::Address address = predictEntityAddress(registry, *publication, creation_code);
+            codes.try_emplace(address, std::move(creation_code));
+        }
+        return codes;
     }
 
     std::optional<Publication> decodePublishCall(const std::span<const std::uint8_t> calldata)
@@ -461,7 +496,10 @@ namespace dcn::pt
         const auto runtime_code_hash = bytes32(6);
         const auto registration_hash = bytes32(7);
         const auto nonce = word(8);
-        const auto deadline = word(9);
+        // The deadline is a uint256: a value beyond 64 bits never expires.
+        const auto deadline = tuple_size >= 10 * 32
+            ? std::optional(chain::readUint64Word(tuple, tuple_size, 9 * 32).value_or(std::numeric_limits<std::uint64_t>::max()))
+            : std::nullopt;
         if(!name || !content_hash || !metadata_hash || !creation_code_hash || !runtime_code_hash
            || !registration_hash || !nonce || !deadline)
         {
@@ -478,7 +516,7 @@ namespace dcn::pt
         publication.runtime_code_hash = *runtime_code_hash;
         publication.registration_hash = *registration_hash;
         publication.nonce = static_cast<std::uint64_t>(*nonce);
-        publication.deadline = static_cast<std::uint64_t>(*deadline);
+        publication.deadline = *deadline;
         return publication;
     }
 
@@ -503,7 +541,7 @@ namespace dcn::pt
 
         const auto hashWord = [](const std::string & text)
         {
-            return abi::bytes32Component(keccak(std::span<const std::uint8_t>(
+            return abi::bytes32Component(chain::keccakBytes(std::span<const std::uint8_t>(
                 reinterpret_cast<const std::uint8_t *>(text.data()), text.size())));
         };
         const auto concatWords = [](std::initializer_list<abi::Component> components)
@@ -517,14 +555,14 @@ namespace dcn::pt
             return out;
         };
 
-        const evmc::bytes32 domain_separator = keccak(concatWords({
+        const evmc::bytes32 domain_separator = chain::keccakBytes(concatWords({
             hashWord(DOMAIN_TYPE),
             hashWord("PT"),
             hashWord("1"),
             abi::uintComponent(chain_id),
             abi::addressComponent(registry_address)}));
 
-        const evmc::bytes32 struct_hash = keccak(concatWords({
+        const evmc::bytes32 struct_hash = chain::keccakBytes(concatWords({
             hashWord(PUBLICATION_TYPE),
             abi::uintComponent(static_cast<std::uint64_t>(publication.kind)),
             hashWord(publication.name),
@@ -542,7 +580,7 @@ namespace dcn::pt
         preimage.insert(preimage.end(), domain_separator.bytes, domain_separator.bytes + 32);
         preimage.insert(preimage.end(), struct_hash.bytes, struct_hash.bytes + 32);
 
-        return keccak(preimage);
+        return chain::keccakBytes(preimage);
     }
 
     std::optional<chain::Address> recoverSigner(

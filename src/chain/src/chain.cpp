@@ -1,6 +1,7 @@
 #include "chain.hpp"
 
 #include <algorithm>
+#include <limits>
 
 #include "crypto.hpp"
 
@@ -43,17 +44,7 @@ namespace dcn::chain
         return topic_words;
     }
 
-    std::uint64_t readUint256(const std::vector<std::uint8_t> & bytes, std::size_t offset) {
-        std::uint64_t value = 0;
-        for (std::size_t i = 0; i < 32; ++i) {
-            value <<= 8;
-            value |= bytes[offset + i];
-        }
-        return value;
-    }
-
-
-    std::optional<std::size_t> readWordAsSizeT(const std::uint8_t* data, std::size_t data_size, std::size_t offset)
+    std::optional<std::uint64_t> readUint64Word(const std::uint8_t* data, std::size_t data_size, std::size_t offset)
     {
         // Offsets come from untrusted ABI data; `offset + 32` could wrap around.
         if(data == nullptr || offset > data_size || data_size - offset < 32)
@@ -61,9 +52,7 @@ namespace dcn::chain
             return std::nullopt;
         }
 
-        std::size_t value = 0;
-
-        constexpr std::size_t prefix = 32 - sizeof(std::size_t);
+        constexpr std::size_t prefix = 32 - sizeof(std::uint64_t);
         for(std::size_t i = 0; i < prefix; ++i)
         {
             if(data[offset + i] != 0)
@@ -72,12 +61,28 @@ namespace dcn::chain
             }
         }
 
+        std::uint64_t value = 0;
         for(std::size_t i = prefix; i < 32; ++i)
         {
             value = (value << 8) | data[offset + i];
         }
 
         return value;
+    }
+
+    std::optional<std::uint64_t> readUint64Word(const std::vector<std::uint8_t> & data, std::size_t offset)
+    {
+        return readUint64Word(data.data(), data.size(), offset);
+    }
+
+    std::optional<std::size_t> readWordAsSizeT(const std::uint8_t* data, std::size_t data_size, std::size_t offset)
+    {
+        const auto value = readUint64Word(data, data_size, offset);
+        if(!value || *value > std::numeric_limits<std::size_t>::max())
+        {
+            return std::nullopt;
+        }
+        return static_cast<std::size_t>(*value);
     }
 
     std::optional<std::uint32_t> readUint32Word(const std::uint8_t* data, std::size_t data_size, std::size_t offset)

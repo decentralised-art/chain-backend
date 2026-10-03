@@ -7,7 +7,9 @@
 #include <spdlog/spdlog.h>
 
 #include "utils.hpp"
+#include "parser.hpp"
 #include "sqlite/statement.hpp"
+#include "sqlite/column.hpp"
 #include "sqlite/exec.hpp"
 
 #include "decoded_event.hpp"
@@ -82,26 +84,7 @@ namespace dcn::feed
             {"owner", owner}
         };
 
-        return payload.dump(-1, ' ', false, json::error_handler_t::replace);
-    }
-
-    static std::optional<std::int64_t> _columnInt64Optional(sqlite3_stmt * stmt, const int index)
-    {
-        if(sqlite3_column_type(stmt, index) == SQLITE_NULL)
-        {
-            return std::nullopt;
-        }
-        return static_cast<std::int64_t>(sqlite3_column_int64(stmt, index));
-    }
-
-    static std::optional<std::string> _columnTextOptional(sqlite3_stmt * stmt, const int index)
-    {
-        const unsigned char * txt = sqlite3_column_text(stmt, index);
-        if(txt == nullptr)
-        {
-            return std::nullopt;
-        }
-        return std::string(reinterpret_cast<const char *>(txt));
+        return parse::dumpJsonLossy(payload);
     }
 
     static bool _feedDescComparator(const FeedItem & lhs, const FeedItem & rhs)
@@ -215,15 +198,6 @@ namespace dcn::feed
         bounds.end_block_time = static_cast<std::int64_t>(
             std::chrono::duration_cast<std::chrono::seconds>(end_day.time_since_epoch()).count());
         return bounds;
-    }
-
-    static int _bindOptionalInt64(sqlite3_stmt * stmt, int index, const std::optional<std::int64_t> & value)
-    {
-        if(!value.has_value())
-        {
-            return sqlite3_bind_null(stmt, index);
-        }
-        return sqlite3_bind_int64(stmt, index, static_cast<sqlite3_int64>(*value));
     }
 
     // -----------------------------------------------------------------------
@@ -967,7 +941,7 @@ namespace dcn::feed
                     row.log_index = static_cast<std::int64_t>(sqlite3_column_int64(select_feed.get(), 3));
                     row.block_number = static_cast<std::int64_t>(sqlite3_column_int64(select_feed.get(), 4));
                     row.tx_index = static_cast<std::int64_t>(sqlite3_column_int64(select_feed.get(), 5));
-                    row.block_time = _columnInt64Optional(select_feed.get(), 6);
+                    row.block_time = storage::sqlite::columnInt64Optional(select_feed.get(), 6);
                     row.event_type = reinterpret_cast<const char*>(sqlite3_column_text(select_feed.get(), 7));
                     row.status = reinterpret_cast<const char*>(sqlite3_column_text(select_feed.get(), 8));
                     row.visible = sqlite3_column_int(select_feed.get(), 9) != 0;
@@ -1094,7 +1068,7 @@ namespace dcn::feed
                         sqlite3_bind_int64(insert_feed.get(), 4, static_cast<sqlite3_int64>(row.log_index));
                         sqlite3_bind_int64(insert_feed.get(), 5, static_cast<sqlite3_int64>(row.block_number));
                         sqlite3_bind_int64(insert_feed.get(), 6, static_cast<sqlite3_int64>(row.tx_index));
-                        _bindOptionalInt64(insert_feed.get(), 7, row.block_time);
+                        storage::sqlite::bindOptionalInt64(insert_feed.get(), 7, row.block_time);
                         sqlite3_bind_text(insert_feed.get(),
                                           8,
                                           row.event_type.c_str(),
@@ -1702,7 +1676,7 @@ namespace dcn::feed
                 sqlite3_bind_int64(upsert_feed_stmt.get(), 4, static_cast<sqlite3_int64>(log_index));
                 sqlite3_bind_int64(upsert_feed_stmt.get(), 5, static_cast<sqlite3_int64>(block_number));
                 sqlite3_bind_int64(upsert_feed_stmt.get(), 6, static_cast<sqlite3_int64>(tx_index));
-                _bindOptionalInt64(upsert_feed_stmt.get(), 7, block_time);
+                storage::sqlite::bindOptionalInt64(upsert_feed_stmt.get(), 7, block_time);
                 sqlite3_bind_text(
                     upsert_feed_stmt.get(), 8, event_type.c_str(), static_cast<int>(event_type.size()), SQLITE_TRANSIENT);
                 sqlite3_bind_text(

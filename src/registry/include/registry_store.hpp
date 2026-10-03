@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -36,7 +37,6 @@ namespace dcn::registry
         std::string runtime_code_hash;
         std::string block_hash;
         std::int64_t log_index = 0;
-        pt::ArtifactState artifact_state = pt::ArtifactState::MISSING;
         bool definition_conflict = false;
     };
 
@@ -45,18 +45,6 @@ namespace dcn::registry
         EntitySource source;
         chain::Address address{};
         bool active = true;
-    };
-
-    struct ArtifactReference
-    {
-        EntityKind kind = EntityKind::CONNECTOR;
-        std::string source_id;
-        std::string name;
-        std::string content_hash;
-        std::string metadata_hash;
-        std::string runtime_code_hash;
-        pt::ArtifactState state = pt::ArtifactState::MISSING;
-        std::uint32_t attempts = 0;
     };
 
     struct ConnectorBatchItem
@@ -97,6 +85,10 @@ namespace dcn::registry
     {
         public:
             virtual ~IRegistryStore() = default;
+
+            // Reads include local entities and this remote source. An empty source selects
+            // local entities only; until configured, reads include every source.
+            virtual bool selectRemoteSource(const std::string & source_id) = 0;
 
             virtual bool hasConnector(const std::string & name) const = 0;
 
@@ -166,6 +158,10 @@ namespace dcn::registry
                 const ConditionRecord & record) = 0;
 
             virtual std::optional<EntityLocation> getEntityLocation(EntityKind kind, const std::string & name) const = 0;
+            // Sets the content, metadata and runtime code hashes of the active local version of
+            // `name` to `source`'s. True when nothing needed changing or there is no local
+            // version.
+            virtual bool updateLocalVersionHashes(EntityKind kind, const std::string & name, const EntitySource & source) = 0;
             virtual bool hasRemoteEntity(EntityKind kind, const std::string & name) const = 0;
             // True when this server's local simulation holds a version of the entity.
             virtual bool hasLocalEntity(EntityKind kind, const std::string & name) const = 0;
@@ -176,15 +172,22 @@ namespace dcn::registry
                 const std::string & name,
                 const chain::Address & old_owner,
                 const chain::Address & new_owner) = 0;
-            virtual std::vector<ArtifactReference> getArtifactsDue(
-                std::int64_t now_ms,
-                std::size_t limit) const = 0;
-            virtual bool setArtifactState(
-                EntityKind kind,
+
+            // Deployed runtime bytecode, keyed by its keccak256 (0x-prefixed lowercase hex).
+            // Code that does not hash to `code_hash` is refused.
+            virtual bool putRuntimeCode(const std::string & code_hash, const std::vector<std::uint8_t> & code) = 0;
+            virtual std::optional<std::vector<std::uint8_t>> getRuntimeCode(const std::string & code_hash) const = 0;
+            virtual bool hasRuntimeCode(const std::string & code_hash) const = 0;
+
+            // The creation code the chain deployed `entity` of `source_id` from.
+            virtual bool putChainCreationCode(
                 const std::string & source_id,
-                const std::string & name,
-                pt::ArtifactState state,
-                std::int64_t retry_at_ms) = 0;
+                const chain::Address & entity,
+                const std::vector<std::uint8_t> & code) = 0;
+            virtual std::optional<std::vector<std::uint8_t>> getChainCreationCode(
+                const std::string & source_id,
+                const chain::Address & entity) const = 0;
+            virtual bool hasChainCreationCode(const std::string & source_id, const chain::Address & entity) const = 0;
 
             virtual bool addConditionsBatch(
                 const std::vector<ConditionBatchItem> & items,

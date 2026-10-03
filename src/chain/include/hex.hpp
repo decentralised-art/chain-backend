@@ -1,8 +1,11 @@
 #pragma once
 
+#include <concepts>
 #include <cstdint>
+#include <format>
 #include <span>
 #include <string>
+#include <type_traits>
 
 #ifdef interface
     #undef interface
@@ -23,7 +26,19 @@ namespace dcn::chain
 
     std::string normalizeHex(std::string value);
 
-    std::string toHexQuantity(const std::int64_t value);
+    // JSON-RPC QUANTITY; negative values encode as 0x0.
+    template<std::integral T>
+    std::string toHexQuantity(const T value)
+    {
+        if constexpr(std::is_signed_v<T>)
+        {
+            if(value < 0) return "0x0";
+        }
+        return std::format("0x{:x}", static_cast<std::make_unsigned_t<T>>(value));
+    }
+
+    // Hex of exactly 32 bytes, with or without a 0x prefix.
+    bool isBytes32Hex(const std::string & value);
 
     // 0x-prefixed lowercase hex of arbitrary bytes.
     std::string bytesToHex(std::span<const std::uint8_t> bytes);

@@ -39,6 +39,14 @@ namespace dcn::rpc
         std::vector<json> logs;
     };
 
+    // A transaction as eth_getTransactionByHash reports it.
+    struct TransactionInfo
+    {
+        std::string tx_hash;
+        std::string block_hash;   // empty while the transaction is pending
+        std::string input;
+    };
+
     struct FeeEstimate
     {
         std::uint64_t max_fee_per_gas = 0;
@@ -75,8 +83,17 @@ namespace dcn::rpc
                 std::string_view address,
                 std::string_view tag = BLOCK_TAG_LATEST) const;
 
+            // getCode() at exactly the block with `block_hash` (EIP-1898).
+            asio::awaitable<std::expected<std::string, RpcError>> getCodeAtBlock(
+                std::string_view address,
+                std::string_view block_hash) const;
+
             // A timed-out range is reported rather than retried: it needs a narrower range.
             asio::awaitable<std::expected<std::vector<json>, RpcError>> getLogs(const LogFilter & filter) const;
+
+            // nullopt when the node does not know the transaction.
+            asio::awaitable<std::expected<std::optional<TransactionInfo>, RpcError>> transactionByHash(
+                std::string_view tx_hash) const;
 
             // `gas` bounds the call the way a transaction would; without it the provider
             // applies its own ceiling.

@@ -135,6 +135,25 @@ TEST_F(UnitTest, Transformation_UseProtobuf_PreservesSolSrcForLocalStorage)
     EXPECT_EQ(parsed->sol_src(), transformation.sol_src());
 }
 
+TEST_F(UnitTest, Transformation_RuntimeCode_IsNullInTheResponseAndAbsentFromDefinitionsWhenUnset)
+{
+    Transformation transformation = makeTransformationSample();
+
+    // Unset, the response carries null and a definition bound into an artifact hash is unchanged.
+    const auto plain_json = parseToJson(transformation, use_json);
+    const auto plain_protobuf = parseToJson(transformation, use_protobuf);
+    ASSERT_TRUE(plain_json.has_value());
+    ASSERT_TRUE(plain_protobuf.has_value());
+    ASSERT_TRUE(plain_json->contains("runtime_code"));
+    EXPECT_TRUE((*plain_json)["runtime_code"].is_null());
+    EXPECT_EQ(plain_protobuf->find("runtime_code"), std::string::npos);
+
+    transformation.set_runtime_code("0x6001");
+    const auto coded = parseToJson(transformation, use_json);
+    ASSERT_TRUE(coded.has_value());
+    EXPECT_EQ((*coded)["runtime_code"], "0x6001");
+}
+
 TEST_F(UnitTest, Transformation_ConstructSolidityCode_UsesConstructorPattern)
 {
     Transformation transformation = makeTransformationSample();

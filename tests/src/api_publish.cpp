@@ -96,7 +96,10 @@ TEST_F(UnitTest, API_AdmitLocalEntityName_RefusesInvalidAndChainOwnedNames)
     asio::io_context io_context;
     registry::Registry registry(io_context);
     auto node = std::make_shared<FakeNode>();
-    const ChainAccess chain_access{.client = makeClient(node), .registry = REGISTRY_ADDRESS, .runner = RUNNER_ADDRESS};
+    const ChainAccess chain_access{
+        .client = makeClient(node),
+        .registry = *evmc::from_hex<chain::Address>(REGISTRY_ADDRESS),
+        .runner = RUNNER_ADDRESS};
 
     const auto invalid = runAwaitable(
         io_context, admitLocalEntityName(registry, &chain_access, pt::EntityKind::TRANSFORMATION, "has space"));
@@ -154,9 +157,7 @@ TEST_F(UnitTest, API_PublishConfirm_ValidatesRouteAuthenticationAndBody)
     asio::io_context io_context;
     auth::AuthManager auth_manager(io_context);
     auto node = std::make_shared<FakeNode>();
-    const auto paths = makeTempEventsPaths("api_publish_confirm_validation");
-    const pt::ArtifactStore artifacts(paths.root / "cache", {}, {paths.root / "replica"});
-    const publish::Publisher publisher(makeClient(node), makeManifest(), artifacts);
+    const publish::Publisher publisher(makeClient(node), makeManifest());
 
     const chain::Address owner = makeAddressFromByte(0x42);
     const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(owner));
@@ -191,9 +192,7 @@ TEST_F(UnitTest, API_PublishConfirm_AnswersPendingUntilTheRegistryEventIsMined)
     asio::io_context io_context;
     auth::AuthManager auth_manager(io_context);
     auto node = std::make_shared<FakeNode>();
-    const auto paths = makeTempEventsPaths("api_publish_confirm");
-    const pt::ArtifactStore artifacts(paths.root / "cache", {}, {paths.root / "replica"});
-    const publish::Publisher publisher(makeClient(node), makeManifest(), artifacts);
+    const publish::Publisher publisher(makeClient(node), makeManifest());
 
     const chain::Address owner = makeAddressFromByte(0x42);
     const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(owner));
@@ -229,9 +228,7 @@ TEST_F(UnitTest, API_PublishSend_ValidatesRouteAuthenticationAndBody)
     asio::io_context io_context;
     auth::AuthManager auth_manager(io_context);
     auto node = std::make_shared<FakeNode>();
-    const auto paths = makeTempEventsPaths("api_publish_send_validation");
-    const pt::ArtifactStore artifacts(paths.root / "cache", {}, {paths.root / "replica"});
-    const publish::Publisher publisher(makeClient(node), makeManifest(), artifacts);
+    const publish::Publisher publisher(makeClient(node), makeManifest());
 
     const auto owner = makeOwnerSigner();
     const pt::Publication publication = makeRelayedPublication(owner->address(), "PubTx");
@@ -273,9 +270,7 @@ TEST_F(UnitTest, API_PublishSend_ForwardsOnlyTheOwnersSignedPublication)
     asio::io_context io_context;
     auth::AuthManager auth_manager(io_context);
     auto node = std::make_shared<FakeNode>();
-    const auto paths = makeTempEventsPaths("api_publish_send");
-    const pt::ArtifactStore artifacts(paths.root / "cache", {}, {paths.root / "replica"});
-    const publish::Publisher publisher(makeClient(node), makeManifest(), artifacts);
+    const publish::Publisher publisher(makeClient(node), makeManifest());
 
     const auto owner = makeOwnerSigner();
     const pt::Publication publication = makeRelayedPublication(owner->address(), "PubTx");
@@ -331,8 +326,7 @@ TEST_F(UnitTest, API_PublishPrepare_RebuildsTheCallersLocalEntityIntoAnOwnerPaid
     ASSERT_TRUE(runAwaitable(io_context, loader::deployTransformation(evm_instance, registry, record, storage)).has_value());
 
     auto node = std::make_shared<FakeNode>();
-    const pt::ArtifactStore artifacts(storage / "artifacts" / "cache", {}, {paths.root / "replica"});
-    const publish::Publisher publisher(makeClient(node), makeManifest(), artifacts);
+    const publish::Publisher publisher(makeClient(node), makeManifest());
     config::Config cfg;
     cfg.storage_path = storage;
 
@@ -372,9 +366,7 @@ TEST_F(UnitTest, API_PublishPrepare_RebuildsTheCallersLocalEntityIntoAnOwnerPaid
     EXPECT_EQ(signing["value"], "0x0");
     EXPECT_EQ(prepareWith(owner, json{{"name", "PubTx"}, {"relay", "yes"}}).getCode(), http::Code::BadRequest);
 
-    // The artifact is durable before the owner can send, and the server sent nothing.
-    const std::string content_hash = body["content_hash"];
-    EXPECT_EQ(pt::ArtifactStore(paths.root / "replica").read(content_hash).state, pt::ArtifactState::AVAILABLE);
+    // The server sent nothing.
     EXPECT_TRUE(node->sent_raw_transactions.empty());
 
     // Only the owner can publish it, and only what exists locally can be rebuilt.
@@ -427,7 +419,7 @@ TEST_F(UnitTest, API_Execute_RunsTheConnectorAsAGasCappedEthCallOnTheRunner)
     };
     const ChainAccess chain_access{
         .client = makeClient(node),
-        .registry = REGISTRY_ADDRESS,
+        .registry = *evmc::from_hex<chain::Address>(REGISTRY_ADDRESS),
         .runner = RUNNER_ADDRESS,
         .execute_max_gas = 1'000'000,
         .execute_block_tag = "safe"};
@@ -450,6 +442,7 @@ TEST_F(UnitTest, API_Execute_RunsTheConnectorAsAGasCappedEthCallOnTheRunner)
     EXPECT_EQ(body["block_number"], node->head_block);
     EXPECT_EQ(body["block_hash"], hexBytes(0x31, 32));
     EXPECT_EQ(body["runner"], RUNNER_ADDRESS);
+    EXPECT_EQ(body["registry"], REGISTRY_ADDRESS);
 
     // One eth_call of Runner.gen at exactly that block, bounded by the configured gas.
     ASSERT_FALSE(node->calls.empty());
@@ -457,8 +450,10 @@ TEST_F(UnitTest, API_Execute_RunsTheConnectorAsAGasCappedEthCallOnTheRunner)
     EXPECT_EQ(call.at(1).at("blockHash"), hexBytes(0x31, 32));
     EXPECT_EQ(call.at(1).at("requireCanonical"), true);
     EXPECT_EQ(call.at(0).at("gas"), "0xf4240");
-    EXPECT_TRUE(call.at(0).at("data").get<std::string>().starts_with(
-        selectorOf("gen(string,uint32,(uint32,uint32,uint32)[])")));
+    // The runner holds no registry: the call names the one to look the connector up in.
+    const std::string gen_data = call.at(0).at("data").get<std::string>();
+    EXPECT_TRUE(gen_data.starts_with(selectorOf("gen(address,string,uint32,(uint32,uint32,uint32)[])")));
+    EXPECT_EQ(gen_data.substr(10, 64), wordOfAddress(REGISTRY_ADDRESS).substr(2));
 
     // A PT error is the connector refusing the request.
     runner_answer = "condition";
@@ -466,7 +461,7 @@ TEST_F(UnitTest, API_Execute_RunsTheConnectorAsAGasCappedEthCallOnTheRunner)
     EXPECT_EQ(rejected.getCode(), http::Code::BadRequest);
     EXPECT_NE(bodyOf(rejected)["message"].get<std::string>().find("Execution rejected"), std::string::npos);
 
-    // The runner's registry does not hold the name.
+    // The configured registry does not hold the name.
     runner_answer = "cannot find connector";
     EXPECT_EQ(execute(&chain_access).getCode(), http::Code::NotFound);
 
@@ -510,7 +505,7 @@ TEST_F(UnitTest, API_Simulate_ValidatesTheRequestAndRefusesUnavailableChainConne
 
     EXPECT_EQ(simulate(json{{"connector_name", "Missing"}, {"particles_count", 1}}).getCode(), http::Code::NotFound);
 
-    // A connector that exists only on chain cannot be simulated until its artifacts are available.
+    // A chain connector without stored creation code cannot be replayed.
     ConnectorRecord record;
     record.set_owner(chain::addressToHex(makeAddressFromByte(0x42)));
     record.mutable_connector()->set_name("ChainOnly");

@@ -47,37 +47,29 @@ namespace dcn::utils
             .count();
     }
 
-    bool equalsIgnoreCase(const std::string& a, const std::string& b) {
+    bool equalsIgnoreCase(const std::string_view a, const std::string_view b) {
     return a.size() == b.size() &&
            std::equal(a.begin(), a.end(), b.begin(), [](char a, char b) {
                return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
            });
     }
 
+    std::string_view trimView(std::string_view value)
+    {
+        const auto is_space = [](const unsigned char ch) { return std::isspace(ch) != 0; };
+        while(!value.empty() && is_space(value.front())) value.remove_prefix(1);
+        while(!value.empty() && is_space(value.back())) value.remove_suffix(1);
+        return value;
+    }
+
     std::optional<std::string> trimAsciiWhitespace(const std::string_view value)
     {
-        const auto first_non_space = std::find_if_not(
-            value.begin(),
-            value.end(),
-            [](const unsigned char ch)
-            {
-                return std::isspace(ch) != 0;
-            });
-
-        if(first_non_space == value.end())
+        const std::string_view trimmed = trimView(value);
+        if(trimmed.empty())
         {
             return std::nullopt;
         }
-
-        const auto last_non_space = std::find_if_not(
-            value.rbegin(),
-            value.rend(),
-            [](const unsigned char ch)
-            {
-                return std::isspace(ch) != 0;
-            }).base();
-
-        return std::string(first_non_space, last_non_space);
+        return std::string(trimmed);
     }
 
     std::string toLower(std::string value)

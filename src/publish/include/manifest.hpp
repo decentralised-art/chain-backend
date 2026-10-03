@@ -4,6 +4,7 @@
 #include <expected>
 #include <filesystem>
 #include <string>
+#include <string_view>
 
 #include <asio.hpp>
 
@@ -11,10 +12,22 @@
 
 namespace dcn::publish
 {
+    /// The two upgradeable PT contracts a deployment consists of.
+    enum class PtContract
+    {
+        REGISTRY,
+        RUNNER
+    };
+
+    /// "registry" or "runner"; also the prefix of the contract's manifest fields.
+    std::string_view contractLabel(PtContract contract);
+
     /// Everything needed to positively identify one canonical PT deployment. A fresh
     /// server cannot discover a canonical registry by scanning a chain, so publication
     /// always works from a manifest: the reviewed one committed with a PT release, or
-    /// the one this server wrote when it bootstrapped a private deployment.
+    /// the one this server wrote when it deployed a private deployment. A registry is
+    /// always present. The runner serves any registry, so it is optional: its fields are
+    /// either all set or all empty.
     struct DeploymentManifest
     {
         std::uint64_t chain_id = 0;
@@ -36,15 +49,24 @@ namespace dcn::publish
 
     std::expected<DeploymentManifest, std::string> readManifest(const std::filesystem::path & path);
 
+    /// The manifest's JSON text, as writeManifest stores it.
+    std::string formatManifest(const DeploymentManifest & manifest);
+
     /// Written through a temporary file and renamed, so a crash mid-write cannot leave
     /// a half-manifest that a later startup would treat as a valid deployment.
     std::expected<void, std::string> writeManifest(
         const std::filesystem::path & path,
         const DeploymentManifest & manifest);
 
-    /// Confirms the live chain still matches the manifest before it is used: chain id,
-    /// proxy implementation slots, implementation code hashes, protocol identity/version,
-    /// the runner-to-registry link and the pinned upgrade owner of both proxies.
+    /// Verifies one contract of the manifest: protocol identity (and chain id for the
+    /// registry), proxy implementation slot, implementation code hash and upgrade owner.
+    asio::awaitable<std::expected<void, std::string>> verifyContract(
+        const rpc::EthClient & client,
+        const DeploymentManifest & manifest,
+        PtContract contract);
+
+    /// Confirms the live chain still matches the manifest before it is used: the
+    /// registry, and the runner when the manifest has one.
     asio::awaitable<std::expected<void, std::string>> verifyDeployment(
         const rpc::EthClient & client,
         const DeploymentManifest & manifest);

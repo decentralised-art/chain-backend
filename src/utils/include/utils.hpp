@@ -83,9 +83,12 @@ namespace dcn::utils
         return sorted;
     }
 
-    bool equalsIgnoreCase(const std::string& a, const std::string& b);
+    bool equalsIgnoreCase(std::string_view a, std::string_view b);
 
     std::string toLower(std::string value);
+
+    // Strips leading and trailing whitespace without copying.
+    std::string_view trimView(std::string_view value);
 
     std::optional<std::string> trimAsciiWhitespace(std::string_view value);
 

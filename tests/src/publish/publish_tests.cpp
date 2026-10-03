@@ -3,7 +3,9 @@
 #include "events_test_harness.hpp"
 
 #include <algorithm>
+#include <format>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -41,19 +43,6 @@ namespace
         return *signer;
     }
 
-    // An artifact store whose publish() writes to one durable replica.
-    struct ArtifactDirs
-    {
-        TempEventsPaths paths;
-        pt::ArtifactStore store;
-
-        explicit ArtifactDirs(const std::string & test_name)
-            : paths(makeTempEventsPaths(test_name))
-            , store(paths.root / "cache", {}, {paths.root / "replica"})
-        {
-        }
-    };
-
     std::string makeArtifactBytes(const pt::EntityKind kind, const std::string & name)
     {
         const auto bytes = pt::encodeArtifactBundle(pt::ArtifactBundle{
@@ -75,11 +64,11 @@ namespace
     publish::PublicationRequest makeTransformationRequest(const chain::Address & owner)
     {
         publish::PublicationRequest request;
-        request.artifact_bytes = makeArtifactBytes(pt::EntityKind::TRANSFORMATION, "published_tx");
         request.publication.kind = pt::EntityKind::TRANSFORMATION;
         request.publication.name = "published_tx";
         request.publication.owner = owner;
-        request.publication.content_hash = pt::computeContentHash(request.artifact_bytes);
+        request.publication.content_hash = pt::computeContentHash(
+            makeArtifactBytes(pt::EntityKind::TRANSFORMATION, "published_tx"));
         request.publication.metadata_hash = bytes32OfFill(0xBB);
         request.publication.creation_code_hash = bytes32OfFill(0xCC);
         request.publication.runtime_code_hash = bytes32OfFill(0xDD);
@@ -90,11 +79,11 @@ namespace
     publish::PublicationRequest makeConnectorRequest(const chain::Address & owner)
     {
         publish::PublicationRequest request;
-        request.artifact_bytes = makeArtifactBytes(pt::EntityKind::CONNECTOR, "published_connector");
         request.publication.kind = pt::EntityKind::CONNECTOR;
         request.publication.name = "published_connector";
         request.publication.owner = owner;
-        request.publication.content_hash = pt::computeContentHash(request.artifact_bytes);
+        request.publication.content_hash = pt::computeContentHash(
+            makeArtifactBytes(pt::EntityKind::CONNECTOR, "published_connector"));
         request.publication.metadata_hash = bytes32OfFill(0xBB);
         request.publication.creation_code_hash = bytes32OfFill(0xCC);
         request.publication.runtime_code_hash = bytes32OfFill(0xDD);
@@ -192,22 +181,35 @@ namespace
             .metadata_hash = chain::bytes32ToHex(publication.metadata_hash)};
     }
 
-    // Four contracts' worth of compiler output for a bootstrap.
-    publish::BootstrapArtifacts writeBootstrapArtifacts(const std::filesystem::path & dir)
+    // Compiler output for both implementations and the proxy they share.
+    struct DeployArtifacts
+    {
+        std::filesystem::path registry_impl_bin;
+        std::filesystem::path runner_impl_bin;
+        std::filesystem::path proxy_bin;
+    };
+
+    DeployArtifacts writeDeployArtifacts(const std::filesystem::path & dir)
     {
         std::filesystem::create_directories(dir);
-        const publish::BootstrapArtifacts artifacts{
+        const DeployArtifacts artifacts{
             .registry_impl_bin = dir / "RegistryBase.bin",
-            .registry_proxy_bin = dir / "PTRegistryProxy.bin",
             .runner_impl_bin = dir / "Runner.bin",
-            .runner_proxy_bin = dir / "PTContractProxy.bin"};
-        for(const auto & path : {
-            artifacts.registry_impl_bin, artifacts.registry_proxy_bin,
-            artifacts.runner_impl_bin, artifacts.runner_proxy_bin})
+            .proxy_bin = dir / "PTContractProxy.bin"};
+        for(const auto & path : {artifacts.registry_impl_bin, artifacts.runner_impl_bin, artifacts.proxy_bin})
         {
             std::ofstream(path, std::ios::trunc) << "6000600055\n";
         }
         return artifacts;
+    }
+
+    publish::DeploymentManifest withoutRunner(publish::DeploymentManifest manifest)
+    {
+        manifest.runner.clear();
+        manifest.runner_impl.clear();
+        manifest.runner_impl_code_hash.clear();
+        manifest.runner_tx.clear();
+        return manifest;
     }
 }
 
@@ -392,6 +394,17 @@ TEST(PublishEthTx, RefusesEveryFormButTheCanonicalSignedTransaction)
     EXPECT_TRUE(refused(publish::encodeSignedTransaction(transaction, twin)));
 }
 
+namespace
+{
+    // `call` with its publication's deadline set to type(uint256).max.
+    std::vector<std::uint8_t> withMaxDeadline(std::vector<std::uint8_t> call)
+    {
+        const std::size_t tuple = 4 + chain::readWordAsSizeT(call.data() + 4, call.size() - 4, 32).value();
+        std::fill_n(call.begin() + static_cast<std::ptrdiff_t>(tuple + 9 * 32), 32, std::uint8_t{0xFF});
+        return call;
+    }
+}
+
 TEST(PublishPublication, DecodesThePublicationOfEveryPublishCall)
 {
     const publish::PublicationRequest connector = makeConnectorRequest(makeAddressFromByte(0x42));
@@ -432,6 +445,13 @@ TEST(PublishPublication, DecodesThePublicationOfEveryPublishCall)
         EXPECT_EQ(decoded->deadline, expected.deadline);
     }
 
+    // A uint256 deadline beyond 64 bits, such as type(uint256).max, never expires.
+    pt::Publication unbounded = publication;
+    unbounded.kind = pt::EntityKind::TRANSFORMATION;
+    const auto unbounded_decoded = pt::decodePublishCall(withMaxDeadline(encode(unbounded)));
+    ASSERT_TRUE(unbounded_decoded.has_value());
+    EXPECT_EQ(unbounded_decoded->deadline, std::numeric_limits<std::uint64_t>::max());
+
     // Any other registry call.
     EXPECT_FALSE(pt::decodePublishCall(pt::encodePublicationNonceCall(publication.owner)).has_value());
 
@@ -448,6 +468,168 @@ TEST(PublishPublication, DecodesThePublicationOfEveryPublishCall)
     truncated.resize(4 + 64);
     EXPECT_FALSE(pt::decodePublishCall(truncated).has_value());
     EXPECT_FALSE(pt::decodePublishCall(std::vector<std::uint8_t>{0x01, 0x02}).has_value());
+}
+
+namespace
+{
+    // One transformation publication and the publish call that carries it.
+    struct PublishedFixture
+    {
+        std::vector<std::uint8_t> creation_code{0x60, 0x80, 0x60, 0x40, 0x52, 0x34};
+        chain::Address registry = evmc::from_hex<chain::Address>(REGISTRY_ADDRESS).value();
+        pt::Publication publication;
+        chain::Address entity{};
+        std::vector<std::uint8_t> publish_call;
+
+        PublishedFixture()
+        {
+            publication.kind = pt::EntityKind::TRANSFORMATION;
+            publication.name = "found_tf";
+            publication.owner = makeAddressFromByte(0x42);
+            publication.content_hash = bytes32OfFill(0xC0);
+            publication.metadata_hash = bytes32OfFill(0xC1);
+            publication.creation_code_hash = chain::keccakBytes(creation_code);
+            publication.runtime_code_hash = bytes32OfFill(0xC2);
+            entity = pt::predictEntityAddress(registry, publication, creation_code);
+            publish_call = pt::encodePublishTransformationCall(creation_code, publication, {});
+        }
+
+        // `call` as the bytes argument of a relay call, behind three unrelated bytes.
+        static std::vector<std::uint8_t> relayed(const std::vector<std::uint8_t> & call)
+        {
+            std::vector<std::uint8_t> out{0xDE, 0xAD, 0xBE};
+            const std::vector<std::uint8_t> selector = chain::constructSelector("execute(address,bytes)");
+            out.insert(out.end(), selector.begin(), selector.end());
+            const std::vector<std::uint8_t> arguments = pt::abi::encodeTuple({
+                pt::abi::addressComponent(makeAddressFromByte(0x99)),
+                pt::abi::bytesComponent(call)});
+            out.insert(out.end(), arguments.begin(), arguments.end());
+            return out;
+        }
+    };
+}
+
+// The creation code behind a registry event is found in the transaction's own publish call
+// or in one a relay embeds, by the CREATE2 address the registry deploys it to.
+TEST(PublishPublication, FindsTheCreationCodeOfAPublishCallDirectOrEmbedded)
+{
+    const PublishedFixture fixture;
+    const auto codeOf = [&](const std::vector<std::uint8_t> & calldata, const chain::Address & registry)
+        -> std::optional<std::vector<std::uint8_t>>
+    {
+        const auto codes = pt::findPublishedCreationCodes(calldata, registry);
+        const auto found = codes.find(fixture.entity);
+        if(found == codes.end()) return std::nullopt;
+        return found->second;
+    };
+    const auto expected = std::optional<std::vector<std::uint8_t>>(fixture.creation_code);
+
+    EXPECT_EQ(codeOf(fixture.publish_call, fixture.registry), expected);
+    EXPECT_EQ(codeOf(PublishedFixture::relayed(fixture.publish_call), fixture.registry), expected);
+    EXPECT_EQ(codeOf(withMaxDeadline(fixture.publish_call), fixture.registry), expected);
+
+    // Another registry deploys the same publication elsewhere.
+    EXPECT_FALSE(codeOf(fixture.publish_call, makeAddressFromByte(0xBA)));
+
+    // A decoy call ahead of the real one, with the same name, owner, nonce and hashes but
+    // other creation code that hashes to the creation code hash it claims. It deploys
+    // elsewhere, so it never stands in for the entity's code.
+    const std::vector<std::uint8_t> decoy_code{0x60, 0x80, 0x60, 0x40, 0x52, 0x35};
+    pt::Publication decoy = fixture.publication;
+    decoy.creation_code_hash = chain::keccakBytes(decoy_code);
+    const std::vector<std::uint8_t> decoy_call = pt::encodePublishTransformationCall(decoy_code, decoy, {});
+    std::vector<std::uint8_t> batched = decoy_call;
+    batched.insert(batched.end(), fixture.publish_call.begin(), fixture.publish_call.end());
+    EXPECT_EQ(codeOf(batched, fixture.registry), expected);
+    EXPECT_FALSE(codeOf(decoy_call, fixture.registry));
+
+    // Every publish call in the calldata is indexed, each by its own address.
+    const auto both = pt::findPublishedCreationCodes(batched, fixture.registry);
+    EXPECT_EQ(both.size(), 2u);
+    EXPECT_TRUE(both.contains(pt::predictEntityAddress(fixture.registry, decoy, decoy_code)));
+
+    // Calldata without the call, or cut short.
+    EXPECT_FALSE(codeOf(std::vector<std::uint8_t>{}, fixture.registry));
+    EXPECT_FALSE(codeOf(std::vector<std::uint8_t>{0x12, 0x34, 0x56, 0x78}, fixture.registry));
+    std::vector<std::uint8_t> truncated = fixture.publish_call;
+    truncated.resize(truncated.size() / 2);
+    EXPECT_FALSE(codeOf(truncated, fixture.registry));
+}
+
+TEST(PtReads, ReadsTheCreationCodeOfAPublicationTransaction)
+{
+    asio::io_context io_context;
+    const PublishedFixture fixture;
+    auto node = std::make_shared<FakeNode>();
+    const std::string block_hash = hexBytes(0xAA, 32);
+    node->addTransaction(hexBytes(0x01, 32), block_hash, PublishedFixture::relayed(fixture.publish_call));
+    node->addTransaction(hexBytes(0x02, 32), block_hash, {0x12, 0x34});
+    const auto client = makeClient(node);
+
+    const auto read = [&](const std::string & tx_hash, const std::string & block)
+    {
+        return runAwaitable(io_context, rpc::readPublishedCreationCodes(*client, tx_hash, block, fixture.registry));
+    };
+
+    const auto relayed = read(hexBytes(0x01, 32), block_hash);
+    ASSERT_TRUE(relayed.has_value()) << relayed.error().message;
+    ASSERT_TRUE(relayed->contains(fixture.entity));
+    EXPECT_EQ(relayed->at(fixture.entity), fixture.creation_code);
+
+    // No publish call in the calldata: nothing to read, and no error.
+    const auto without_call = read(hexBytes(0x02, 32), block_hash);
+    ASSERT_TRUE(without_call.has_value());
+    EXPECT_TRUE(without_call->empty());
+
+    // The event names the transaction and its block: anything else is an error.
+    EXPECT_FALSE(read(hexBytes(0x03, 32), block_hash).has_value());
+    EXPECT_FALSE(read(hexBytes(0x01, 32), hexBytes(0xBB, 32)).has_value());
+}
+
+// A back-filled entity's publication is found from the block its code first appears in,
+// with a binary search rather than a scan of the registry's history.
+TEST(PtReads, LocatesAnEntityPublicationFromItsCreationBlock)
+{
+    asio::io_context io_context;
+    auto node = std::make_shared<FakeNode>();
+    const chain::Address entity = makeAddressFromByte(0x43);
+    node->code_created_at[chain::addressToHex(entity)] = 37;
+
+    const std::string topic = pt::eventTopic(pt::TRANSFORMATION_ADDED_SIGNATURE);
+    const auto log = [&](const std::string & name, const chain::Address & address, const std::uint8_t tx_byte)
+    {
+        return json{
+            {"address", REGISTRY_ADDRESS},
+            {"topics", json::array({topic})},
+            {"data", encodeSimpleAddedEventDataV2(makeAddressFromByte(0x41), name, address, makeAddressFromByte(0x42), 0)},
+            {"transactionHash", hexBytes(tx_byte, 32)},
+            {"blockHash", hexBytes(0x37, 32)}};
+    };
+    node->logs_by_block_number[37] = json::array({
+        log("unrelated_tf", makeAddressFromByte(0x44), 0x01),
+        log("located_tf", entity, 0x02)});
+    const auto client = makeClient(node);
+
+    const auto located = runAwaitable(io_context, rpc::findEntityPublication(
+        *client, REGISTRY_ADDRESS, pt::EntityKind::TRANSFORMATION, "located_tf", entity, 100));
+    ASSERT_TRUE(located.has_value()) << located.error().message;
+    ASSERT_TRUE(located->has_value());
+    EXPECT_EQ((**located).tx_hash, hexBytes(0x02, 32));
+    EXPECT_EQ((**located).block_hash, hexBytes(0x37, 32));
+    // One read at the latest block, then a binary search over 101 blocks.
+    EXPECT_LE(node->code_requests.size(), 9u);
+
+    // An entity without code at the latest block, or with no matching event, is not found.
+    node->code_created_at[chain::addressToHex(entity)] = 200;
+    const auto absent = runAwaitable(io_context, rpc::findEntityPublication(
+        *client, REGISTRY_ADDRESS, pt::EntityKind::TRANSFORMATION, "located_tf", entity, 100));
+    ASSERT_TRUE(absent.has_value());
+    EXPECT_FALSE(absent->has_value());
+    node->code_created_at[chain::addressToHex(entity)] = 37;
+    const auto unnamed = runAwaitable(io_context, rpc::findEntityPublication(
+        *client, REGISTRY_ADDRESS, pt::EntityKind::TRANSFORMATION, "other_tf", entity, 100));
+    ASSERT_TRUE(unnamed.has_value());
+    EXPECT_FALSE(unnamed->has_value());
 }
 
 TEST(PublishPublication, DigestBindsChainRegistryAndFields)
@@ -547,6 +729,30 @@ TEST(PublishManifest, RoundTripsThroughDisk)
     EXPECT_EQ(loaded->deployment_block, manifest.deployment_block);
     EXPECT_EQ(loaded->protocol_version, manifest.protocol_version);
     EXPECT_EQ(loaded->owner, manifest.owner);
+
+    // A registry without a runner is a complete manifest.
+    ASSERT_TRUE(publish::writeManifest(path, withoutRunner(manifest)).has_value());
+    const auto registry_only = publish::readManifest(path);
+    ASSERT_TRUE(registry_only.has_value()) << (registry_only ? "" : registry_only.error());
+    EXPECT_EQ(registry_only->registry, manifest.registry);
+    EXPECT_TRUE(registry_only->runner.empty());
+    EXPECT_TRUE(registry_only->runner_impl.empty());
+    EXPECT_TRUE(registry_only->runner_impl_code_hash.empty());
+    EXPECT_TRUE(registry_only->runner_tx.empty());
+
+    auto omitted = json::parse(publish::formatManifest(withoutRunner(manifest)));
+    for(const char * field : {"runner", "runner_impl", "runner_impl_code_hash", "runner_tx"}) omitted.erase(field);
+    {
+        std::ofstream output(path, std::ios::trunc);
+        output << omitted.dump();
+        ASSERT_TRUE(output.good());
+    }
+    const auto without_fields = publish::readManifest(path);
+    ASSERT_TRUE(without_fields.has_value());
+    EXPECT_TRUE(without_fields->runner.empty());
+    EXPECT_TRUE(without_fields->runner_impl.empty());
+    EXPECT_TRUE(without_fields->runner_impl_code_hash.empty());
+    EXPECT_TRUE(without_fields->runner_tx.empty());
 }
 
 TEST(PublishManifest, RejectsIncompleteOrZeroFields)
@@ -566,6 +772,17 @@ TEST(PublishManifest, RejectsIncompleteOrZeroFields)
     publish::DeploymentManifest bad_hash = makeManifest();
     bad_hash.registry_impl_code_hash = "0x1234";
     ASSERT_TRUE(publish::writeManifest(path, bad_hash).has_value());
+    EXPECT_FALSE(publish::readManifest(path).has_value());
+
+    // The runner fields are all set or all empty.
+    publish::DeploymentManifest partial_runner = makeManifest();
+    partial_runner.runner_impl.clear();
+    ASSERT_TRUE(publish::writeManifest(path, partial_runner).has_value());
+    EXPECT_FALSE(publish::readManifest(path).has_value());
+
+    publish::DeploymentManifest no_registry = makeManifest();
+    no_registry.registry.clear();
+    ASSERT_TRUE(publish::writeManifest(path, no_registry).has_value());
     EXPECT_FALSE(publish::readManifest(path).has_value());
 
     EXPECT_FALSE(publish::readManifest(buildPath() / "publish_manifest_missing.json").has_value());
@@ -598,10 +815,15 @@ TEST(PublishManifest, VerifiesLiveDeploymentAndRejectsDrift)
     node->owner_word = wordOfAddress(hexAddress(0x78));
     EXPECT_FALSE(runAwaitable(io_context, publish::verifyDeployment(*makeClient(node), manifest)).has_value());
 
-    // So must a runner linked to another registry.
+    // So must a runner proxy that drifted.
     node->owner_word = wordOfAddress(hexAddress(0x77));
-    node->runner_registry_word = wordOfAddress(hexAddress(0x02));
+    node->implementation_by_proxy[RUNNER_ADDRESS] = wordOfAddress(hexAddress(0x01));
     EXPECT_FALSE(runAwaitable(io_context, publish::verifyDeployment(*makeClient(node), manifest)).has_value());
+
+    // A manifest without a runner verifies its registry alone.
+    const auto registry_only = runAwaitable(
+        io_context, publish::verifyDeployment(*makeClient(node), withoutRunner(manifest)));
+    EXPECT_TRUE(registry_only.has_value()) << (registry_only ? "" : registry_only.error());
 }
 
 TEST(PublishManifest, VerifiesAnAddressOnlyRunner)
@@ -609,12 +831,13 @@ TEST(PublishManifest, VerifiesAnAddressOnlyRunner)
     asio::io_context io_context;
     auto node = std::make_shared<FakeNode>();
 
-    EXPECT_TRUE(runAwaitable(
-        io_context, rpc::verifyPtRunner(*makeClient(node), RUNNER_ADDRESS, REGISTRY_ADDRESS)).has_value());
+    EXPECT_TRUE(runAwaitable(io_context, rpc::verifyPtRunner(*makeClient(node), RUNNER_ADDRESS)).has_value());
 
-    node->runner_registry_word = wordOfAddress(hexAddress(0x02));
-    EXPECT_FALSE(runAwaitable(
-        io_context, rpc::verifyPtRunner(*makeClient(node), RUNNER_ADDRESS, REGISTRY_ADDRESS)).has_value());
+    node->call_override = [](const json & request)
+    {
+        return rpcResult(request, wordOfFill(0x00));
+    };
+    EXPECT_FALSE(runAwaitable(io_context, rpc::verifyPtRunner(*makeClient(node), RUNNER_ADDRESS)).has_value());
 }
 
 // ---------------------------------------------------------------------------
@@ -625,8 +848,7 @@ TEST(PublishPublisher, PreparesAnUnsignedTransactionTheOwnerSends)
 {
     asio::io_context io_context;
     auto node = std::make_shared<FakeNode>();
-    ArtifactDirs artifacts("publish_prepare");
-    publish::Publisher publisher(makeClient(node), makeManifest(), artifacts.store);
+    publish::Publisher publisher(makeClient(node), makeManifest());
 
     const chain::Address owner = makeAddressFromByte(0x42);
     const publish::PublicationRequest request = makeTransformationRequest(owner);
@@ -652,10 +874,8 @@ TEST(PublishPublisher, PreparesAnUnsignedTransactionTheOwnerSends)
     EXPECT_EQ(prepared->entity_address, chain::addressToHex(pt::predictEntityAddress(
         evmc::from_hex<chain::Address>(REGISTRY_ADDRESS).value(), expected, request.creation_code)));
 
-    // The server never sends anything itself, and the artifact is durable before the
-    // owner can broadcast.
+    // The server never sends anything itself.
     EXPECT_TRUE(node->sent_raw_transactions.empty());
-    EXPECT_EQ(artifacts.store.read(prepared->content_hash).state, pt::ArtifactState::AVAILABLE);
 }
 
 TEST(PublishPublisher, ReportsADeterministicRevertBeforeTheOwnerPays)
@@ -666,28 +886,12 @@ TEST(PublishPublisher, ReportsADeterministicRevertBeforeTheOwnerPays)
         .kind = rpc::RpcError::Kind::EXECUTION,
         .code = 3,
         .message = "execution reverted"};
-    ArtifactDirs artifacts("publish_prepare_revert");
-    publish::Publisher publisher(makeClient(node), makeManifest(), artifacts.store);
+    publish::Publisher publisher(makeClient(node), makeManifest());
 
     const auto result = runAwaitable(
         io_context, publisher.prepare(makeTransformationRequest(makeAddressFromByte(0x42))));
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().kind, publish::PublishError::Kind::REVERTED);
-}
-
-TEST(PublishPublisher, RefusesAnArtifactThatDoesNotMatchTheContentHash)
-{
-    asio::io_context io_context;
-    auto node = std::make_shared<FakeNode>();
-    ArtifactDirs artifacts("publish_prepare_bad_artifact");
-    publish::Publisher publisher(makeClient(node), makeManifest(), artifacts.store);
-
-    publish::PublicationRequest request = makeTransformationRequest(makeAddressFromByte(0x42));
-    request.publication.content_hash = bytes32OfFill(0x01);
-
-    const auto result = runAwaitable(io_context, publisher.prepare(request));
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().kind, publish::PublishError::Kind::INVALID);
 }
 
 TEST(PublishPublisher, ConnectorDependenciesMustBeTheArtifactsOnTheTargetRegistry)
@@ -697,8 +901,7 @@ TEST(PublishPublisher, ConnectorDependenciesMustBeTheArtifactsOnTheTargetRegistr
     node->content_hash_by_name["dep_tx"] = wordOfFill(0x00);        // not registered
     node->content_hash_by_name["dep_cond"] = wordOfFill(0x11);      // registered, other content
     node->content_hash_by_name["dep_ok"] = wordOfFill(0x22);
-    ArtifactDirs artifacts("publish_prepare_dependencies");
-    publish::Publisher publisher(makeClient(node), makeManifest(), artifacts.store);
+    publish::Publisher publisher(makeClient(node), makeManifest());
 
     publish::PublicationRequest request = makeConnectorRequest(makeAddressFromByte(0x42));
     request.dependencies = {
@@ -730,8 +933,7 @@ TEST(PublishPublisher, FindsAnIdenticalPublicationAndRefusesAForeignOne)
 {
     asio::io_context io_context;
     auto node = std::make_shared<FakeNode>();
-    ArtifactDirs artifacts("publish_find");
-    publish::Publisher publisher(makeClient(node), makeManifest(), artifacts.store);
+    publish::Publisher publisher(makeClient(node), makeManifest());
 
     publish::PublicationRequest request = makeTransformationRequest(makeAddressFromByte(0x42));
     request.publication.content_hash = bytes32OfFill(0xAA);
@@ -762,8 +964,7 @@ TEST(PublishPublisher, ConfirmsTheRegistryEventOfTheOwnersTransaction)
 {
     asio::io_context io_context;
     auto node = std::make_shared<FakeNode>();
-    ArtifactDirs artifacts("publish_confirm");
-    publish::Publisher publisher(makeClient(node), makeManifest(), artifacts.store);
+    publish::Publisher publisher(makeClient(node), makeManifest());
 
     const chain::Address owner = makeAddressFromByte(0x42);
     const std::string tx_hash = hexBytes(0x99, 32);
@@ -781,8 +982,7 @@ TEST(PublishPublisher, ConfirmationRejectsEvidenceOfAnythingElse)
 {
     asio::io_context io_context;
     auto node = std::make_shared<FakeNode>();
-    ArtifactDirs artifacts("publish_confirm_wrong");
-    publish::Publisher publisher(makeClient(node), makeManifest(), artifacts.store);
+    publish::Publisher publisher(makeClient(node), makeManifest());
 
     const chain::Address owner = makeAddressFromByte(0x42);
     const std::string tx_hash = hexBytes(0x99, 32);
@@ -814,8 +1014,7 @@ TEST(PublishPublisher, ConfirmationReportsPendingAndRevertedTransactions)
 {
     asio::io_context io_context;
     auto node = std::make_shared<FakeNode>();
-    ArtifactDirs artifacts("publish_confirm_pending");
-    publish::Publisher publisher(makeClient(node), makeManifest(), artifacts.store);
+    publish::Publisher publisher(makeClient(node), makeManifest());
 
     const chain::Address owner = makeAddressFromByte(0x42);
     const std::string tx_hash = hexBytes(0x99, 32);
@@ -843,8 +1042,7 @@ TEST(PublishPublisher, PreparesTheAccountNonceAndFeesOnlyForARelay)
 {
     asio::io_context io_context;
     auto node = std::make_shared<FakeNode>();
-    ArtifactDirs artifacts("publish_prepare_relay");
-    publish::Publisher publisher(makeClient(node), makeManifest(), artifacts.store);
+    publish::Publisher publisher(makeClient(node), makeManifest());
     const chain::Address owner = makeAddressFromByte(0x42);
 
     // A browser wallet chooses its own nonce and fees.
@@ -865,8 +1063,7 @@ TEST(PublishPublisher, SendsTheOwnersSignedPublicationThroughTheProvider)
 {
     asio::io_context io_context;
     auto node = std::make_shared<FakeNode>();
-    ArtifactDirs artifacts("publish_send");
-    publish::Publisher publisher(makeClient(node), makeManifest(), artifacts.store);
+    publish::Publisher publisher(makeClient(node), makeManifest());
 
     const auto owner = makeOwnerSigner();
     const pt::Publication publication = makeRelayedPublication(owner->address(), "relayed_tx");
@@ -892,8 +1089,7 @@ TEST(PublishPublisher, SendRefusesAnythingButExactlyTheOwnersPublication)
 
     asio::io_context io_context;
     auto node = std::make_shared<FakeNode>();
-    ArtifactDirs artifacts("publish_send_refusals");
-    publish::Publisher publisher(makeClient(node), makeManifest(), artifacts.store);
+    publish::Publisher publisher(makeClient(node), makeManifest());
 
     const auto owner = makeOwnerSigner();
     const pt::Publication publication = makeRelayedPublication(owner->address(), "relayed_tx");
@@ -964,8 +1160,7 @@ TEST(PublishPublisher, SendMapsTheProvidersAnswers)
 
     asio::io_context io_context;
     auto node = std::make_shared<FakeNode>();
-    ArtifactDirs artifacts("publish_send_provider");
-    publish::Publisher publisher(makeClient(node), makeManifest(), artifacts.store);
+    publish::Publisher publisher(makeClient(node), makeManifest());
 
     const auto owner = makeOwnerSigner();
     const pt::Publication publication = makeRelayedPublication(owner->address(), "relayed_tx");
@@ -1004,63 +1199,503 @@ TEST(PublishPublisher, SendMapsTheProvidersAnswers)
 }
 
 // ---------------------------------------------------------------------------
-// Bootstrap
+// Contract deployment and upgrade
 // ---------------------------------------------------------------------------
 
-TEST(PublishBootstrap, DeploysFourContractsWithSequentialNoncesAndVerifiesThem)
+namespace
+{
+    // A node serving the makeManifest() deployment, owned by `owner`, that a manifest
+    // from operatorManifest() verifies against.
+    std::shared_ptr<FakeNode> makeDeployedNode(const publish::Signer & owner)
+    {
+        auto node = std::make_shared<FakeNode>();
+        node->mine_deployments = true;
+        node->implementation_by_proxy[REGISTRY_ADDRESS] = wordOfAddress(REGISTRY_IMPL_ADDRESS);
+        node->implementation_by_proxy[RUNNER_ADDRESS] = wordOfAddress(RUNNER_IMPL_ADDRESS);
+        node->owner_word = wordOfAddress(chain::addressToHex(owner.address()));
+        return node;
+    }
+
+    publish::DeploymentManifest operatorManifest(const FakeNode & node, const publish::Signer & owner)
+    {
+        publish::DeploymentManifest manifest = makeManifest();
+        // The fake node reports the same code for every address, so pin the manifest hashes to it.
+        const auto code_bytes = evmc::from_hex(node.code).value();
+        const std::string code_hash =
+            chain::bytes32ToHex(chain::keccakBytes(code_bytes.data(), code_bytes.size()));
+        manifest.registry_impl_code_hash = code_hash;
+        manifest.runner_impl_code_hash = code_hash;
+        manifest.registry_tx = hexBytes(0x60, 32);
+        manifest.runner_tx = hexBytes(0x61, 32);
+        manifest.owner = chain::addressToHex(owner.address());
+        return manifest;
+    }
+
+    std::string proxyOf(const publish::PtContract contract)
+    {
+        return contract == publish::PtContract::REGISTRY ? REGISTRY_ADDRESS : RUNNER_ADDRESS;
+    }
+
+    std::filesystem::path implementationOf(const DeployArtifacts & artifacts, const publish::PtContract contract)
+    {
+        return contract == publish::PtContract::REGISTRY ? artifacts.registry_impl_bin : artifacts.runner_impl_bin;
+    }
+}
+
+TEST(PublishDeploy, DeploysARegistryThenARunnerWithSequentialNoncesAndVerifiesThem)
 {
     asio::io_context io_context;
     const auto signer = makeSigner();
-    const auto paths = makeTempEventsPaths("publish_bootstrap");
-    const auto artifacts = writeBootstrapArtifacts(paths.root / "bin");
+    const auto paths = makeTempEventsPaths("publish_deploy");
+    const auto artifacts = writeDeployArtifacts(paths.root / "bin");
 
     auto node = std::make_shared<FakeNode>();
     node->mine_deployments = true;
+    // A provider's pending transaction count advances with every accepted transaction.
+    FakeNode & chain_state = *node;
+    node->on_send = [&chain_state](const std::string &) { ++chain_state.tx_count; };
     // Deployment order: registry impl (0xa0), registry proxy (0xa1), runner impl (0xa2),
     // runner proxy (0xa3).
     node->implementation_by_proxy[hexAddress(0xA1)] = wordOfAddress(hexAddress(0xA0));
     node->implementation_by_proxy[hexAddress(0xA3)] = wordOfAddress(hexAddress(0xA2));
-    node->runner_registry_word = wordOfAddress(hexAddress(0xA1));
     node->owner_word = wordOfAddress(chain::addressToHex(signer->address()));
 
-    const auto manifest = runAwaitable(io_context, publish::bootstrapDeployment(
-        *makeClient(node), *signer, artifacts, CHAIN_ID, "0.8.30", "revision"));
-    ASSERT_TRUE(manifest.has_value()) << (manifest ? "" : manifest.error());
+    const auto with_registry = runAwaitable(io_context, publish::deployContract(
+        *makeClient(node), *signer, publish::PtContract::REGISTRY,
+        artifacts.registry_impl_bin, artifacts.proxy_bin,
+        publish::DeploymentManifest{.chain_id = CHAIN_ID}));
+    ASSERT_TRUE(with_registry.has_value()) << (with_registry ? "" : with_registry.error());
 
-    EXPECT_EQ(manifest->registry_impl, hexAddress(0xA0));
-    EXPECT_EQ(manifest->registry, hexAddress(0xA1));
-    EXPECT_EQ(manifest->runner_impl, hexAddress(0xA2));
-    EXPECT_EQ(manifest->runner, hexAddress(0xA3));
-    EXPECT_EQ(manifest->deployment_block, 52);   // the registry proxy's block
-    EXPECT_EQ(manifest->owner, chain::addressToHex(signer->address()));
+    EXPECT_EQ(with_registry->registry_impl, hexAddress(0xA0));
+    EXPECT_EQ(with_registry->registry, hexAddress(0xA1));
+    EXPECT_EQ(with_registry->deployment_block, 52);   // the registry proxy's block
+    EXPECT_EQ(with_registry->protocol_id, rpc::ptProtocolId());
+    EXPECT_EQ(with_registry->protocol_version, rpc::PT_PROTOCOL_VERSION);
+    EXPECT_EQ(with_registry->owner, chain::addressToHex(signer->address()));
+    // A registry alone is a complete deployment; a runner is added separately.
+    EXPECT_TRUE(with_registry->runner.empty());
 
-    // One transaction per contract, each with its own nonce.
+    const auto deployed = runAwaitable(io_context, publish::deployContract(
+        *makeClient(node), *signer, publish::PtContract::RUNNER,
+        artifacts.runner_impl_bin, artifacts.proxy_bin, *with_registry));
+    ASSERT_TRUE(deployed.has_value()) << (deployed ? "" : deployed.error());
+
+    EXPECT_EQ(deployed->runner_impl, hexAddress(0xA2));
+    EXPECT_EQ(deployed->runner, hexAddress(0xA3));
+    EXPECT_EQ(deployed->registry, hexAddress(0xA1));
+    EXPECT_EQ(deployed->deployment_block, 52);
+
+    // One transaction per contract, with consecutive nonces.
     ASSERT_EQ(node->sent_raw_transactions.size(), 4u);
-    std::set<std::string> distinct(node->sent_raw_transactions.begin(), node->sent_raw_transactions.end());
-    EXPECT_EQ(distinct.size(), 4u);
+    for(std::size_t i = 0; i < node->sent_raw_transactions.size(); ++i)
+    {
+        const auto sent = publish::decodeSignedTransaction(node->sent_raw_transactions[i]);
+        ASSERT_TRUE(sent.has_value()) << (sent ? "" : sent.error());
+        EXPECT_EQ(sent->transaction.nonce, 7u + i);
+    }
+
+    // The runner proxy is created with its implementation as the only constructor
+    // argument: it is bound to no registry.
+    const auto runner_proxy = publish::decodeSignedTransaction(node->sent_raw_transactions[3]);
+    ASSERT_TRUE(runner_proxy.has_value());
+    const auto & creation = runner_proxy->transaction.data;
+    const auto implementation_word = encodeAddressWord(makeAddressFromByte(0xA2));
+    ASSERT_GE(creation.size(), implementation_word.size());
+    EXPECT_TRUE(std::equal(implementation_word.begin(), implementation_word.end(), creation.end() - 32));
 }
 
-TEST(PublishBootstrap, RefusesToSpendAboveTheConfiguredCeilings)
+TEST(PublishDeploy, RefusesToSpendAboveTheConfiguredCeilings)
 {
     asio::io_context io_context;
     const auto signer = makeSigner();
-    const auto paths = makeTempEventsPaths("publish_bootstrap_ceiling");
-    const auto artifacts = writeBootstrapArtifacts(paths.root / "bin");
+    const auto paths = makeTempEventsPaths("publish_deploy_ceiling");
+    const auto artifacts = writeDeployArtifacts(paths.root / "bin");
 
     auto node = std::make_shared<FakeNode>();
     node->mine_deployments = true;
     node->gas_estimate = 5'000'000;
 
-    const auto over_gas = runAwaitable(io_context, publish::bootstrapDeployment(
-        *makeClient(node), *signer, artifacts, CHAIN_ID, "0.8.30", "revision",
-        publish::BootstrapConfig{.max_gas = 1'000'000}));
+    const auto over_gas = runAwaitable(io_context, publish::deployContract(
+        *makeClient(node), *signer, publish::PtContract::REGISTRY,
+        artifacts.registry_impl_bin, artifacts.proxy_bin,
+        publish::DeploymentManifest{.chain_id = CHAIN_ID},
+        publish::DeployConfig{.max_gas = 1'000'000}));
     EXPECT_FALSE(over_gas.has_value());
 
     node->gas_estimate = 150'000;
     node->base_fee = 500'000'000'000;
-    const auto over_fee = runAwaitable(io_context, publish::bootstrapDeployment(
-        *makeClient(node), *signer, artifacts, CHAIN_ID, "0.8.30", "revision"));
+    const auto over_fee = runAwaitable(io_context, publish::deployContract(
+        *makeClient(node), *signer, publish::PtContract::REGISTRY,
+        artifacts.registry_impl_bin, artifacts.proxy_bin,
+        publish::DeploymentManifest{.chain_id = CHAIN_ID}));
     EXPECT_FALSE(over_fee.has_value());
 
     EXPECT_TRUE(node->sent_raw_transactions.empty());
+}
+
+TEST(PublishDeploy, ReplacesEitherContractAndKeepsTheOther)
+{
+    for(const auto contract : {publish::PtContract::REGISTRY, publish::PtContract::RUNNER})
+    {
+        SCOPED_TRACE(publish::contractLabel(contract));
+        asio::io_context io_context;
+        const auto signer = makeSigner();
+        const auto paths = makeTempEventsPaths(std::format("publish_replace_{}", publish::contractLabel(contract)));
+        const auto artifacts = writeDeployArtifacts(paths.root / "bin");
+
+        auto node = makeDeployedNode(*signer);
+        const publish::DeploymentManifest manifest = operatorManifest(*node, *signer);
+        // Deployment order: implementation (0xa0), proxy (0xa1).
+        node->implementation_by_proxy[hexAddress(0xA1)] = wordOfAddress(hexAddress(0xA0));
+        // The contract being replaced may have drifted; only the one that stays must verify.
+        node->implementation_by_proxy[proxyOf(contract)] = wordOfAddress(hexAddress(0x01));
+
+        const auto updated = runAwaitable(io_context, publish::deployContract(
+            *makeClient(node), *signer, contract,
+            implementationOf(artifacts, contract), artifacts.proxy_bin, manifest));
+        ASSERT_TRUE(updated.has_value()) << (updated ? "" : updated.error());
+        ASSERT_EQ(node->sent_raw_transactions.size(), 2u);
+        const std::string proxy_tx = chain::normalizeHex(publish::transactionHash(node->sent_raw_transactions[1]));
+        EXPECT_EQ(updated->owner, manifest.owner);
+
+        if(contract == publish::PtContract::REGISTRY)
+        {
+            EXPECT_EQ(updated->registry, hexAddress(0xA1));
+            EXPECT_EQ(updated->registry_impl, hexAddress(0xA0));
+            EXPECT_EQ(updated->registry_tx, proxy_tx);
+            EXPECT_EQ(updated->deployment_block, 52);
+            EXPECT_EQ(updated->runner, manifest.runner);
+            EXPECT_EQ(updated->runner_impl, manifest.runner_impl);
+            EXPECT_EQ(updated->runner_impl_code_hash, manifest.runner_impl_code_hash);
+            EXPECT_EQ(updated->runner_tx, manifest.runner_tx);
+        }
+        else
+        {
+            EXPECT_EQ(updated->runner, hexAddress(0xA1));
+            EXPECT_EQ(updated->runner_impl, hexAddress(0xA0));
+            EXPECT_EQ(updated->runner_tx, proxy_tx);
+            EXPECT_EQ(updated->registry, manifest.registry);
+            EXPECT_EQ(updated->registry_impl, manifest.registry_impl);
+            EXPECT_EQ(updated->registry_impl_code_hash, manifest.registry_impl_code_hash);
+            EXPECT_EQ(updated->registry_tx, manifest.registry_tx);
+            EXPECT_EQ(updated->deployment_block, manifest.deployment_block);
+        }
+    }
+}
+
+TEST(PublishDeploy, AddsARunnerOnlyToADeploymentWithARegistry)
+{
+    asio::io_context io_context;
+    const auto signer = makeSigner();
+    const auto paths = makeTempEventsPaths("publish_deploy_runner_needs_registry");
+    const auto artifacts = writeDeployArtifacts(paths.root / "bin");
+
+    auto node = makeDeployedNode(*signer);
+    const auto refused = runAwaitable(io_context, publish::deployContract(
+        *makeClient(node), *signer, publish::PtContract::RUNNER,
+        artifacts.runner_impl_bin, artifacts.proxy_bin,
+        publish::DeploymentManifest{.chain_id = CHAIN_ID}));
+    EXPECT_FALSE(refused.has_value());
+    EXPECT_TRUE(node->sent_raw_transactions.empty());
+
+    // A registry-only manifest gains a runner.
+    node->implementation_by_proxy[hexAddress(0xA1)] = wordOfAddress(hexAddress(0xA0));
+    const auto added = runAwaitable(io_context, publish::deployContract(
+        *makeClient(node), *signer, publish::PtContract::RUNNER,
+        artifacts.runner_impl_bin, artifacts.proxy_bin, withoutRunner(operatorManifest(*node, *signer))));
+    ASSERT_TRUE(added.has_value()) << (added ? "" : added.error());
+    EXPECT_EQ(added->runner, hexAddress(0xA1));
+}
+
+TEST(PublishDeploy, RefusesAnotherAccountsDeploymentWithoutSpendingGas)
+{
+    asio::io_context io_context;
+    const auto signer = makeSigner();
+    const auto paths = makeTempEventsPaths("publish_deploy_foreign");
+    const auto artifacts = writeDeployArtifacts(paths.root / "bin");
+
+    auto node = makeDeployedNode(*signer);
+    publish::DeploymentManifest foreign = operatorManifest(*node, *signer);
+    foreign.owner = hexAddress(0x77);
+
+    for(const auto contract : {publish::PtContract::REGISTRY, publish::PtContract::RUNNER})
+    {
+        SCOPED_TRACE(publish::contractLabel(contract));
+        EXPECT_FALSE(runAwaitable(io_context, publish::deployContract(
+            *makeClient(node), *signer, contract,
+            implementationOf(artifacts, contract), artifacts.proxy_bin, foreign)).has_value());
+    }
+    EXPECT_TRUE(node->sent_raw_transactions.empty());
+}
+
+TEST(PublishDeploy, RefusesToDeployARunnerNextToAnUnverifiedRegistryWithoutSpendingGas)
+{
+    asio::io_context io_context;
+    const auto signer = makeSigner();
+    const auto paths = makeTempEventsPaths("publish_runner_registry_preflight");
+    const auto artifacts = writeDeployArtifacts(paths.root / "bin");
+
+    for(const std::string drift : {"chain", "protocol", "implementation", "code", "owner", "missing"})
+    {
+        SCOPED_TRACE(drift);
+        auto node = makeDeployedNode(*signer);
+        const auto manifest = operatorManifest(*node, *signer);
+        if(drift == "chain") ++node->chain_id;
+        if(drift == "implementation") node->implementation_by_proxy[REGISTRY_ADDRESS] = wordOfAddress(hexAddress(0x01));
+        if(drift == "code") node->code = "0x6001";
+        if(drift == "owner") node->owner_word = wordOfAddress(hexAddress(0x02));
+        if(drift == "missing") node->code = "0x";
+        if(drift == "protocol")
+        {
+            node->call_override = [](const json & request)
+            {
+                return rpcResult(request, wordOfFill(0x00));
+            };
+        }
+
+        const auto deployed = runAwaitable(io_context, publish::deployContract(
+            *makeClient(node), *signer, publish::PtContract::RUNNER,
+            artifacts.runner_impl_bin, artifacts.proxy_bin, manifest));
+        EXPECT_FALSE(deployed.has_value());
+        EXPECT_TRUE(node->sent_raw_transactions.empty());
+    }
+}
+
+TEST(PublishDeploy, RefusesToDeployARegistryNextToAnUnverifiedRunnerWithoutSpendingGas)
+{
+    asio::io_context io_context;
+    const auto signer = makeSigner();
+    const auto paths = makeTempEventsPaths("publish_registry_runner_preflight");
+    const auto artifacts = writeDeployArtifacts(paths.root / "bin");
+
+    for(const std::string drift : {"protocol", "implementation", "owner"})
+    {
+        SCOPED_TRACE(drift);
+        auto node = makeDeployedNode(*signer);
+        const auto manifest = operatorManifest(*node, *signer);
+        if(drift == "implementation") node->implementation_by_proxy[RUNNER_ADDRESS] = wordOfAddress(hexAddress(0x01));
+        if(drift == "owner") node->owner_word = wordOfAddress(hexAddress(0x02));
+        if(drift == "protocol")
+        {
+            node->call_override = [](const json & request)
+            {
+                return rpcResult(request, wordOfFill(0x00));
+            };
+        }
+
+        const auto deployed = runAwaitable(io_context, publish::deployContract(
+            *makeClient(node), *signer, publish::PtContract::REGISTRY,
+            artifacts.registry_impl_bin, artifacts.proxy_bin, manifest));
+        EXPECT_FALSE(deployed.has_value());
+        EXPECT_TRUE(node->sent_raw_transactions.empty());
+    }
+}
+
+TEST(PublishUpgrade, UpgradesEitherProxyInPlace)
+{
+    for(const auto contract : {publish::PtContract::REGISTRY, publish::PtContract::RUNNER})
+    {
+        SCOPED_TRACE(publish::contractLabel(contract));
+        asio::io_context io_context;
+        const auto signer = makeSigner();
+        const auto paths = makeTempEventsPaths(std::format("publish_upgrade_{}", publish::contractLabel(contract)));
+        const auto artifacts = writeDeployArtifacts(paths.root / "bin");
+
+        auto node = makeDeployedNode(*signer);
+        const publish::DeploymentManifest manifest = operatorManifest(*node, *signer);
+        const std::string proxy = proxyOf(contract);
+        // The implementation deploys at 0xa0; the upgrade call that follows repoints the proxy.
+        FakeNode & chain_state = *node;
+        node->on_send = [&chain_state, proxy](const std::string &)
+        {
+            if(chain_state.sent_raw_transactions.size() == 2)
+            {
+                chain_state.implementation_by_proxy[proxy] = wordOfAddress(hexAddress(0xA0));
+            }
+        };
+
+        const auto updated = runAwaitable(io_context, publish::upgradeContract(
+            *makeClient(node), *signer, contract, implementationOf(artifacts, contract), manifest));
+        ASSERT_TRUE(updated.has_value()) << (updated ? "" : updated.error());
+
+        EXPECT_EQ(updated->registry, manifest.registry);
+        EXPECT_EQ(updated->runner, manifest.runner);
+        EXPECT_EQ(updated->registry_tx, manifest.registry_tx);
+        EXPECT_EQ(updated->runner_tx, manifest.runner_tx);
+        EXPECT_EQ(updated->deployment_block, manifest.deployment_block);
+        if(contract == publish::PtContract::REGISTRY)
+        {
+            EXPECT_EQ(updated->registry_impl, hexAddress(0xA0));
+            EXPECT_EQ(updated->runner_impl, manifest.runner_impl);
+        }
+        else
+        {
+            EXPECT_EQ(updated->runner_impl, hexAddress(0xA0));
+            EXPECT_EQ(updated->registry_impl, manifest.registry_impl);
+        }
+
+        // The second transaction is the owner's upgradeToAndCall(newImpl, "") on the proxy.
+        ASSERT_EQ(node->sent_raw_transactions.size(), 2u);
+        const auto upgrade = publish::decodeSignedTransaction(node->sent_raw_transactions[1]);
+        ASSERT_TRUE(upgrade.has_value()) << (upgrade ? "" : upgrade.error());
+        EXPECT_EQ(upgrade->sender, signer->address());
+        ASSERT_TRUE(upgrade->transaction.to.has_value());
+        EXPECT_EQ(chain::addressToHex(*upgrade->transaction.to), proxy);
+
+        const auto & data = upgrade->transaction.data;
+        const auto selector = chain::constructSelector("upgradeToAndCall(address,bytes)");
+        ASSERT_GE(data.size(), 4u + 32u);
+        EXPECT_TRUE(std::equal(selector.begin(), selector.end(), data.begin()));
+        const auto implementation_word = encodeAddressWord(makeAddressFromByte(0xA0));
+        EXPECT_TRUE(std::equal(implementation_word.begin(), implementation_word.end(), data.begin() + 4));
+    }
+}
+
+TEST(PublishUpgrade, RefusesWhenTheDeploymentIsNotTheSignersOrHasDrifted)
+{
+    asio::io_context io_context;
+    const auto signer = makeSigner();
+    const auto paths = makeTempEventsPaths("publish_upgrade_refusals");
+    const auto artifacts = writeDeployArtifacts(paths.root / "bin");
+
+    auto node = makeDeployedNode(*signer);
+    const publish::DeploymentManifest manifest = operatorManifest(*node, *signer);
+
+    // Another account's deployment: nothing is sent.
+    publish::DeploymentManifest foreign = manifest;
+    foreign.owner = hexAddress(0x77);
+    for(const auto contract : {publish::PtContract::REGISTRY, publish::PtContract::RUNNER})
+    {
+        SCOPED_TRACE(publish::contractLabel(contract));
+        EXPECT_FALSE(runAwaitable(io_context, publish::upgradeContract(
+            *makeClient(node), *signer, contract, implementationOf(artifacts, contract), foreign)).has_value());
+    }
+
+    // A manifest without a runner has none to upgrade.
+    EXPECT_FALSE(runAwaitable(io_context, publish::upgradeContract(
+        *makeClient(node), *signer, publish::PtContract::RUNNER, artifacts.runner_impl_bin,
+        withoutRunner(manifest))).has_value());
+    EXPECT_TRUE(node->sent_raw_transactions.empty());
+
+    // A proxy that no longer matches the manifest is not upgraded, nor is the other one.
+    node->implementation_by_proxy[RUNNER_ADDRESS] = wordOfAddress(hexAddress(0x01));
+    for(const auto contract : {publish::PtContract::REGISTRY, publish::PtContract::RUNNER})
+    {
+        SCOPED_TRACE(publish::contractLabel(contract));
+        EXPECT_FALSE(runAwaitable(io_context, publish::upgradeContract(
+            *makeClient(node), *signer, contract, implementationOf(artifacts, contract), manifest)).has_value());
+    }
+    EXPECT_TRUE(node->sent_raw_transactions.empty());
+
+    // An upgrade the proxy did not take fails verification instead of producing a manifest.
+    node->implementation_by_proxy[RUNNER_ADDRESS] = wordOfAddress(RUNNER_IMPL_ADDRESS);
+    EXPECT_FALSE(runAwaitable(io_context, publish::upgradeContract(
+        *makeClient(node), *signer, publish::PtContract::RUNNER, artifacts.runner_impl_bin, manifest)).has_value());
+    EXPECT_EQ(node->sent_raw_transactions.size(), 2u);
+}
+
+TEST(PublishUpgrade, RefusesToUpgradeUntilTheNewImplementationCodeCanBeRead)
+{
+    asio::io_context io_context;
+    const auto signer = makeSigner();
+    const auto paths = makeTempEventsPaths("publish_upgrade_code_preflight");
+    const auto artifacts = writeDeployArtifacts(paths.root / "bin");
+    auto node = makeDeployedNode(*signer);
+    const auto manifest = operatorManifest(*node, *signer);
+    node->on_send = [&node](const std::string &) { node->code_by_address[hexAddress(0xA0)] = "0x"; };
+
+    const auto upgraded = runAwaitable(io_context, publish::upgradeContract(
+        *makeClient(node), *signer, publish::PtContract::RUNNER, artifacts.runner_impl_bin, manifest));
+    EXPECT_FALSE(upgraded.has_value());
+    EXPECT_EQ(node->sent_raw_transactions.size(), 1u);
+    EXPECT_EQ(node->implementation_by_proxy.at(RUNNER_ADDRESS), wordOfAddress(RUNNER_IMPL_ADDRESS));
+}
+
+TEST(PublishUpgrade, RefusesAnImplementationThatIsNotThisPtProtocolBeforeUpgrading)
+{
+    asio::io_context io_context;
+    const auto signer = makeSigner();
+    const auto paths = makeTempEventsPaths("publish_upgrade_identity_preflight");
+    const auto artifacts = writeDeployArtifacts(paths.root / "bin");
+
+    for(const auto contract : {publish::PtContract::REGISTRY, publish::PtContract::RUNNER})
+    {
+        SCOPED_TRACE(publish::contractLabel(contract));
+        auto node = makeDeployedNode(*signer);
+        const auto manifest = operatorManifest(*node, *signer);
+
+        // The newly deployed implementation answers another protocol version.
+        node->call_override = [](const json & request) -> std::string
+        {
+            const json & call = request.at("params").at(0);
+            if(chain::normalizeHex(call.value("to", "")) == hexAddress(0xA0)
+               && call.value("data", "").starts_with(selectorOf("protocolVersion()")))
+            {
+                return rpcResult(request, wordOfUint(rpc::PT_PROTOCOL_VERSION + 1));
+            }
+            return {};
+        };
+
+        const auto upgraded = runAwaitable(io_context, publish::upgradeContract(
+            *makeClient(node), *signer, contract, implementationOf(artifacts, contract), manifest));
+        ASSERT_FALSE(upgraded.has_value());
+        EXPECT_NE(upgraded.error().find("the proxy was not upgraded"), std::string::npos);
+        // Only the implementation was deployed; no upgradeToAndCall was sent.
+        EXPECT_EQ(node->sent_raw_transactions.size(), 1u);
+        EXPECT_EQ(node->implementation_by_proxy.at(proxyOf(contract)),
+            wordOfAddress(contract == publish::PtContract::REGISTRY ? REGISTRY_IMPL_ADDRESS : RUNNER_IMPL_ADDRESS));
+    }
+}
+
+TEST(PublishUpgrade, FailedPostUpgradeVerificationIncludesManifestRecoveryValues)
+{
+    for(const auto contract : {publish::PtContract::REGISTRY, publish::PtContract::RUNNER})
+    {
+        const std::string label(publish::contractLabel(contract));
+        SCOPED_TRACE(label);
+        asio::io_context io_context;
+        const auto signer = makeSigner();
+        const auto paths = makeTempEventsPaths(std::format("publish_upgrade_recovery_{}", label));
+        const auto artifacts = writeDeployArtifacts(paths.root / "bin");
+        auto node = makeDeployedNode(*signer);
+        const auto manifest = operatorManifest(*node, *signer);
+        const std::string proxy = proxyOf(contract);
+        const std::vector<std::uint8_t> new_code{0x60, 0x01};
+        const std::string new_code_hash = chain::bytes32ToHex(chain::keccakBytes(new_code));
+        node->code_by_address[hexAddress(0xA0)] = chain::bytesToHex(new_code);
+        node->on_send = [&node, proxy](const std::string &)
+        {
+            if(node->sent_raw_transactions.size() == 2)
+            {
+                node->implementation_by_proxy[proxy] = wordOfAddress(hexAddress(0xA0));
+                node->call_override = [](const json & request)
+                {
+                    return rpcError(request, -32005, "rate limit exceeded");
+                };
+            }
+        };
+
+        const auto upgraded = runAwaitable(io_context, publish::upgradeContract(
+            *makeClient(node), *signer, contract, implementationOf(artifacts, contract), manifest));
+        ASSERT_FALSE(upgraded.has_value());
+        ASSERT_EQ(node->sent_raw_transactions.size(), 2u);
+        EXPECT_NE(upgraded.error().find(publish::transactionHash(node->sent_raw_transactions.back())), std::string::npos);
+        EXPECT_NE(upgraded.error().find(label + "_impl=" + hexAddress(0xA0)), std::string::npos);
+        EXPECT_NE(upgraded.error().find(label + "_impl_code_hash=" + new_code_hash), std::string::npos);
+
+        // The reported values restore a manifest that verifies after the provider recovers.
+        node->call_override = {};
+        auto recovered = manifest;
+        if(contract == publish::PtContract::REGISTRY)
+        {
+            recovered.registry_impl = hexAddress(0xA0);
+            recovered.registry_impl_code_hash = new_code_hash;
+        }
+        else
+        {
+            recovered.runner_impl = hexAddress(0xA0);
+            recovered.runner_impl_code_hash = new_code_hash;
+        }
+        EXPECT_TRUE(runAwaitable(io_context, publish::verifyDeployment(*makeClient(node), recovered)).has_value());
+    }
 }

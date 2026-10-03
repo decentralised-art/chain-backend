@@ -19,6 +19,8 @@
 #include "sqlite/exec.hpp"
 
 #include "sqlite_registry_store.hpp"
+#include "format_hash.hpp"
+#include "hex.hpp"
 
 namespace dcn::registry
 {
@@ -97,14 +99,6 @@ namespace dcn::registry
             }
             std::terminate();
         }
-
-        static pt::ArtifactState parseArtifactState(const char * value)
-        {
-            const std::string_view state = value == nullptr ? std::string_view{} : value;
-            if(state == "available") return pt::ArtifactState::AVAILABLE;
-            if(state == "missing") return pt::ArtifactState::MISSING;
-            return pt::ArtifactState::INVALID;
-        }
     }
 
     SQLiteRegistryStore::SQLiteRegistryStore(const std::string & db_path)
@@ -172,8 +166,8 @@ namespace dcn::registry
     bool SQLiteRegistryStore::_initializeSchema() const
     {
         const bool base_schema_ok =
-            // Entities mirror chain-derivable state in explicit columns. Executable source stays
-            // in the verified content-addressed artifact referenced by content_hash.
+            // Entities mirror chain-derivable state in explicit columns; content_hash is the
+            // opaque commitment the chain carries.
             _exec(
                 "CREATE TABLE IF NOT EXISTS connectors ("
                 "source_id TEXT NOT NULL DEFAULT 'local',"
@@ -188,9 +182,6 @@ namespace dcn::registry
                 "content_hash TEXT NOT NULL DEFAULT '',"
                 "metadata_hash TEXT NOT NULL DEFAULT '',"
                 "runtime_code_hash TEXT NOT NULL DEFAULT '',"
-                "artifact_state TEXT NOT NULL DEFAULT 'missing' CHECK(artifact_state IN ('available','missing','invalid')) ,"
-                "artifact_attempts INTEGER NOT NULL DEFAULT 0,"
-                "artifact_retry_at_ms INTEGER NOT NULL DEFAULT 0,"
                 "definition_conflict INTEGER NOT NULL DEFAULT 0,"
                 "active INTEGER NOT NULL DEFAULT 1,"
                 "origin_block_hash TEXT NOT NULL DEFAULT '',"
@@ -259,8 +250,7 @@ namespace dcn::registry
                 "args_count INTEGER NOT NULL,"
                 "content_hash TEXT NOT NULL DEFAULT '', metadata_hash TEXT NOT NULL DEFAULT '',"
                 "runtime_code_hash TEXT NOT NULL DEFAULT '',"
-                "artifact_state TEXT NOT NULL DEFAULT 'missing' CHECK(artifact_state IN ('available','missing','invalid')) ,"
-                "artifact_attempts INTEGER NOT NULL DEFAULT 0, artifact_retry_at_ms INTEGER NOT NULL DEFAULT 0, definition_conflict INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1,"
+                "definition_conflict INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1,"
                 "origin_block_hash TEXT NOT NULL DEFAULT '', origin_log_index INTEGER NOT NULL DEFAULT 0,"
                 "created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))"
                 ",PRIMARY KEY(source_id, name)"
@@ -273,8 +263,7 @@ namespace dcn::registry
                 "args_count INTEGER NOT NULL,"
                 "content_hash TEXT NOT NULL DEFAULT '', metadata_hash TEXT NOT NULL DEFAULT '',"
                 "runtime_code_hash TEXT NOT NULL DEFAULT '',"
-                "artifact_state TEXT NOT NULL DEFAULT 'missing' CHECK(artifact_state IN ('available','missing','invalid')) ,"
-                "artifact_attempts INTEGER NOT NULL DEFAULT 0, artifact_retry_at_ms INTEGER NOT NULL DEFAULT 0, definition_conflict INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1,"
+                "definition_conflict INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1,"
                 "origin_block_hash TEXT NOT NULL DEFAULT '', origin_log_index INTEGER NOT NULL DEFAULT 0,"
                 "created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))"
                 ",PRIMARY KEY(source_id, name)"
@@ -320,9 +309,18 @@ namespace dcn::registry
             _exec("CREATE INDEX IF NOT EXISTS idx_owned_connectors_owner_name ON owned_connectors(owner, name);") &&
             _exec("CREATE INDEX IF NOT EXISTS idx_owned_transformations_owner_name ON owned_transformations(owner, name);") &&
             _exec("CREATE INDEX IF NOT EXISTS idx_owned_conditions_owner_name ON owned_conditions(owner, name);") &&
-            _exec("CREATE INDEX IF NOT EXISTS idx_connectors_artifact_work ON connectors(artifact_state, artifact_retry_at_ms) WHERE active=1 AND content_hash<>'';") &&
-            _exec("CREATE INDEX IF NOT EXISTS idx_transformations_artifact_work ON transformations(artifact_state, artifact_retry_at_ms) WHERE active=1 AND content_hash<>'';") &&
-            _exec("CREATE INDEX IF NOT EXISTS idx_conditions_artifact_work ON conditions(artifact_state, artifact_retry_at_ms) WHERE active=1 AND content_hash<>'';");
+            _exec(
+                "CREATE TABLE IF NOT EXISTS runtime_code ("
+                "code_hash TEXT PRIMARY KEY,"
+                "code BLOB NOT NULL"
+                ");") &&
+            _exec(
+                "CREATE TABLE IF NOT EXISTS chain_creation_code ("
+                "source_id TEXT NOT NULL,"
+                "entity_address BLOB NOT NULL,"
+                "code BLOB NOT NULL,"
+                "PRIMARY KEY(source_id, entity_address)"
+                ");");
 
         if(!base_schema_ok)
         {
@@ -344,7 +342,36 @@ namespace dcn::registry
             return false;
         }
 
+        // Source selection belongs to this connection; retained deployments remain
+        // writable by event projection and become visible when selected again.
+        if(!_exec("CREATE TEMP TABLE registry_source(singleton INTEGER PRIMARY KEY CHECK(singleton=1), source_id TEXT);")
+           || !_exec("INSERT INTO registry_source(singleton,source_id) VALUES(1,NULL);")) return false;
+        for(const char * table : {"connectors", "transformations", "conditions", "format_members",
+                                 "owned_connectors", "owned_transformations", "owned_conditions"})
+        {
+            if(!_exec(std::format(
+                "CREATE TEMP VIEW selected_{} AS SELECT * FROM main.{} WHERE source_id='local' "
+                "OR source_id=(SELECT source_id FROM registry_source) "
+                "OR (SELECT source_id FROM registry_source) IS NULL;", table, table).c_str())) return false;
+        }
+
         return true;
+    }
+
+    bool SQLiteRegistryStore::selectRemoteSource(const std::string & source_id)
+    {
+        try
+        {
+            storage::sqlite::Statement stmt(_db, "UPDATE registry_source SET source_id=?1 WHERE singleton=1;");
+            if(sqlite3_bind_text(stmt.get(), 1, source_id.c_str(), toSqliteInt(source_id.size()), SQLITE_TRANSIENT) != SQLITE_OK)
+                return false;
+            return stmt.step() == SQLITE_DONE;
+        }
+        catch(const std::exception & error)
+        {
+            spdlog::error("SQLite registry source selection failed: {}", error.what());
+            return false;
+        }
     }
 
     std::int64_t SQLiteRegistryStore::getMaterializationCursor() const
@@ -433,8 +460,8 @@ namespace dcn::registry
             storage::sqlite::Statement insert_connector(
                 _db,
                 "INSERT INTO connectors(source_id, chain_namespace, chain_id, registry_address, entity_address, name, owner, "
-                "format_hash, condition_name, content_hash, metadata_hash, runtime_code_hash, artifact_state, definition_conflict, origin_block_hash, origin_log_index) "
-                "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16);");
+                "format_hash, condition_name, content_hash, metadata_hash, runtime_code_hash, definition_conflict, origin_block_hash, origin_log_index) "
+                "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15);");
             sqlite3_bind_text(insert_connector.get(), 1, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
             sqlite3_bind_text(insert_connector.get(), 2, source.chain_namespace.c_str(), static_cast<int>(source.chain_namespace.size()), SQLITE_TRANSIENT);
             sqlite3_bind_int64(insert_connector.get(), 3, static_cast<sqlite3_int64>(source.chain_id));
@@ -447,11 +474,9 @@ namespace dcn::registry
             sqlite3_bind_text(insert_connector.get(), 10, source.content_hash.c_str(), static_cast<int>(source.content_hash.size()), SQLITE_TRANSIENT);
             sqlite3_bind_text(insert_connector.get(), 11, source.metadata_hash.c_str(), static_cast<int>(source.metadata_hash.size()), SQLITE_TRANSIENT);
             sqlite3_bind_text(insert_connector.get(), 12, source.runtime_code_hash.c_str(), static_cast<int>(source.runtime_code_hash.size()), SQLITE_TRANSIENT);
-            const std::string_view artifact_state = pt::artifactStateName(source.artifact_state);
-            sqlite3_bind_text(insert_connector.get(), 13, artifact_state.data(), static_cast<int>(artifact_state.size()), SQLITE_TRANSIENT);
-            sqlite3_bind_int(insert_connector.get(), 14, source.definition_conflict ? 1 : 0);
-            sqlite3_bind_text(insert_connector.get(), 15, source.block_hash.c_str(), static_cast<int>(source.block_hash.size()), SQLITE_TRANSIENT);
-            sqlite3_bind_int64(insert_connector.get(), 16, source.log_index);
+            sqlite3_bind_int(insert_connector.get(), 13, source.definition_conflict ? 1 : 0);
+            sqlite3_bind_text(insert_connector.get(), 14, source.block_hash.c_str(), static_cast<int>(source.block_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(insert_connector.get(), 15, source.log_index);
             if(insert_connector.step() != SQLITE_DONE)
             {
                 spdlog::error("SQLite insert connectors failed for `{}`", connector_name);
@@ -757,7 +782,7 @@ namespace dcn::registry
             
             spdlog::debug("SQLite::hasConnector('{}'): prepare (db={})", name, static_cast<const void *>(_db));
             
-            storage::sqlite::Statement stmt(_db, "SELECT 1 FROM connectors WHERE name=?1 AND active=1 LIMIT 1;");
+            storage::sqlite::Statement stmt(_db, "SELECT 1 FROM selected_connectors WHERE name=?1 AND active=1 LIMIT 1;");
             const int bind_rc = sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
             
             spdlog::debug("SQLite::hasConnector('{}'): bind rc={}", name, bind_rc);
@@ -788,7 +813,7 @@ namespace dcn::registry
             
             storage::sqlite::Statement source_stmt(
                 _db,
-                "SELECT source_id FROM connectors WHERE name=?1 AND active=1 "
+                "SELECT source_id FROM selected_connectors WHERE name=?1 AND active=1 "
                 "ORDER BY CASE WHEN source_id='local' THEN 1 ELSE 0 END, source_id LIMIT 1;");
             sqlite3_bind_text(source_stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
             if(source_stmt.step() != SQLITE_ROW) return std::nullopt;
@@ -816,7 +841,7 @@ namespace dcn::registry
         {
             storage::sqlite::Statement stmt(
                 _db,
-                "SELECT format_hash FROM connectors WHERE name=?1 AND active=1 "
+                "SELECT format_hash FROM selected_connectors WHERE name=?1 AND active=1 "
                 "ORDER BY CASE WHEN source_id='local' THEN 1 ELSE 0 END, source_id LIMIT 1;");
             sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
             if(stmt.step() != SQLITE_ROW)
@@ -848,8 +873,8 @@ namespace dcn::registry
         storage::sqlite::Statement stmt(
             _db,
             std::format(
-                "SELECT source_id,chain_namespace,chain_id,registry_address,entity_address,content_hash,metadata_hash,runtime_code_hash,artifact_state,definition_conflict,origin_block_hash,origin_log_index,active "
-                "FROM {} WHERE name=?1 AND active=1 "
+                "SELECT source_id,chain_namespace,chain_id,registry_address,entity_address,content_hash,metadata_hash,runtime_code_hash,definition_conflict,origin_block_hash,origin_log_index,active "
+                "FROM selected_{} WHERE name=?1 AND active=1 "
                 "ORDER BY CASE WHEN source_id='local' THEN 1 ELSE 0 END, source_id LIMIT 1;",
                 entityTable(kind)).c_str());
         sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
@@ -867,12 +892,10 @@ namespace dcn::registry
         location.source.content_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 5));
         location.source.metadata_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 6));
         location.source.runtime_code_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 7));
-        location.source.artifact_state = parseArtifactState(
-            reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 8)));
-        location.source.definition_conflict = sqlite3_column_int(stmt.get(), 9) != 0;
-        location.source.block_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 10));
-        location.source.log_index = sqlite3_column_int64(stmt.get(), 11);
-        location.active = sqlite3_column_int(stmt.get(), 12) != 0;
+        location.source.definition_conflict = sqlite3_column_int(stmt.get(), 8) != 0;
+        location.source.block_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 9));
+        location.source.log_index = sqlite3_column_int64(stmt.get(), 10);
+        location.active = sqlite3_column_int(stmt.get(), 11) != 0;
         return location;
     }
 
@@ -880,7 +903,7 @@ namespace dcn::registry
     {
         storage::sqlite::Statement stmt(
             _db,
-            std::format("SELECT 1 FROM {} WHERE name=?1 AND source_id<>'local' AND active=1 LIMIT 1;", entityTable(kind)).c_str());
+            std::format("SELECT 1 FROM selected_{} WHERE name=?1 AND source_id<>'local' AND active=1 LIMIT 1;", entityTable(kind)).c_str());
         sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
         return stmt.step() == SQLITE_ROW;
     }
@@ -994,70 +1017,152 @@ namespace dcn::registry
         }
     }
 
-    std::vector<ArtifactReference> SQLiteRegistryStore::getArtifactsDue(
-        const std::int64_t now_ms,
-        const std::size_t limit) const
+    bool SQLiteRegistryStore::putRuntimeCode(const std::string & code_hash, const std::vector<std::uint8_t> & code)
     {
-        std::vector<ArtifactReference> references;
+        if(code.empty() || chain::bytes32ToHex(chain::keccakBytes(code.data(), code.size())) != code_hash)
+        {
+            spdlog::error("Runtime code does not hash to {}", code_hash);
+            return false;
+        }
+
         try
         {
             storage::sqlite::Statement stmt(
-                _db,
-                "SELECT kind,source_id,name,content_hash,metadata_hash,runtime_code_hash,artifact_state,artifact_attempts FROM ("
-                "SELECT 0 AS kind,source_id,name,content_hash,metadata_hash,runtime_code_hash,artifact_state,artifact_attempts,artifact_retry_at_ms,active FROM connectors "
-                "UNION ALL SELECT 1,source_id,name,content_hash,metadata_hash,runtime_code_hash,artifact_state,artifact_attempts,artifact_retry_at_ms,active FROM transformations "
-                "UNION ALL SELECT 2,source_id,name,content_hash,metadata_hash,runtime_code_hash,artifact_state,artifact_attempts,artifact_retry_at_ms,active FROM conditions) "
-                "WHERE active=1 AND content_hash<>'' AND artifact_state<>'available' AND artifact_retry_at_ms<=?1 "
-                "ORDER BY artifact_retry_at_ms,source_id,name LIMIT ?2;");
-            sqlite3_bind_int64(stmt.get(), 1, now_ms);
-            sqlite3_bind_int(stmt.get(), 2, toSqliteInt(limit));
-
-            while(stmt.step() == SQLITE_ROW)
-            {
-                references.push_back(ArtifactReference{
-                    .kind = static_cast<EntityKind>(sqlite3_column_int(stmt.get(), 0)),
-                    .source_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1)),
-                    .name = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2)),
-                    .content_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 3)),
-                    .metadata_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 4)),
-                    .runtime_code_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 5)),
-                    .state = parseArtifactState(reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 6))),
-                    .attempts = static_cast<std::uint32_t>(std::clamp<sqlite3_int64>(
-                        sqlite3_column_int64(stmt.get(), 7), 0, 8))});
-            }
+                _db, "INSERT OR IGNORE INTO runtime_code(code_hash, code) VALUES(?1, ?2);");
+            sqlite3_bind_text(stmt.get(), 1, code_hash.c_str(), static_cast<int>(code_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_blob(stmt.get(), 2, code.data(), toSqliteInt(code.size()), SQLITE_TRANSIENT);
+            return stmt.step() == SQLITE_DONE;
         }
         catch(const std::exception & error)
         {
-            spdlog::error("SQLite artifact work query failed: {}", error.what());
+            spdlog::error("SQLite runtime code insert failed for {}: {}", code_hash, error.what());
+            return false;
         }
-        return references;
     }
 
-    bool SQLiteRegistryStore::setArtifactState(
-        const EntityKind kind,
-        const std::string & source_id,
-        const std::string & name,
-        const pt::ArtifactState state,
-        const std::int64_t retry_at_ms)
+    std::optional<std::vector<std::uint8_t>> SQLiteRegistryStore::getRuntimeCode(const std::string & code_hash) const
     {
+        try
+        {
+            storage::sqlite::Statement stmt(_db, "SELECT code FROM runtime_code WHERE code_hash=?1;");
+            sqlite3_bind_text(stmt.get(), 1, code_hash.c_str(), static_cast<int>(code_hash.size()), SQLITE_TRANSIENT);
+            if(stmt.step() != SQLITE_ROW) return std::nullopt;
+
+            const auto * blob = static_cast<const std::uint8_t *>(sqlite3_column_blob(stmt.get(), 0));
+            const int size = sqlite3_column_bytes(stmt.get(), 0);
+            if(blob == nullptr || size <= 0) return std::nullopt;
+            return std::vector<std::uint8_t>(blob, blob + size);
+        }
+        catch(const std::exception & error)
+        {
+            spdlog::error("SQLite runtime code read failed for {}: {}", code_hash, error.what());
+            return std::nullopt;
+        }
+    }
+
+    bool SQLiteRegistryStore::updateLocalVersionHashes(
+        const EntityKind kind,
+        const std::string & name,
+        const EntitySource & source)
+    {
+        // An event without hashes says nothing about the code.
+        if(source.content_hash.empty()) return true;
         try
         {
             storage::sqlite::Statement stmt(
                 _db,
                 std::format(
-                    "UPDATE {} SET artifact_state=?1,artifact_attempts=CASE WHEN ?1='available' THEN 0 ELSE artifact_attempts+1 END,"
-                    "artifact_retry_at_ms=?2 WHERE source_id=?3 AND name=?4 AND active=1;",
+                    "UPDATE {} SET content_hash=?2,metadata_hash=?3,runtime_code_hash=?4 "
+                    "WHERE source_id='local' AND name=?1 AND active=1 "
+                    "AND (content_hash<>?2 OR metadata_hash<>?3 OR runtime_code_hash<>?4);",
                     entityTable(kind)).c_str());
-            const std::string_view state_name = pt::artifactStateName(state);
-            sqlite3_bind_text(stmt.get(), 1, state_name.data(), static_cast<int>(state_name.size()), SQLITE_TRANSIENT);
-            sqlite3_bind_int64(stmt.get(), 2, retry_at_ms);
-            sqlite3_bind_text(stmt.get(), 3, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt.get(), 4, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
-            return stmt.step() == SQLITE_DONE && sqlite3_changes(_db) == 1;
+            sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt.get(), 2, source.content_hash.c_str(), static_cast<int>(source.content_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt.get(), 3, source.metadata_hash.c_str(), static_cast<int>(source.metadata_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt.get(), 4, source.runtime_code_hash.c_str(), static_cast<int>(source.runtime_code_hash.size()), SQLITE_TRANSIENT);
+            return stmt.step() == SQLITE_DONE;
         }
         catch(const std::exception & error)
         {
-            spdlog::error("SQLite artifact state update failed for '{}': {}", name, error.what());
+            spdlog::error("SQLite local version hash update failed for '{}': {}", name, error.what());
+            return false;
+        }
+    }
+
+    bool SQLiteRegistryStore::putChainCreationCode(
+        const std::string & source_id,
+        const chain::Address & entity,
+        const std::vector<std::uint8_t> & code)
+    {
+        if(code.empty()) return false;
+        try
+        {
+            storage::sqlite::Statement stmt(
+                _db, "INSERT OR REPLACE INTO chain_creation_code(source_id, entity_address, code) VALUES(?1, ?2, ?3);");
+            sqlite3_bind_text(stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+            bindAddress(stmt.get(), 2, entity);
+            sqlite3_bind_blob(stmt.get(), 3, code.data(), toSqliteInt(code.size()), SQLITE_TRANSIENT);
+            return stmt.step() == SQLITE_DONE;
+        }
+        catch(const std::exception & error)
+        {
+            spdlog::error("SQLite creation code insert failed for {}: {}", chain::addressToHex(entity), error.what());
+            return false;
+        }
+    }
+
+    std::optional<std::vector<std::uint8_t>> SQLiteRegistryStore::getChainCreationCode(
+        const std::string & source_id,
+        const chain::Address & entity) const
+    {
+        try
+        {
+            storage::sqlite::Statement stmt(
+                _db, "SELECT code FROM chain_creation_code WHERE source_id=?1 AND entity_address=?2;");
+            sqlite3_bind_text(stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+            bindAddress(stmt.get(), 2, entity);
+            if(stmt.step() != SQLITE_ROW) return std::nullopt;
+
+            const auto * blob = static_cast<const std::uint8_t *>(sqlite3_column_blob(stmt.get(), 0));
+            const int size = sqlite3_column_bytes(stmt.get(), 0);
+            if(blob == nullptr || size <= 0) return std::nullopt;
+            return std::vector<std::uint8_t>(blob, blob + size);
+        }
+        catch(const std::exception & error)
+        {
+            spdlog::error("SQLite creation code read failed for {}: {}", chain::addressToHex(entity), error.what());
+            return std::nullopt;
+        }
+    }
+
+    bool SQLiteRegistryStore::hasChainCreationCode(const std::string & source_id, const chain::Address & entity) const
+    {
+        try
+        {
+            storage::sqlite::Statement stmt(
+                _db, "SELECT 1 FROM chain_creation_code WHERE source_id=?1 AND entity_address=?2;");
+            sqlite3_bind_text(stmt.get(), 1, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
+            bindAddress(stmt.get(), 2, entity);
+            return stmt.step() == SQLITE_ROW;
+        }
+        catch(const std::exception & error)
+        {
+            spdlog::error("SQLite creation code lookup failed for {}: {}", chain::addressToHex(entity), error.what());
+            return false;
+        }
+    }
+
+    bool SQLiteRegistryStore::hasRuntimeCode(const std::string & code_hash) const
+    {
+        try
+        {
+            storage::sqlite::Statement stmt(_db, "SELECT 1 FROM runtime_code WHERE code_hash=?1;");
+            sqlite3_bind_text(stmt.get(), 1, code_hash.c_str(), static_cast<int>(code_hash.size()), SQLITE_TRANSIENT);
+            return stmt.step() == SQLITE_ROW;
+        }
+        catch(const std::exception & error)
+        {
+            spdlog::error("SQLite runtime code lookup failed for {}: {}", code_hash, error.what());
             return false;
         }
     }
@@ -1244,7 +1349,7 @@ namespace dcn::registry
     {
         try
         {
-            storage::sqlite::Statement stmt(_db, "SELECT COUNT(*) FROM format_members WHERE format_hash = ?1;");
+            storage::sqlite::Statement stmt(_db, "SELECT COUNT(*) FROM selected_format_members WHERE format_hash = ?1;");
             bindBytes32(stmt.get(), 1, format_hash);
             if(stmt.step() != SQLITE_ROW)
             {
@@ -1278,7 +1383,7 @@ namespace dcn::registry
             const std::size_t query_limit = limit + 1;
             if(after.has_value())
             {
-                storage::sqlite::Statement stmt(_db, "SELECT name FROM format_members WHERE format_hash = ?1 AND name > ?2 ORDER BY name ASC LIMIT ?3;");
+                storage::sqlite::Statement stmt(_db, "SELECT name FROM selected_format_members WHERE format_hash = ?1 AND name > ?2 ORDER BY name ASC LIMIT ?3;");
                 bindBytes32(stmt.get(), 1, format_hash);
                 sqlite3_bind_text(stmt.get(), 2, after->c_str(), static_cast<int>(after->size()), SQLITE_TRANSIENT);
                 sqlite3_bind_int(stmt.get(), 3, toSqliteInt(query_limit));
@@ -1293,7 +1398,7 @@ namespace dcn::registry
             }
             else
             {
-                storage::sqlite::Statement stmt(_db, "SELECT name FROM format_members WHERE format_hash = ?1 ORDER BY name ASC LIMIT ?2;");
+                storage::sqlite::Statement stmt(_db, "SELECT name FROM selected_format_members WHERE format_hash = ?1 ORDER BY name ASC LIMIT ?2;");
                 bindBytes32(stmt.get(), 1, format_hash);
                 sqlite3_bind_int(stmt.get(), 2, toSqliteInt(query_limit));
                 for(int rc = stmt.step(); rc == SQLITE_ROW; rc = stmt.step())
@@ -1334,7 +1439,7 @@ namespace dcn::registry
     {
         try
         {
-            storage::sqlite::Statement stmt(_db, "SELECT COUNT(DISTINCT format_hash) FROM format_members;");
+            storage::sqlite::Statement stmt(_db, "SELECT COUNT(DISTINCT format_hash) FROM selected_format_members;");
             if(stmt.step() != SQLITE_ROW)
             {
                 return 0;
@@ -1365,7 +1470,7 @@ namespace dcn::registry
             {
                 storage::sqlite::Statement stmt(
                     _db,
-                    "SELECT DISTINCT format_hash FROM format_members "
+                    "SELECT DISTINCT format_hash FROM selected_format_members "
                     "WHERE format_hash > ?1 ORDER BY format_hash ASC LIMIT ?2;");
                 bindBytes32(stmt.get(), 1, *after);
                 sqlite3_bind_int(stmt.get(), 2, toSqliteInt(query_limit));
@@ -1382,7 +1487,7 @@ namespace dcn::registry
             {
                 storage::sqlite::Statement stmt(
                     _db,
-                    "SELECT DISTINCT format_hash FROM format_members "
+                    "SELECT DISTINCT format_hash FROM selected_format_members "
                     "ORDER BY format_hash ASC LIMIT ?1;");
                 sqlite3_bind_int(stmt.get(), 1, toSqliteInt(query_limit));
                 for(int rc = stmt.step(); rc == SQLITE_ROW; rc = stmt.step())
@@ -1472,7 +1577,7 @@ namespace dcn::registry
             
             spdlog::debug("SQLite::hasTransformation('{}'): prepare (db={})", name, static_cast<const void *>(_db));
             
-            storage::sqlite::Statement stmt(_db, "SELECT 1 FROM transformations WHERE name=?1 AND active=1 LIMIT 1;");
+            storage::sqlite::Statement stmt(_db, "SELECT 1 FROM selected_transformations WHERE name=?1 AND active=1 LIMIT 1;");
             const int bind_rc = sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
             
             spdlog::debug("SQLite::hasTransformation('{}'): bind rc={}", name, bind_rc);
@@ -1504,7 +1609,7 @@ namespace dcn::registry
             
             storage::sqlite::Statement stmt(
                 _db,
-                "SELECT owner, args_count FROM transformations WHERE name=?1 AND active=1 "
+                "SELECT owner, args_count FROM selected_transformations WHERE name=?1 AND active=1 "
                 "ORDER BY CASE WHEN source_id='local' THEN 1 ELSE 0 END, source_id LIMIT 1;");
             sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
 
@@ -1580,14 +1685,13 @@ namespace dcn::registry
         {
             storage::sqlite::Statement insert_entity(
                 _db,
-                "INSERT INTO transformations(source_id,chain_namespace,chain_id,registry_address,entity_address,name,owner,args_count,content_hash,metadata_hash,runtime_code_hash,artifact_state,definition_conflict,origin_block_hash,origin_log_index) "
-                "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) "
+                "INSERT INTO transformations(source_id,chain_namespace,chain_id,registry_address,entity_address,name,owner,args_count,content_hash,metadata_hash,runtime_code_hash,definition_conflict,origin_block_hash,origin_log_index) "
+                "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) "
                 "ON CONFLICT(source_id,name) DO UPDATE SET "
                 "chain_namespace=excluded.chain_namespace, chain_id=excluded.chain_id, "
                 "registry_address=excluded.registry_address, entity_address=excluded.entity_address, "
                 "owner=excluded.owner, args_count=excluded.args_count, "
-                "content_hash=excluded.content_hash, metadata_hash=excluded.metadata_hash, runtime_code_hash=excluded.runtime_code_hash, artifact_state=excluded.artifact_state, definition_conflict=excluded.definition_conflict, "
-                "artifact_attempts=0, artifact_retry_at_ms=0, "
+                "content_hash=excluded.content_hash, metadata_hash=excluded.metadata_hash, runtime_code_hash=excluded.runtime_code_hash, definition_conflict=excluded.definition_conflict, "
                 "origin_block_hash=excluded.origin_block_hash, origin_log_index=excluded.origin_log_index, "
                 "active=1;");
             sqlite3_bind_text(insert_entity.get(), 1, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
@@ -1601,11 +1705,9 @@ namespace dcn::registry
             sqlite3_bind_text(insert_entity.get(), 9, source.content_hash.c_str(), static_cast<int>(source.content_hash.size()), SQLITE_TRANSIENT);
             sqlite3_bind_text(insert_entity.get(), 10, source.metadata_hash.c_str(), static_cast<int>(source.metadata_hash.size()), SQLITE_TRANSIENT);
             sqlite3_bind_text(insert_entity.get(), 11, source.runtime_code_hash.c_str(), static_cast<int>(source.runtime_code_hash.size()), SQLITE_TRANSIENT);
-            const std::string_view artifact_state = pt::artifactStateName(source.artifact_state);
-            sqlite3_bind_text(insert_entity.get(), 12, artifact_state.data(), static_cast<int>(artifact_state.size()), SQLITE_TRANSIENT);
-            sqlite3_bind_int(insert_entity.get(), 13, source.definition_conflict ? 1 : 0);
-            sqlite3_bind_text(insert_entity.get(), 14, source.block_hash.c_str(), static_cast<int>(source.block_hash.size()), SQLITE_TRANSIENT);
-            sqlite3_bind_int64(insert_entity.get(), 15, source.log_index);
+            sqlite3_bind_int(insert_entity.get(), 12, source.definition_conflict ? 1 : 0);
+            sqlite3_bind_text(insert_entity.get(), 13, source.block_hash.c_str(), static_cast<int>(source.block_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(insert_entity.get(), 14, source.log_index);
             if(insert_entity.step() != SQLITE_DONE)
             {
                 rollback_with_log("insert transformations");
@@ -1798,7 +1900,7 @@ namespace dcn::registry
             
             spdlog::debug("SQLite::hasCondition('{}'): prepare (db={})", name, static_cast<const void *>(_db));
             
-            storage::sqlite::Statement stmt(_db, "SELECT 1 FROM conditions WHERE name=?1 AND active=1 LIMIT 1;");
+            storage::sqlite::Statement stmt(_db, "SELECT 1 FROM selected_conditions WHERE name=?1 AND active=1 LIMIT 1;");
             const int bind_rc = sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
             
             spdlog::debug("SQLite::hasCondition('{}'): bind rc={}", name, bind_rc);
@@ -1830,7 +1932,7 @@ namespace dcn::registry
             
             storage::sqlite::Statement stmt(
                 _db,
-                "SELECT owner, args_count FROM conditions WHERE name=?1 AND active=1 "
+                "SELECT owner, args_count FROM selected_conditions WHERE name=?1 AND active=1 "
                 "ORDER BY CASE WHEN source_id='local' THEN 1 ELSE 0 END, source_id LIMIT 1;");
             sqlite3_bind_text(stmt.get(), 1, name.c_str(), static_cast<int>(name.size()), SQLITE_TRANSIENT);
 
@@ -1906,14 +2008,13 @@ namespace dcn::registry
         {
             storage::sqlite::Statement insert_entity(
                 _db,
-                "INSERT INTO conditions(source_id,chain_namespace,chain_id,registry_address,entity_address,name,owner,args_count,content_hash,metadata_hash,runtime_code_hash,artifact_state,definition_conflict,origin_block_hash,origin_log_index) "
-                "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) "
+                "INSERT INTO conditions(source_id,chain_namespace,chain_id,registry_address,entity_address,name,owner,args_count,content_hash,metadata_hash,runtime_code_hash,definition_conflict,origin_block_hash,origin_log_index) "
+                "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) "
                 "ON CONFLICT(source_id,name) DO UPDATE SET "
                 "chain_namespace=excluded.chain_namespace, chain_id=excluded.chain_id, "
                 "registry_address=excluded.registry_address, entity_address=excluded.entity_address, "
                 "owner=excluded.owner, args_count=excluded.args_count, "
-                "content_hash=excluded.content_hash, metadata_hash=excluded.metadata_hash, runtime_code_hash=excluded.runtime_code_hash, artifact_state=excluded.artifact_state, definition_conflict=excluded.definition_conflict, "
-                "artifact_attempts=0, artifact_retry_at_ms=0, "
+                "content_hash=excluded.content_hash, metadata_hash=excluded.metadata_hash, runtime_code_hash=excluded.runtime_code_hash, definition_conflict=excluded.definition_conflict, "
                 "origin_block_hash=excluded.origin_block_hash, origin_log_index=excluded.origin_log_index, "
                 "active=1;");
             sqlite3_bind_text(insert_entity.get(), 1, source.source_id.c_str(), static_cast<int>(source.source_id.size()), SQLITE_TRANSIENT);
@@ -1927,11 +2028,9 @@ namespace dcn::registry
             sqlite3_bind_text(insert_entity.get(), 9, source.content_hash.c_str(), static_cast<int>(source.content_hash.size()), SQLITE_TRANSIENT);
             sqlite3_bind_text(insert_entity.get(), 10, source.metadata_hash.c_str(), static_cast<int>(source.metadata_hash.size()), SQLITE_TRANSIENT);
             sqlite3_bind_text(insert_entity.get(), 11, source.runtime_code_hash.c_str(), static_cast<int>(source.runtime_code_hash.size()), SQLITE_TRANSIENT);
-            const std::string_view artifact_state = pt::artifactStateName(source.artifact_state);
-            sqlite3_bind_text(insert_entity.get(), 12, artifact_state.data(), static_cast<int>(artifact_state.size()), SQLITE_TRANSIENT);
-            sqlite3_bind_int(insert_entity.get(), 13, source.definition_conflict ? 1 : 0);
-            sqlite3_bind_text(insert_entity.get(), 14, source.block_hash.c_str(), static_cast<int>(source.block_hash.size()), SQLITE_TRANSIENT);
-            sqlite3_bind_int64(insert_entity.get(), 15, source.log_index);
+            sqlite3_bind_int(insert_entity.get(), 12, source.definition_conflict ? 1 : 0);
+            sqlite3_bind_text(insert_entity.get(), 13, source.block_hash.c_str(), static_cast<int>(source.block_hash.size()), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(insert_entity.get(), 14, source.log_index);
             if(insert_entity.step() != SQLITE_DONE)
             {
                 rollback_with_log("insert conditions");
@@ -2130,7 +2229,7 @@ namespace dcn::registry
             if(after.has_value())
             {
                 const std::string sql =
-                    std::string("SELECT name FROM ") + table_name +
+                    std::string("SELECT name FROM selected_") + table_name +
                     " WHERE owner = ?1 AND name > ?2 ORDER BY name ASC LIMIT ?3;";
                 storage::sqlite::Statement stmt(_db, sql.c_str());
                 bindAddress(stmt.get(), 1, owner);
@@ -2149,7 +2248,7 @@ namespace dcn::registry
             else
             {
                 const std::string sql =
-                    std::string("SELECT name FROM ") + table_name +
+                    std::string("SELECT name FROM selected_") + table_name +
                     " WHERE owner = ?1 ORDER BY name ASC LIMIT ?2;";
                 storage::sqlite::Statement stmt(_db, sql.c_str());
                 bindAddress(stmt.get(), 1, owner);
@@ -2212,11 +2311,11 @@ namespace dcn::registry
             storage::sqlite::Statement stmt(
                 _db,
                 "SELECT COUNT(*) FROM ("
-                "SELECT owner FROM owned_connectors "
+                "SELECT owner FROM selected_owned_connectors "
                 "UNION "
-                "SELECT owner FROM owned_transformations "
+                "SELECT owner FROM selected_owned_transformations "
                 "UNION "
-                "SELECT owner FROM owned_conditions"
+                "SELECT owner FROM selected_owned_conditions"
                 ") AS all_owners;");
             if(stmt.step() != SQLITE_ROW)
             {
@@ -2249,11 +2348,11 @@ namespace dcn::registry
                 storage::sqlite::Statement stmt(
                     _db,
                     "SELECT owner FROM ("
-                    "SELECT owner FROM owned_connectors "
+                    "SELECT owner FROM selected_owned_connectors "
                     "UNION "
-                    "SELECT owner FROM owned_transformations "
+                    "SELECT owner FROM selected_owned_transformations "
                     "UNION "
-                    "SELECT owner FROM owned_conditions"
+                    "SELECT owner FROM selected_owned_conditions"
                     ") AS all_owners "
                     "WHERE owner > ?1 ORDER BY owner ASC LIMIT ?2;");
                 bindAddress(stmt.get(), 1, *after);
@@ -2272,11 +2371,11 @@ namespace dcn::registry
                 storage::sqlite::Statement stmt(
                     _db,
                     "SELECT owner FROM ("
-                    "SELECT owner FROM owned_connectors "
+                    "SELECT owner FROM selected_owned_connectors "
                     "UNION "
-                    "SELECT owner FROM owned_transformations "
+                    "SELECT owner FROM selected_owned_transformations "
                     "UNION "
-                    "SELECT owner FROM owned_conditions"
+                    "SELECT owner FROM selected_owned_conditions"
                     ") AS all_owners "
                     "ORDER BY owner ASC LIMIT ?1;");
                 sqlite3_bind_int(stmt.get(), 1, toSqliteInt(query_limit));

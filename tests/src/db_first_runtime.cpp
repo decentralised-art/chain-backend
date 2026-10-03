@@ -567,6 +567,112 @@ TEST_F(UnitTest, API_ReadEndpoints_ReturnFromDbWithoutEvmDeployment)
     }
 }
 
+TEST_F(UnitTest, API_ReadEndpoints_TransformationAndConditionCarryStoredRuntimeCode)
+{
+    asio::io_context io_context;
+    registry::Registry registry(io_context);
+    const std::string owner_hex = evmc::hex(makeAddressFromByte(0xB2));
+
+    const std::vector<std::uint8_t> code{0x60, 0x01, 0x60, 0x02, 0x01};
+    const std::string code_hash = chain::bytes32ToHex(chain::keccakBytes(code.data(), code.size()));
+    registry::EntitySource source;
+    source.runtime_code_hash = code_hash;
+
+    ASSERT_TRUE(runAwaitable(io_context, registry.addTransformationVersion(
+        source, makeAddressFromByte(0x31), makeTransformationRecord("CodedTx", owner_hex, "return x + 1;"))));
+    ASSERT_TRUE(runAwaitable(io_context, registry.addConditionVersion(
+        source, makeAddressFromByte(0x32), makeConditionRecord("CodedCond", owner_hex, "return args[0] > 0;"))));
+
+    const auto get = [&](const std::string & kind, const std::string & name)
+    {
+        http::Request request;
+        request.setMethod(http::Method::GET)
+               .setPath(http::URL("/" + kind + "/" + name))
+               .setVersion("HTTP/1.1");
+        std::vector<server::RouteArg> route_args{makeStringRouteArg(name)};
+        const auto response = runAwaitable(io_context, kind == "transformation"
+            ? GET_transformation(request, std::move(route_args), server::QueryArgsList{}, registry)
+            : GET_condition(request, std::move(route_args), server::QueryArgsList{}, registry));
+        EXPECT_EQ(response.getCode(), http::Code::OK);
+        return json::parse(response.getBody(), nullptr, false);
+    };
+
+    // The field is null until the registry holds the code.
+    const auto uncoded_transformation = get("transformation", "CodedTx");
+    const auto uncoded_condition = get("condition", "CodedCond");
+    ASSERT_TRUE(uncoded_transformation.contains("runtime_code"));
+    ASSERT_TRUE(uncoded_condition.contains("runtime_code"));
+    EXPECT_TRUE(uncoded_transformation["runtime_code"].is_null());
+    EXPECT_TRUE(uncoded_condition["runtime_code"].is_null());
+
+    ASSERT_TRUE(runAwaitable(io_context, registry.putRuntimeCode(code_hash, code)));
+    EXPECT_EQ(get("transformation", "CodedTx")["runtime_code"], "0x6001600201");
+    EXPECT_EQ(get("condition", "CodedCond")["runtime_code"], "0x6001600201");
+}
+
+TEST_F(UnitTest, Registry_SourceSelectionRefreshesCachesAndNameAdmission)
+{
+    asio::io_context io;
+    registry::Registry registry(io);
+    const registry::EntitySource first{.source_id = "eip155:1:first"};
+    const registry::EntitySource second{.source_id = "eip155:1:second"};
+    const auto first_owner = chain::addressToHex(makeAddressFromByte(0x41));
+    const auto second_owner = chain::addressToHex(makeAddressFromByte(0x42));
+    const auto add = [&](const registry::EntitySource & source, const std::string & owner, int dimensions)
+    {
+        ASSERT_TRUE(runAwaitable(io, registry.addTransformationVersion(
+            source, {}, makeTransformationRecord("ScopedTx", owner))));
+        ASSERT_TRUE(runAwaitable(io, registry.addConditionVersion(
+            source, {}, makeConditionRecord("ScopedCondition", owner))));
+        auto connector = makeConnectorRecord("ScopedConnector", owner);
+        for(int i = 0; i < dimensions; ++i) addConnectorDimension(connector, "", "");
+        ASSERT_TRUE(runAwaitable(io, registry.addConnectorVersion(source, {}, connector)));
+    };
+    const auto expectOwner = [&](const std::string & owner)
+    {
+        const auto connector = runAwaitable(io, registry.getConnectorRecordHandle("ScopedConnector"));
+        const auto transformation = runAwaitable(io, registry.getTransformationRecordHandle("ScopedTx"));
+        const auto condition = runAwaitable(io, registry.getConditionRecordHandle("ScopedCondition"));
+        ASSERT_TRUE(connector && transformation && condition);
+        EXPECT_EQ((*connector)->owner(), owner);
+        EXPECT_EQ((*transformation)->owner(), owner);
+        EXPECT_EQ((*condition)->owner(), owner);
+    };
+
+    ASSERT_TRUE(runAwaitable(io, registry.selectRemoteSource(first.source_id)));
+    add(first, first_owner, 1);
+    const auto first_format = runAwaitable(io, registry.getFormatHash("ScopedConnector"));
+    ASSERT_TRUE(first_format);
+    add(second, second_owner, 2);
+    expectOwner(first_owner);
+    EXPECT_EQ(runAwaitable(io, registry.getFormatHash("ScopedConnector")), first_format);
+    ASSERT_TRUE(runAwaitable(io, registry.addTransformationVersion(
+        first, {}, makeTransformationRecord("RetainedTx", first_owner))));
+    ASSERT_TRUE(runAwaitable(io, admitLocalEntityName(registry, nullptr, pt::EntityKind::TRANSFORMATION, "RetainedTx")));
+
+    ASSERT_TRUE(runAwaitable(io, registry.selectRemoteSource(second.source_id)));
+    expectOwner(second_owner);
+    const auto second_format = runAwaitable(io, registry.getFormatHash("ScopedConnector"));
+    ASSERT_TRUE(second_format);
+    EXPECT_NE(second_format, first_format);
+    EXPECT_FALSE(runAwaitable(io, registry.getTransformationRecordHandle("RetainedTx")));
+    EXPECT_FALSE(runAwaitable(io, admitLocalEntityName(registry, nullptr, pt::EntityKind::TRANSFORMATION, "RetainedTx")));
+
+    // Projection can write another deployment without changing the selected records.
+    add(first, first_owner, 1);
+    expectOwner(second_owner);
+    EXPECT_EQ(runAwaitable(io, registry.getFormatHash("ScopedConnector")), second_format);
+
+    ASSERT_TRUE(runAwaitable(io, registry.selectRemoteSource("")));
+    EXPECT_FALSE(runAwaitable(io, registry.hasConnector("ScopedConnector")));
+    EXPECT_FALSE(runAwaitable(io, registry.hasTransformation("ScopedTx")));
+    EXPECT_FALSE(runAwaitable(io, registry.hasCondition("ScopedCondition")));
+    EXPECT_FALSE(runAwaitable(io, registry.getFormatHash("ScopedConnector")));
+    ASSERT_TRUE(runAwaitable(io, registry.selectRemoteSource(first.source_id)));
+    expectOwner(first_owner);
+    EXPECT_TRUE(runAwaitable(io, registry.getTransformationRecordHandle("RetainedTx")));
+}
+
 TEST_F(UnitTest, API_Simulate_MissingConnectorReturnsNotFound)
 {
     ASSERT_TRUE(std::filesystem::exists(solcPath())) << std::format("Missing Solidity compiler at '{}'", solcPath().string());
@@ -1196,92 +1302,110 @@ TEST_F(UnitTest, API_Simulate_BrokenDbDependencyReturnsInvariantError)
     EXPECT_FALSE(*contains_connector_after);
 }
 
-TEST_F(UnitTest, API_Simulate_MaterializesAChainOnlyConnectorFromItsArtifacts)
+// A chain-only connector runs on the local EVM from the creation code the chain deployed it
+// and its transformation from, so constructor-initialized state survives: the
+// transformation's source declares `uint256 bias = 7` outside its run body, which only its
+// constructor sets. It simulates exactly like the same definitions created on this server.
+// No chain is contacted and no compiler output of the publisher is needed.
+TEST_F(UnitTest, API_Simulate_ReplaysChainEntitiesWithTheirConstructorState)
 {
     ASSERT_TRUE(std::filesystem::exists(solcPath())) << std::format("Missing Solidity compiler at '{}'", solcPath().string());
     ASSERT_TRUE(std::filesystem::exists(ptPath() / "contracts")) << std::format("Missing PT contracts at '{}'", (ptPath() / "contracts").string());
 
-    const auto root = makeTestPath("simulate_chain_only");
+    const auto root = makeTestPath("simulate_chain_replay");
     PathScope root_scope(root);
     const auto publisher_storage = root / "publisher";
-    const auto storage_path = root / "server";
-    ASSERT_TRUE(prepareStorageLayout(publisher_storage));
-    ASSERT_TRUE(prepareStorageLayout(storage_path));
+    const auto local_storage = root / "local";
+    const auto chain_storage = root / "chain";
+    for(const auto & path : {publisher_storage, local_storage, chain_storage})
+    {
+        ASSERT_TRUE(prepareStorageLayout(path));
+    }
 
     asio::io_context io_context;
-    // The publisher builds the artifacts; the server knows the entities only from the chain.
     registry::Registry publisher_registry(io_context);
     evm::EVM publisher_evm(io_context, EVMC_SHANGHAI, solcPath(), ptPath());
-    registry::Registry registry(io_context);
-    evm::EVM evm_instance(io_context, EVMC_SHANGHAI, solcPath(), ptPath());
+    registry::Registry local_registry(io_context);
+    evm::EVM local_evm(io_context, EVMC_SHANGHAI, solcPath(), ptPath());
+    registry::Registry chain_registry(io_context);
+    evm::EVM chain_evm(io_context, EVMC_SHANGHAI, solcPath(), ptPath());
     io_context.run();
 
     const std::string owner_hex = chain::addressToHex(makeAddressFromByte(0x56));
-    const auto transformation_record = makeTransformationRecord("ChainTx", owner_hex, "return x + 1;");
+    const auto transformation_record = makeTransformationRecord(
+        "BiasedTx", owner_hex,
+        "return x + uint32(bias);\n}\nuint256 bias = 7;\nfunction unusedTail() internal pure {");
     ConnectorRecord connector_record = makeConnectorRecord("ChainConnector", owner_hex);
-    addConnectorDimension(connector_record, "", "ChainTx");
+    addConnectorDimension(connector_record, "", "BiasedTx");
 
+    // What another server published: its creation code and publication hashes.
     ASSERT_TRUE(runAwaitable(io_context, loader::deployTransformation(
         publisher_evm, publisher_registry, transformation_record, publisher_storage)).has_value());
     const auto transformation_publication = runAwaitable(io_context, loader::prepareTransformationPublication(
         publisher_evm, transformation_record, publisher_storage));
-    ASSERT_TRUE(transformation_publication.has_value());
     const auto connector_publication = runAwaitable(io_context, loader::prepareConnectorPublication(
         publisher_evm, connector_record, publisher_storage, makeAddressFromByte(0xAB)));
+    ASSERT_TRUE(transformation_publication.has_value());
     ASSERT_TRUE(connector_publication.has_value());
 
-    // The registry holds what the chain events carry: the definition without source, and
-    // the publication hashes.
-    const auto chainVersion = [](const loader::PreparedPublication & publication)
+    config::Config cfg;
+    const auto simulate = [&](registry::Registry & registry, evm::EVM & evm, const std::filesystem::path & storage)
     {
-        const auto bundle = pt::decodeArtifactBundle(publication.artifact_bytes, publication.content_hash);
-        EXPECT_TRUE(bundle.has_value());
-        registry::EntitySource source{
+        cfg.storage_path = storage;
+        return runAwaitable(io_context, POST_simulate(
+            makeExecuteRequest("ChainConnector"), {}, {}, registry, evm, cfg));
+    };
+
+    // The same definitions created on this server.
+    ASSERT_TRUE(runAwaitable(io_context, local_registry.addTransformation(makeAddressFromByte(0x31), transformation_record)));
+    ASSERT_TRUE(writeJsonRecord(local_storage / "transformations" / "BiasedTx.json", transformation_record));
+    ASSERT_TRUE(runAwaitable(io_context, local_registry.addConnector(makeAddressFromByte(0x32), connector_record)));
+    ASSERT_TRUE(writeJsonRecord(local_storage / "connectors" / "ChainConnector.json", connector_record));
+    const auto local = simulate(local_registry, local_evm, local_storage);
+    ASSERT_EQ(local.getCode(), http::Code::OK) << local.getBody();
+
+    // The chain versions as projected: the transformation back-filled from registry state,
+    // the connector from its event.
+    const auto chainSource = [](const loader::PreparedPublication & prepared, const std::int64_t log_index)
+    {
+        return registry::EntitySource{
             .source_id = "eip155:1:0x00000000000000000000000000000000000000ab",
             .chain_namespace = "eip155:1",
             .registry_address = "0x00000000000000000000000000000000000000ab",
-            .content_hash = publication.content_hash,
-            .metadata_hash = bundle->metadata_hash,
-            .runtime_code_hash = bundle->runtime_code_hash};
-        return std::make_pair(source, bundle->definition.dump());
+            .content_hash = chain::bytes32ToHex(prepared.publication.content_hash),
+            .metadata_hash = chain::bytes32ToHex(prepared.publication.metadata_hash),
+            .runtime_code_hash = chain::bytes32ToHex(prepared.publication.runtime_code_hash),
+            .block_hash = "0x" + std::string(64, 'c'),
+            .log_index = log_index};
     };
-    const auto [transformation_source, transformation_definition] = chainVersion(*transformation_publication);
-    const auto [connector_source, connector_definition] = chainVersion(*connector_publication);
-    const auto chain_transformation = parse::parseFromJson<TransformationRecord>(transformation_definition, parse::use_protobuf);
-    const auto chain_connector = parse::parseFromJson<ConnectorRecord>(connector_definition, parse::use_protobuf);
-    ASSERT_TRUE(chain_transformation.has_value());
-    ASSERT_TRUE(chain_connector.has_value());
-    ASSERT_TRUE(runAwaitable(io_context, registry.addTransformationVersion(
-        transformation_source, makeAddressFromByte(0x71), *chain_transformation)));
-    ASSERT_TRUE(runAwaitable(io_context, registry.addConnectorVersion(
-        connector_source, makeAddressFromByte(0x72), *chain_connector)));
-    ASSERT_FALSE(runAwaitable(io_context, registry.hasLocalEntity(pt::EntityKind::CONNECTOR, "ChainConnector")));
+    const chain::Address transformation_address = makeAddressFromByte(0x71);
+    const chain::Address connector_address = makeAddressFromByte(0x72);
+    TransformationRecord chain_transformation = transformation_record;
+    chain_transformation.mutable_transformation()->clear_sol_src();
+    ASSERT_TRUE(runAwaitable(io_context, chain_registry.addTransformationVersion(
+        chainSource(*transformation_publication, -1), transformation_address, chain_transformation)));
+    ASSERT_TRUE(runAwaitable(io_context, chain_registry.addConnectorVersion(
+        chainSource(*connector_publication, 3), connector_address, connector_record)));
+    ASSERT_FALSE(runAwaitable(io_context, chain_registry.hasLocalEntity(pt::EntityKind::CONNECTOR, "ChainConnector")));
 
-    config::Config cfg;
-    cfg.storage_path = storage_path;
-    const auto simulate = [&]()
-    {
-        return runAwaitable(io_context, POST_simulate(
-            makeExecuteRequest("ChainConnector"), {}, {}, registry, evm_instance, cfg));
-    };
+    // Without creation code an entity's constructor state cannot be reproduced.
+    const auto incomplete = simulate(chain_registry, chain_evm, chain_storage);
+    EXPECT_EQ(incomplete.getCode(), http::Code::ServiceUnavailable);
+    EXPECT_NE(incomplete.getBody().find("transformation 'BiasedTx' was read from registry state"), std::string::npos)
+        << incomplete.getBody();
 
-    // Until the artifacts are available there is nothing verified to build from.
-    EXPECT_EQ(simulate().getCode(), http::Code::ServiceUnavailable);
+    const std::string source_id = chainSource(*connector_publication, 3).source_id;
+    ASSERT_TRUE(runAwaitable(io_context, chain_registry.putChainCreationCode(
+        source_id, transformation_address, transformation_publication->creation_code)));
+    ASSERT_TRUE(runAwaitable(io_context, chain_registry.putChainCreationCode(
+        source_id, connector_address, connector_publication->creation_code)));
+    const auto from_chain = simulate(chain_registry, chain_evm, chain_storage);
+    ASSERT_EQ(from_chain.getCode(), http::Code::OK) << from_chain.getBody();
+    EXPECT_EQ(from_chain.getBody(), local.getBody());
 
-    const pt::ArtifactStore cache(storage_path / "artifacts" / "cache");
-    ASSERT_TRUE(cache.cache(transformation_publication->artifact_bytes).has_value());
-    ASSERT_TRUE(cache.cache(connector_publication->artifact_bytes).has_value());
-
-    const auto response = simulate();
-    ASSERT_EQ(response.getCode(), http::Code::OK) << response.getBody();
-    EXPECT_TRUE(json::parse(response.getBody(), nullptr, false).is_array());
-
-    const auto contains_tx = containsTransformation(io_context, evm_instance, "ChainTx");
-    ASSERT_TRUE(contains_tx.has_value());
-    EXPECT_TRUE(*contains_tx);
-    const auto contains_connector = containsConnector(io_context, evm_instance, "ChainConnector");
-    ASSERT_TRUE(contains_connector.has_value());
-    EXPECT_TRUE(*contains_connector);
+    // Nothing was compiled for the chain entities.
+    EXPECT_FALSE(std::filesystem::exists(chain_storage / "transformations" / "build" / "BiasedTx.bin"));
+    EXPECT_FALSE(std::filesystem::exists(chain_storage / "connectors" / "build" / "ChainConnector.bin"));
 }
 
 TEST_F(UnitTest, SQLiteRegistryStore_QueryHelpers_PrepareFailureReturnsSafeDefaults)

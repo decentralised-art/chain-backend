@@ -2,42 +2,10 @@
 #include "feed_projector.hpp"
 #include "feed_runtime.hpp"
 #include "registry_projector.hpp"
-#include "artifact_runtime.hpp"
 #include "rpc.hpp"
 #include <array>
-#include <charconv>
 #include <exception>
 #include <string_view>
-
-static std::vector<std::string> _splitList(const std::string & value)
-{
-    std::vector<std::string> items;
-    std::size_t start = 0;
-    while(start <= value.size())
-    {
-        const std::size_t end = value.find(';', start);
-        std::string item = value.substr(start, end - start);
-        if(!item.empty()) items.push_back(std::move(item));
-        if(end == std::string::npos) break;
-        start = end + 1;
-    }
-    return items;
-}
-
-static std::optional<std::uint64_t> _parseUint64(const std::string & value)
-{
-    std::uint64_t parsed = 0;
-    const auto [end, ec] = std::from_chars(value.data(), value.data() + value.size(), parsed);
-    if(ec != std::errc{} || end != value.data() + value.size()) return std::nullopt;
-    return parsed;
-}
-
-static std::optional<std::string> _parseAddress(const std::string & value)
-{
-    const auto address = evmc::from_hex<dcn::chain::Address>(value);
-    if(!address) return std::nullopt;
-    return dcn::chain::addressToHex(*address);
-}
 
 #ifndef Solidity_SOLC_EXECUTABLE
     #error "Solidity_SOLC_EXECUTABLE is not defined"
@@ -278,8 +246,7 @@ static asio::awaitable<void> _runGracefulShutdown(
     dcn::registry::Registry & registry,
     bool wal_enabled,
     dcn::events::EventRuntime & events_runtime,
-    dcn::feed::FeedRuntime & feed_runtime,
-    dcn::registry::ArtifactRuntime & artifact_runtime)
+    dcn::feed::FeedRuntime & feed_runtime)
 {
     spdlog::info("decentralised.art chain backend stopping...");
     // Stop events first: its projectors write into feed_runtime.feed(), so the feed
@@ -287,8 +254,6 @@ static asio::awaitable<void> _runGracefulShutdown(
     // after the feed's final checkpoint, losing those rows.
     co_await events_runtime.stop();
     spdlog::info("Events runtime stopped");
-    co_await artifact_runtime.stop();
-    spdlog::info("Artifact runtime stopped");
     co_await feed_runtime.stop();
     spdlog::info("Feed runtime stopped");
     co_await server.close();
@@ -340,11 +305,8 @@ static asio::awaitable<void> _runGracefulShutdown(
 static void _runImmediateShutdown(
     std::optional<dcn::storage::sqlite::WalSyncWorker> & wal_sync_worker,
     dcn::events::EventRuntime & events_runtime,
-    dcn::feed::FeedRuntime & feed_runtime,
-    dcn::registry::ArtifactRuntime & artifact_runtime)
+    dcn::feed::FeedRuntime & feed_runtime)
 {
-    artifact_runtime.requestStop();
-    spdlog::info("Artifact runtime stop requested");
     feed_runtime.requestStop();
     spdlog::info("Feed runtime stop requested");
     events_runtime.requestStop();
@@ -368,29 +330,39 @@ namespace
         std::string runner;   // empty when neither the manifest nor --chain-runner names one
         std::uint64_t start_block = 0;
     };
+
+    // Identity of a chain source: chain plus registry, never the provider URL, so another
+    // provider for the same deployment resumes the same cursor and the registry database
+    // selects the same entities.
+    std::string chainSourceId(const std::uint64_t chain_id, const std::string & registry)
+    {
+        return std::format("eip155:{}:{}", chain_id, registry);
+    }
 }
 
-// Deploys registry and runner with the bootstrap key and persists their manifest.
-// Automatic deployment is for private and development chains: a canonical public
-// deployment is an explicit release operation whose reviewed manifest is committed.
-static asio::awaitable<std::expected<dcn::publish::DeploymentManifest, std::string>> _bootstrapDeployment(
-    const dcn::rpc::EthClient & client,
-    dcn::evm::EVM & evm,
-    const dcn::config::Config & cfg,
-    const std::filesystem::path & pt_path)
+static std::expected<std::shared_ptr<dcn::publish::Signer>, std::string> _loadDeployerSigner(
+    const dcn::config::Config & cfg)
 {
-    const auto signer = cfg.publish.bootstrap_key_file.empty()
-        ? dcn::publish::Signer::fromEnvironment(cfg.publish.bootstrap_key_env)
-        : dcn::publish::Signer::fromKeyFile(cfg.publish.bootstrap_key_file);
+    auto signer = cfg.publish.deployer_key_file.empty()
+        ? dcn::publish::Signer::fromEnvironment(cfg.publish.deployer_key_env)
+        : dcn::publish::Signer::fromKeyFile(cfg.publish.deployer_key_file);
     if(!signer)
     {
-        co_return std::unexpected(std::format("cannot load the bootstrap key: {}", signer.error()));
+        return std::unexpected(std::format("cannot load the deployer key: {}", signer.error()));
     }
-    spdlog::info("Bootstrapping a PT deployment from account {}", dcn::chain::addressToHex((*signer)->address()));
+    return signer;
+}
 
-    // Compiled into their own directory so the bootstrap never races the local EVM's
-    // own PT build.
-    const auto pt_out = cfg.storage_path / "pt-bootstrap";
+// Compiles PT contract sources, relative to the PT contracts directory, into their own
+// directory so a deployment never races the local EVM's own PT build. Returns that
+// directory.
+static asio::awaitable<std::expected<std::filesystem::path, std::string>> _compileForDeployment(
+    dcn::evm::EVM & evm,
+    const dcn::config::Config & cfg,
+    const std::filesystem::path & pt_path,
+    const std::vector<std::filesystem::path> sources)
+{
+    const auto pt_out = cfg.storage_path / "pt-deploy";
     const auto contracts = pt_path / "contracts";
     std::error_code dir_ec;
     std::filesystem::create_directories(pt_out, dir_ec);
@@ -399,13 +371,6 @@ static asio::awaitable<std::expected<dcn::publish::DeploymentManifest, std::stri
         co_return std::unexpected(std::format("cannot create '{}': {}", pt_out.string(), dir_ec.message()));
     }
 
-    // A named array rather than a braced range: GCC cannot compile an initializer_list
-    // that lives across a co_await.
-    const std::array<std::filesystem::path, 4> sources{
-        std::filesystem::path("registry") / "RegistryBase.sol",
-        std::filesystem::path("proxy") / "PTRegistryProxy.sol",
-        std::filesystem::path("runner") / "Runner.sol",
-        std::filesystem::path("proxy") / "PTContractProxy.sol"};
     for(const auto & source : sources)
     {
         if(!co_await evm.compile(contracts / source, pt_out, contracts, pt_path / "node_modules"))
@@ -413,49 +378,13 @@ static asio::awaitable<std::expected<dcn::publish::DeploymentManifest, std::stri
             co_return std::unexpected(std::format("cannot compile '{}' for deployment", source.string()));
         }
     }
-
-    auto deployed = co_await dcn::publish::bootstrapDeployment(
-        client,
-        **signer,
-        dcn::publish::BootstrapArtifacts{
-            .registry_impl_bin = pt_out / "RegistryBase.bin",
-            .registry_proxy_bin = pt_out / "PTRegistryProxy.bin",
-            .runner_impl_bin = pt_out / "Runner.bin",
-            .runner_proxy_bin = pt_out / "PTContractProxy.bin"},
-        cfg.events_chain_id,
-        evm.solcVersion(),
-        dcn::loader::ptSourceRevision(pt_path),
-        dcn::publish::BootstrapConfig{
-            .max_gas = cfg.publish.bootstrap_max_gas,
-            .max_fee_per_gas_wei = cfg.publish.bootstrap_max_fee_per_gas_wei});
-    if(!deployed)
-    {
-        co_return std::unexpected(deployed.error());
-    }
-
-    const auto written = dcn::publish::writeManifest(cfg.publish.manifest_path, *deployed);
-    if(!written)
-    {
-        // The contracts exist on chain now; the operator needs their addresses to write
-        // the manifest by hand instead of deploying a second time.
-        co_return std::unexpected(std::format(
-            "cannot persist the deployment manifest ({}); registry {} and runner {} were deployed",
-            written.error(), deployed->registry, deployed->runner));
-    }
-    co_return std::move(*deployed);
+    co_return pt_out;
 }
 
-// Positively identifies the configured deployment before a single row is ingested from
-// it or a publication is prepared against it: a wrong chain or a non-PT proxy is a
-// configuration error, not something to discover halfway through a backfill.
-static asio::awaitable<std::expected<ChainDeployment, std::string>> _resolveChainDeployment(
+static asio::awaitable<std::expected<void, std::string>> _checkEndpointChainId(
     const dcn::rpc::EthClient & client,
-    dcn::evm::EVM & evm,
-    const dcn::config::Config & cfg,
-    const std::filesystem::path & pt_path)
+    const dcn::config::Config & cfg)
 {
-    const auto & ingestion = cfg.chain_ingestion;
-
     const auto chain_id = co_await client.chainId();
     if(!chain_id)
     {
@@ -466,10 +395,144 @@ static asio::awaitable<std::expected<ChainDeployment, std::string>> _resolveChai
         co_return std::unexpected(std::format(
             "--events-chain-id {} does not match endpoint chain id {}", cfg.events_chain_id, *chain_id));
     }
+    co_return std::expected<void, std::string>{};
+}
+
+// Runs the requested deployment actions with the deployer key, registry before runner,
+// and rewrites the manifest after each one, so a later failure never loses a contract
+// that already exists on chain. Without a manifest only a registry deployment can start
+// one. A canonical public deployment is an explicit release operation whose reviewed
+// manifest is committed.
+static asio::awaitable<std::expected<void, std::string>> _runDeploymentActions(
+    const dcn::rpc::EthClient & client,
+    dcn::evm::EVM & evm,
+    const dcn::config::Config & cfg,
+    const std::filesystem::path & pt_path)
+{
+    const auto & publish = cfg.publish;
+
+    const auto endpoint = co_await _checkEndpointChainId(client, cfg);
+    if(!endpoint) co_return std::unexpected(endpoint.error());
+
+    // A new deployment starts from the chain alone; deploying a registry fills in the rest.
+    dcn::publish::DeploymentManifest manifest{.chain_id = cfg.events_chain_id};
+    if(std::filesystem::exists(publish.manifest_path))
+    {
+        auto stored = dcn::publish::readManifest(publish.manifest_path);
+        if(!stored)
+        {
+            co_return std::unexpected(std::format("cannot read the deployment manifest: {}", stored.error()));
+        }
+        if(stored->chain_id != cfg.events_chain_id)
+        {
+            co_return std::unexpected(std::format(
+                "the deployment manifest is for chain {}, not --events-chain-id {}",
+                stored->chain_id, cfg.events_chain_id));
+        }
+        manifest = std::move(*stored);
+    }
+    else if(!publish.deploy_registry)
+    {
+        co_return std::unexpected(std::format(
+            "no deployment manifest at '{}': deploy a registry first with --publish-deploy-registry "
+            "or --publish-deploy", publish.manifest_path.string()));
+    }
+
+    const auto signer = _loadDeployerSigner(cfg);
+    if(!signer) co_return std::unexpected(signer.error());
+    spdlog::info("Running deployment actions from account {}", dcn::chain::addressToHex((*signer)->address()));
+
+    struct Action
+    {
+        bool requested;
+        bool upgrade;
+        dcn::publish::PtContract contract;
+        std::filesystem::path impl_source;
+    };
+    // A named vector rather than a braced argument: GCC cannot compile an
+    // initializer_list that lives across a co_await.
+    const std::vector<Action> actions{
+        {publish.deploy_registry, false, dcn::publish::PtContract::REGISTRY, std::filesystem::path("registry") / "RegistryBase.sol"},
+        {publish.upgrade_registry, true, dcn::publish::PtContract::REGISTRY, std::filesystem::path("registry") / "RegistryBase.sol"},
+        {publish.deploy_runner, false, dcn::publish::PtContract::RUNNER, std::filesystem::path("runner") / "Runner.sol"},
+        {publish.upgrade_runner, true, dcn::publish::PtContract::RUNNER, std::filesystem::path("runner") / "Runner.sol"}};
+    // The registry and the runner sit behind the same proxy contract.
+    const std::filesystem::path proxy_source = std::filesystem::path("proxy") / "PTContractProxy.sol";
+
+    std::vector<std::filesystem::path> sources;
+    if(publish.deploy_registry || publish.deploy_runner) sources.push_back(proxy_source);
+    for(const Action & action : actions)
+    {
+        if(action.requested) sources.push_back(action.impl_source);
+    }
+    const auto pt_out = co_await _compileForDeployment(evm, cfg, pt_path, std::move(sources));
+    if(!pt_out) co_return std::unexpected(pt_out.error());
+
+    const dcn::publish::DeployConfig limits{
+        .max_gas = publish.deployer_max_gas,
+        .max_fee_per_gas_wei = publish.deployer_max_fee_per_gas_wei};
+    // solc names its output after the contract, which is the source file's stem.
+    const auto binary = [&pt_out](const std::filesystem::path & source)
+    {
+        return *pt_out / source.filename().replace_extension(".bin");
+    };
+
+    for(const Action & action : actions)
+    {
+        if(!action.requested) continue;
+        const std::string_view label = dcn::publish::contractLabel(action.contract);
+
+        std::expected<dcn::publish::DeploymentManifest, std::string> updated;
+        if(action.upgrade)
+        {
+            updated = co_await dcn::publish::upgradeContract(
+                client, **signer, action.contract, binary(action.impl_source), manifest, limits);
+        }
+        else
+        {
+            updated = co_await dcn::publish::deployContract(
+                client, **signer, action.contract, binary(action.impl_source), binary(proxy_source), manifest, limits);
+        }
+        if(!updated)
+        {
+            co_return std::unexpected(std::format(
+                "{} the {} failed: {}", action.upgrade ? "upgrading" : "deploying", label, updated.error()));
+        }
+        updated->solc_version = evm.solcVersion();
+        updated->pt_revision = dcn::loader::ptSourceRevision(pt_path);
+
+        const auto written = dcn::publish::writeManifest(publish.manifest_path, *updated);
+        if(!written)
+        {
+            // The chain already changed; the operator needs the new values to write the
+            // manifest by hand instead of repeating the action.
+            co_return std::unexpected(std::format(
+                "cannot persist the deployment manifest ({}); write it by hand as:\n{}",
+                written.error(), dcn::publish::formatManifest(*updated)));
+        }
+        spdlog::info(
+            "Manifest {} updated after {} the {}",
+            publish.manifest_path.string(), action.upgrade ? "upgrading" : "deploying", label);
+        manifest = std::move(*updated);
+    }
+    co_return std::expected<void, std::string>{};
+}
+
+// Positively identifies the configured deployment before a single row is ingested from
+// it or a publication is prepared against it: a wrong chain or a non-PT proxy is a
+// configuration error, not something to discover halfway through a backfill.
+static asio::awaitable<std::expected<ChainDeployment, std::string>> _resolveChainDeployment(
+    const dcn::rpc::EthClient & client,
+    const dcn::config::Config & cfg)
+{
+    const auto & ingestion = cfg.chain_ingestion;
+
+    const auto endpoint = co_await _checkEndpointChainId(client, cfg);
+    if(!endpoint) co_return std::unexpected(endpoint.error());
 
     // A manifest is the only way a server learns a canonical deployment; a chain cannot
     // be searched for "the" PT registry. An unreadable manifest is an error, never a
-    // reason to bootstrap a second deployment.
+    // reason to deploy a second deployment.
     std::optional<dcn::publish::DeploymentManifest> manifest;
     if(std::filesystem::exists(cfg.publish.manifest_path))
     {
@@ -482,15 +545,9 @@ static asio::awaitable<std::expected<ChainDeployment, std::string>> _resolveChai
     }
     else if(ingestion.registry_address.empty())
     {
-        if(!cfg.publish.bootstrap)
-        {
-            co_return std::unexpected(
-                "no PT deployment is configured: pass --chain-registry, provide a deployment "
-                "manifest, or run with --publish-bootstrap to deploy one");
-        }
-        auto deployed = co_await _bootstrapDeployment(client, evm, cfg, pt_path);
-        if(!deployed) co_return std::unexpected(deployed.error());
-        manifest = std::move(*deployed);
+        co_return std::unexpected(
+            "no PT deployment is configured: pass --chain-registry, provide a deployment "
+            "manifest, or run with --publish-deploy to deploy one");
     }
 
     ChainDeployment deployment;
@@ -512,7 +569,7 @@ static asio::awaitable<std::expected<ChainDeployment, std::string>> _resolveChai
         {
             co_return std::unexpected(std::format(
                 "--chain-runner {} does not match the manifest runner {}",
-                ingestion.runner_address, manifest->runner));
+                ingestion.runner_address, manifest->runner.empty() ? "(none)" : manifest->runner));
         }
 
         const auto verified = co_await dcn::publish::verifyDeployment(client, *manifest);
@@ -531,7 +588,7 @@ static asio::awaitable<std::expected<ChainDeployment, std::string>> _resolveChai
     if(!registry) co_return std::unexpected(registry.error());
     if(!ingestion.runner_address.empty())
     {
-        const auto runner = co_await dcn::rpc::verifyPtRunner(client, ingestion.runner_address, ingestion.registry_address);
+        const auto runner = co_await dcn::rpc::verifyPtRunner(client, ingestion.runner_address);
         if(!runner) co_return std::unexpected(runner.error());
     }
 
@@ -592,7 +649,7 @@ int main(int argc, char* argv[])
     arg_parser.addArg<std::string>("--chain-registry", "PT registry proxy address, when no deployment manifest is used");
     arg_parser.addArg<std::string>("--chain-runner", "PT runner proxy address, when no deployment manifest is used");
     arg_parser.addArg<unsigned int>("--chain-start-block", "First block for event sync when no local cursor exists; defaults to the manifest deployment block");
-    arg_parser.addArg<unsigned int>("--chain-poll-ms", "Chain poll interval in milliseconds");
+    arg_parser.addArg<unsigned int>("--chain-poll-ms", "Chain poll interval in milliseconds (default 60000)");
     arg_parser.addArg<unsigned int>("--chain-confirmations", "Finality depth used while the endpoint serves no safe/finalized block tags");
     arg_parser.addArg<unsigned int>("--chain-batch-size", "Max number of blocks fetched per eth_getLogs request");
     arg_parser.addArg<bool>("--chain-local-source", "Use in-process EVM as chain event source (no RPC)");
@@ -613,13 +670,16 @@ int main(int argc, char* argv[])
     arg_parser.addArg<unsigned int>("--events-dead-letter-sweep-ms", "Interval in milliseconds between idle-time dead-letter retry sweeps");
     arg_parser.addArg<bool>("--publish", "Enable the /publish/* routes that prepare and confirm owner-paid publications");
     arg_parser.addArg<std::filesystem::path>("--deployment-manifest", "Path to the PT deployment manifest");
-    arg_parser.addArg<bool>("--publish-bootstrap", "Deploy registry and runner with the bootstrap key when no deployment is configured");
-    arg_parser.addArg<std::filesystem::path>("--bootstrap-key-file", "File holding the bootstrap deployer private key in hex");
-    arg_parser.addArg<std::string>("--bootstrap-key-env", "Environment variable holding the bootstrap deployer private key");
-    arg_parser.addArg<unsigned int>("--bootstrap-max-gas", "Maximum gas the bootstrap deployer signs for one transaction");
-    arg_parser.addArg<unsigned int>("--bootstrap-max-fee-gwei", "Maximum total fee per gas the bootstrap deployer signs");
-    arg_parser.addArg<std::string>("--artifact-gateways", "Semicolon-separated artifact gateways: http(s) URLs or directories");
-    arg_parser.addArg<std::string>("--artifact-replicas", "Semicolon-separated durable artifact replica directories");
+    arg_parser.addArg<bool>("--publish-deploy", "Deploy a new registry and runner with the deployer key and rewrite the manifest before starting");
+    arg_parser.addArg<bool>("--publish-deploy-registry", "Deploy a new registry with the deployer key and rewrite the manifest before starting");
+    arg_parser.addArg<bool>("--publish-deploy-runner", "Deploy a new runner with the deployer key and rewrite the manifest before starting");
+    arg_parser.addArg<bool>("--publish-upgrade", "Upgrade the manifest registry and runner proxies to new implementations with the deployer key and rewrite the manifest before starting");
+    arg_parser.addArg<bool>("--publish-upgrade-registry", "Upgrade the manifest registry proxy to a new implementation with the deployer key and rewrite the manifest before starting");
+    arg_parser.addArg<bool>("--publish-upgrade-runner", "Upgrade the manifest runner proxy to a new implementation with the deployer key and rewrite the manifest before starting");
+    arg_parser.addArg<std::filesystem::path>("--deployer-key-file", "File holding the deployer private key in hex");
+    arg_parser.addArg<std::string>("--deployer-key-env", "Environment variable holding the deployer private key");
+    arg_parser.addArg<unsigned int>("--deployer-max-gas", "Maximum gas the deployer signs for one transaction");
+    arg_parser.addArg<unsigned int>("--deployer-max-fee-gwei", "Maximum total fee per gas the deployer signs");
 
     arg_parser.parse(argc, argv);
 
@@ -648,7 +708,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    const auto events_chain_id = _parseUint64(arg_parser.getArg<std::string>("--events-chain-id").value_or("1"));
+    const auto events_chain_id = dcn::parse::parseUint64Decimal(arg_parser.getArg<std::string>("--events-chain-id").value_or("1"));
     if(!events_chain_id || *events_chain_id == 0)
     {
         spdlog::error("--events-chain-id must be a positive integer");
@@ -656,7 +716,7 @@ int main(int argc, char* argv[])
     }
     cfg.events_chain_id = *events_chain_id;
 
-    cfg.chain_ingestion.poll_interval_ms = arg_parser.getArg<unsigned int>("--chain-poll-ms").value_or(5000);
+    cfg.chain_ingestion.poll_interval_ms = arg_parser.getArg<unsigned int>("--chain-poll-ms").value_or(60000);
     cfg.chain_ingestion.confirmations = arg_parser.getArg<unsigned int>("--chain-confirmations").value_or(12);
     cfg.chain_ingestion.block_batch_size = arg_parser.getArg<unsigned int>("--chain-batch-size").value_or(500);
     if(const auto start_block_arg = arg_parser.getArg<unsigned int>("--chain-start-block"))
@@ -694,13 +754,13 @@ int main(int argc, char* argv[])
     {
         const auto value = arg_parser.getArg<std::string>(flag);
         if(!value) continue;
-        const auto address = _parseAddress(*value);
+        const auto address = evmc::from_hex<dcn::chain::Address>(*value);
         if(!address)
         {
             spdlog::error("Invalid {} address", flag);
             return 1;
         }
-        *target = *address;
+        *target = dcn::chain::addressToHex(*address);
     }
 
     cfg.execute.max_gas = arg_parser.getArg<unsigned int>("--execute-max-gas").value_or(100'000'000);
@@ -716,12 +776,23 @@ int main(int argc, char* argv[])
     cfg.publish.enabled = arg_parser.getArg<bool>("--publish").value_or(false);
     cfg.publish.manifest_path = arg_parser.getArg<std::filesystem::path>("--deployment-manifest").value_or(
         cfg.storage_path / "deployment.json");
-    cfg.publish.bootstrap = arg_parser.getArg<bool>("--publish-bootstrap").value_or(false);
-    cfg.publish.bootstrap_key_file = arg_parser.getArg<std::filesystem::path>("--bootstrap-key-file").value_or("");
-    cfg.publish.bootstrap_key_env = arg_parser.getArg<std::string>("--bootstrap-key-env").value_or("DCN_BOOTSTRAP_KEY");
-    cfg.publish.bootstrap_max_gas = arg_parser.getArg<unsigned int>("--bootstrap-max-gas").value_or(12'000'000);
-    cfg.publish.bootstrap_max_fee_per_gas_wei =
-        static_cast<std::uint64_t>(arg_parser.getArg<unsigned int>("--bootstrap-max-fee-gwei").value_or(200))
+    const bool deploy_all = arg_parser.getArg<bool>("--publish-deploy").value_or(false);
+    const bool upgrade_all = arg_parser.getArg<bool>("--publish-upgrade").value_or(false);
+    cfg.publish.deploy_registry = deploy_all || arg_parser.getArg<bool>("--publish-deploy-registry").value_or(false);
+    cfg.publish.deploy_runner = deploy_all || arg_parser.getArg<bool>("--publish-deploy-runner").value_or(false);
+    cfg.publish.upgrade_registry = upgrade_all || arg_parser.getArg<bool>("--publish-upgrade-registry").value_or(false);
+    cfg.publish.upgrade_runner = upgrade_all || arg_parser.getArg<bool>("--publish-upgrade-runner").value_or(false);
+    if((cfg.publish.deploy_registry && cfg.publish.upgrade_registry)
+       || (cfg.publish.deploy_runner && cfg.publish.upgrade_runner))
+    {
+        spdlog::error("A contract cannot be both deployed and upgraded in one run");
+        return 1;
+    }
+    cfg.publish.deployer_key_file = arg_parser.getArg<std::filesystem::path>("--deployer-key-file").value_or("");
+    cfg.publish.deployer_key_env = arg_parser.getArg<std::string>("--deployer-key-env").value_or("DCN_DEPLOYER_KEY");
+    cfg.publish.deployer_max_gas = arg_parser.getArg<unsigned int>("--deployer-max-gas").value_or(12'000'000);
+    cfg.publish.deployer_max_fee_per_gas_wei =
+        static_cast<std::uint64_t>(arg_parser.getArg<unsigned int>("--deployer-max-fee-gwei").value_or(200))
         * 1'000'000'000ULL;
 
     if(!has_chain_rpc)
@@ -730,7 +801,7 @@ int main(int argc, char* argv[])
             std::pair{"--chain-registry", !cfg.chain_ingestion.registry_address.empty()},
             std::pair{"--chain-runner", !cfg.chain_ingestion.runner_address.empty()},
             std::pair{"--publish", cfg.publish.enabled},
-            std::pair{"--publish-bootstrap", cfg.publish.bootstrap}})
+            std::pair{"Deploying or upgrading PT contracts", cfg.publish.hasDeploymentAction()}})
         {
             if(given)
             {
@@ -764,18 +835,6 @@ int main(int argc, char* argv[])
     cfg.events_outbox_retention_days = arg_parser.getArg<unsigned int>("--events-outbox-retention-days").value_or(7);
     cfg.events_projector_retry_attempts = arg_parser.getArg<unsigned int>("--events-projector-retry-attempts").value_or(5);
     cfg.events_dead_letter_sweep_ms = arg_parser.getArg<unsigned int>("--events-dead-letter-sweep-ms").value_or(60'000);
-    cfg.artifact_gateways = _splitList(arg_parser.getArg<std::string>("--artifact-gateways").value_or(""));
-    for(const std::string & replica : _splitList(arg_parser.getArg<std::string>("--artifact-replicas").value_or("")))
-    {
-        cfg.artifact_replicas.emplace_back(replica);
-    }
-    if(cfg.publish.enabled && cfg.artifact_replicas.empty())
-    {
-        // A publication whose artifact is not durably stored is indexable but not
-        // reconstructable, so preparing one is refused.
-        spdlog::error("--publish requires --artifact-replicas");
-        return 1;
-    }
 
     spdlog::info("Current working path: {}", std::filesystem::current_path().string());
 
@@ -802,34 +861,9 @@ int main(int argc, char* argv[])
 
     dcn::registry::Registry registry(io_context, cfg.registry_db.string());
 
-    // A gateway given as a URL is fetched over HTTP(S); anything else is a directory.
-    std::vector<std::filesystem::path> gateway_dirs;
-    std::vector<std::shared_ptr<dcn::rpc::IHttpClient>> gateway_clients;
-    for(const std::string & gateway : cfg.artifact_gateways)
-    {
-        if(gateway.find("://") == std::string::npos)
-        {
-            gateway_dirs.emplace_back(gateway);
-            continue;
-        }
-        auto endpoint = dcn::rpc::parseEndpoint(gateway);
-        if(!endpoint)
-        {
-            spdlog::error("Invalid artifact gateway URL: only http:// and https:// are supported");
-            return 1;
-        }
-        gateway_clients.push_back(dcn::rpc::makeHttpClient(io_context, std::move(*endpoint)));
-    }
-
-    const dcn::pt::ArtifactStore artifact_store(
-        cfg.storage_path / "artifacts" / "cache",
-        std::move(gateway_dirs),
-        cfg.artifact_replicas);
-    dcn::registry::ArtifactRuntime artifact_runtime(io_context, registry, artifact_store, std::move(gateway_clients));
+    dcn::evm::EVM evm(io_context, EVMC_SHANGHAI, solc_path, pt_path);
 
     dcn::auth::AuthManager auth_manager(io_context);
-
-    dcn::evm::EVM evm(io_context, EVMC_SHANGHAI, solc_path, pt_path);
 
     dcn::server::Server server(io_context, {asio::ip::tcp::v4(), asio::ip::port_type(cfg.port)});
 
@@ -857,12 +891,30 @@ int main(int argc, char* argv[])
         auto eth_client = std::make_shared<dcn::rpc::EthClient>(
             std::make_shared<dcn::rpc::JsonRpcClient>(std::move(transport)));
 
+        // Requested deployment actions run first, then the server resolves and verifies
+        // the deployment the manifest now describes and starts as usual.
         std::optional<std::expected<ChainDeployment, std::string>> resolved;
         asio::co_spawn(
             io_context,
             [&]() -> asio::awaitable<void>
             {
-                resolved = co_await _resolveChainDeployment(*eth_client, evm, cfg, pt_path);
+                if(cfg.publish.hasDeploymentAction())
+                {
+                    const auto applied = co_await _runDeploymentActions(*eth_client, evm, cfg, pt_path);
+                    if(!applied)
+                    {
+                        resolved = std::unexpected(std::format(
+                            "a deployment action failed; check the chain and the manifest before retrying: {}",
+                            applied.error()));
+                        co_return;
+                    }
+                }
+                resolved = co_await _resolveChainDeployment(*eth_client, cfg);
+                if(*resolved && !co_await registry.selectRemoteSource(
+                    chainSourceId(cfg.events_chain_id, (**resolved).registry)))
+                {
+                    resolved = std::unexpected("cannot select the deployment in the registry database");
+                }
             },
             asio::detached);
         io_context.run();
@@ -871,8 +923,10 @@ int main(int argc, char* argv[])
         if(!resolved)
         {
             // The io_context stopped before the checks finished, so nothing about the
-            // deployment has been proven.
-            spdlog::error("Deployment verification did not complete");
+            // deployment has been proven, and a deployment action may be half done.
+            spdlog::error(cfg.publish.hasDeploymentAction()
+                ? "Deployment actions and verification did not complete; check the chain before retrying"
+                : "Deployment verification did not complete");
             return 1;
         }
         if(!*resolved)
@@ -894,13 +948,10 @@ int main(int argc, char* argv[])
                 "Pass --chain-runner or use a deployment manifest.");
         }
 
-        // Source identity is chain plus registry, never the provider URL: moving to
-        // another provider for the same deployment must resume the same cursor rather
-        // than start a second logical chain.
         event_sources.push_back(std::make_shared<dcn::events::RpcLogSource>(
             eth_client,
             dcn::events::RpcLogSourceConfig{
-                .source_id = std::format("eip155:{}:{}", cfg.events_chain_id, deployment.registry),
+                .source_id = chainSourceId(cfg.events_chain_id, deployment.registry),
                 .chain_namespace = std::format("eip155:{}", cfg.events_chain_id),
                 .chain_id = cfg.events_chain_id,
                 .registry_address = deployment.registry,
@@ -913,9 +964,15 @@ int main(int argc, char* argv[])
             }));
         cfg.chain_ingestion.enabled = true;
 
+        const auto registry_address = evmc::from_hex<dcn::chain::Address>(deployment.registry);
+        if(!registry_address)
+        {
+            spdlog::error("The deployment registry address '{}' is invalid", deployment.registry);
+            return 1;
+        }
         chain_access = dcn::ChainAccess{
             .client = eth_client,
-            .registry = deployment.registry,
+            .registry = *registry_address,
             .runner = deployment.runner,
             .execute_max_gas = cfg.execute.max_gas,
             .execute_block_tag = cfg.execute.block_tag};
@@ -929,8 +986,24 @@ int main(int argc, char* argv[])
                     .registry = deployment.registry,
                     .runner = deployment.runner,
                     .protocol_id = dcn::rpc::ptProtocolId(),
-                    .protocol_version = dcn::rpc::PT_PROTOCOL_VERSION}),
-                artifact_store);
+                    .protocol_version = dcn::rpc::PT_PROTOCOL_VERSION}));
+        }
+    }
+    else
+    {
+        // Without a chain deployment only local entities are served; deployments retained
+        // in the registry database stay hidden.
+        bool selected = false;
+        asio::co_spawn(
+            io_context,
+            [&]() -> asio::awaitable<void> { selected = co_await registry.selectRemoteSource(""); },
+            asio::detached);
+        io_context.run();
+        io_context.restart();
+        if(!selected)
+        {
+            spdlog::error("Cannot select local entities in the registry database");
+            return 1;
         }
     }
 
@@ -1108,7 +1181,6 @@ int main(int argc, char* argv[])
         chain_access ? chain_access->client : nullptr));
 
     events_runtime.start();
-    artifact_runtime.start();
     feed_runtime.start();
     spdlog::info(
         "Events runtime started (ingestion_enabled={}, local_source={}, chain_id={}, hot_db='{}')",
@@ -1167,7 +1239,6 @@ int main(int argc, char* argv[])
          &registry,
          &events_runtime,
          &feed_runtime,
-         &artifact_runtime,
          wal_enabled]() -> asio::awaitable<void>
         {
             return _runGracefulShutdown(
@@ -1177,14 +1248,13 @@ int main(int argc, char* argv[])
                 registry,
                 wal_enabled,
                 events_runtime,
-                feed_runtime,
-                artifact_runtime);
+                feed_runtime);
         },
 
         // immediate shutdown
-        [&wal_sync_worker, &events_runtime, &feed_runtime, &artifact_runtime]()
+        [&wal_sync_worker, &events_runtime, &feed_runtime]()
         {
-            _runImmediateShutdown(wal_sync_worker, events_runtime, feed_runtime, artifact_runtime);
+            _runImmediateShutdown(wal_sync_worker, events_runtime, feed_runtime);
         }
     );
     

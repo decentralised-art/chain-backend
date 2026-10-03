@@ -55,12 +55,6 @@ namespace dcn::publish
             return zero;
         }
 
-        bool _isTransactionHash(const std::string & value)
-        {
-            const auto bytes = evmc::from_hex(value);
-            return value.starts_with("0x") && bytes && bytes->size() == 32;
-        }
-
         // A dry run that fails: a deterministic revert, or a provider fault.
         PublishError _estimateFailure(const rpc::RpcError & error, std::string tx_hash = {})
         {
@@ -74,16 +68,6 @@ namespace dcn::publish
                     .tx_hash = std::move(tx_hash)};
             }
             return _upstream(std::format("eth_estimateGas failed: {}", error.message), std::move(tx_hash));
-        }
-
-        bool _mentions(const std::string & text, const std::string_view needle)
-        {
-            std::string lowered = text;
-            std::ranges::transform(lowered, lowered.begin(), [](const unsigned char c)
-            {
-                return static_cast<char>(std::tolower(c));
-            });
-            return lowered.find(needle) != std::string::npos;
         }
     }
 
@@ -102,11 +86,9 @@ namespace dcn::publish
     Publisher::Publisher(
         std::shared_ptr<rpc::EthClient> client,
         DeploymentManifest manifest,
-        const pt::ArtifactStore & artifacts,
         PublisherConfig config)
         : _client(std::move(client))
         , _manifest(std::move(manifest))
-        , _artifacts(artifacts)
         , _config(config)
     {
         if(const auto parsed = evmc::from_hex<chain::Address>(_manifest.registry))
@@ -211,7 +193,7 @@ namespace dcn::publish
             }
 
             // A connector binds its dependencies by name on the target registry, so each one
-            // must already be the exact artifact the connector was compiled against.
+            // must already be registered there with the content the connector was built against.
             PublishError conflict{
                 .kind = PublishError::Kind::CONFLICT,
                 .message = "Dependencies are missing from, or differ on, the target registry"};
@@ -255,18 +237,7 @@ namespace dcn::publish
         publication.nonce = *nonce;
         publication.deadline = _unixNowSeconds() + _config.publication_ttl_s;
 
-        // Durable availability is proven before the owner can broadcast: an event whose
-        // artifact cannot be fetched is indexable but not reconstructable.
         const std::string content_hash = chain::bytes32ToHex(publication.content_hash);
-        const auto uploaded = _artifacts.publish(request.artifact_bytes);
-        if(!uploaded)
-        {
-            co_return std::unexpected(_upstream(std::format("durable artifact upload failed: {}", uploaded.error())));
-        }
-        if(*uploaded != content_hash)
-        {
-            co_return std::unexpected(_invalid("stored artifact does not match its hash"));
-        }
 
         std::vector<std::uint8_t> calldata;
         switch(publication.kind)
@@ -370,8 +341,7 @@ namespace dcn::publish
             co_return std::unexpected(_invalid("a publication transaction transfers no value", tx_hash));
         }
 
-        // The publication must be the one named in the request, whose artifact prepare
-        // stored durably: an event whose artifact cannot be fetched is not reconstructable.
+        // The publication must be the one named in the request.
         const auto publication = pt::decodePublishCall(transaction.data);
         if(!publication)
         {
@@ -405,12 +375,11 @@ namespace dcn::publish
         }
 
         const rpc::RpcError & error = sent.error();
-        if(_mentions(error.message, "already known") || _mentions(error.message, "known transaction")
-           || _mentions(error.message, "already imported"))
+        if(rpc::isAlreadyKnown(error))
         {
             co_return tx_hash;
         }
-        if(_mentions(error.message, "nonce too low"))
+        if(rpc::mentions(error, "nonce too low"))
         {
             // Also what a retry reports once the first attempt was mined.
             const auto receipt = co_await _client->transactionReceipt(tx_hash);
@@ -423,14 +392,14 @@ namespace dcn::publish
                 .message = "the account nonce is already used; prepare the publication again",
                 .tx_hash = tx_hash});
         }
-        if(_mentions(error.message, "replacement transaction underpriced"))
+        if(rpc::mentions(error, "replacement transaction underpriced"))
         {
             co_return std::unexpected(PublishError{
                 .kind = PublishError::Kind::CONFLICT,
                 .message = "another transaction with this account nonce is pending; prepare the publication again",
                 .tx_hash = tx_hash});
         }
-        if(_mentions(error.message, "insufficient funds"))
+        if(rpc::mentions(error, "insufficient funds"))
         {
             co_return std::unexpected(_invalid("the owner's account cannot pay for this transaction", tx_hash));
         }
@@ -497,7 +466,7 @@ namespace dcn::publish
         std::string tx_hash) const
     {
         tx_hash = chain::normalizeHex(std::move(tx_hash));
-        if(!_isTransactionHash(tx_hash))
+        if(!chain::isBytes32Hex(tx_hash))
         {
             co_return std::unexpected(_invalid("'tx_hash' is not a transaction hash"));
         }

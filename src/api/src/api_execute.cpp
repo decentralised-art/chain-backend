@@ -11,7 +11,7 @@ namespace dcn
         constexpr std::uint32_t MAX_PARTICLES_COUNT = 65536;
         constexpr int MAX_DYNAMIC_RUNNING_INSTANCES = 4096;
 
-        // Runner.gen's revert reason for a connector its registry does not hold.
+        // Runner.gen's revert reason for a connector the given registry does not hold.
         constexpr std::string_view RUNNER_UNKNOWN_CONNECTOR = "cannot find connector";
 
         http::Response makeResponse()
@@ -33,9 +33,10 @@ namespace dcn
             return response;
         }
 
-        // Calldata for Runner.gen(string,uint32,(uint32,uint32,uint32)[]), with the dynamic
-        // running instances sorted by position as the runner requires.
-        std::vector<std::uint8_t> encodeGenCall(const ExecuteRequest & request)
+        // Calldata for Runner.gen(address,string,uint32,(uint32,uint32,uint32)[]), which looks
+        // the connector up in `registry`, with the dynamic running instances sorted by
+        // position as the runner requires.
+        std::vector<std::uint8_t> encodeGenCall(const chain::Address & registry, const ExecuteRequest & request)
         {
             std::vector<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>> dynamic_ri;
             dynamic_ri.reserve(static_cast<std::size_t>(request.dynamic_ri_size()));
@@ -45,8 +46,9 @@ namespace dcn
             }
             std::ranges::sort(dynamic_ri, {}, [](const auto & entry) { return std::get<0>(entry); });
 
-            std::vector<std::uint8_t> calldata = chain::constructSelector("gen(string,uint32,(uint32,uint32,uint32)[])");
+            std::vector<std::uint8_t> calldata = chain::constructSelector("gen(address,string,uint32,(uint32,uint32,uint32)[])");
             const std::vector<std::uint8_t> arguments = pt::abi::encodeTuple({
+                pt::abi::addressComponent(registry),
                 pt::abi::stringComponent(request.connector_name()),
                 pt::abi::uintComponent(request.particles_count()),
                 pt::abi::Component{.dynamic = true, .data = evm::encodeAsArg(dynamic_ri)}});
@@ -172,7 +174,7 @@ namespace dcn
         // so a connector counts as soon as it is registered at that block.
         const auto output = co_await chain->client->callAtBlock(
             chain->runner,
-            chain::bytesToHex(encodeGenCall(*begun)),
+            chain::bytesToHex(encodeGenCall(chain->registry, *begun)),
             header.hash,
             chain->execute_max_gas);
         if(!output)
@@ -205,6 +207,7 @@ namespace dcn
             {"block_number", header.number},
             {"block_hash", header.hash},
             {"runner", chain->runner},
+            {"registry", chain::addressToHex(chain->registry)},
             {"particles", std::move(*particles)}});
     }
 
@@ -227,14 +230,16 @@ namespace dcn
         }
 
         // A connector known only from a chain is materialized in the local EVM, together
-        // with its dependencies, from their verified artifacts.
+        // with its dependencies, from its projected registry state.
         const bool chain_only = !co_await registry.hasLocalEntity(pt::EntityKind::CONNECTOR, connector_name);
-        if(!co_await loader::ensureConnectorDeployed(evm, registry, connector_name, config.storage_path))
+        std::string reason;
+        if(!co_await loader::ensureConnectorDeployed(evm, registry, connector_name, config.storage_path, &reason))
         {
             if(chain_only)
             {
-                co_return failure(http::Code::ServiceUnavailable,
-                    "Chain connector cannot be simulated yet: the verified artifacts of it or its dependencies are not available");
+                co_return failure(http::Code::ServiceUnavailable, reason.empty()
+                    ? std::string("Chain connector cannot be simulated: it or a dependency could not be deployed on the local EVM")
+                    : std::format("Chain connector cannot be simulated: {}", reason));
             }
             co_return failure(http::Code::InternalServerError, "Connector deployment invariant failed");
         }
@@ -242,7 +247,7 @@ namespace dcn
         // Runner.gen is a view that never reads msg.sender, so the runner calls itself.
         co_await evm.setGas(evm.getRunnerAddress(), evm::DEFAULT_GAS_LIMIT);
         const auto exec_result = co_await evm.execute(
-            evm.getRunnerAddress(), evm.getRunnerAddress(), encodeGenCall(execute_request), evm::DEFAULT_GAS_LIMIT, 0);
+            evm.getRunnerAddress(), evm.getRunnerAddress(), encodeGenCall(evm.getRegistryAddress(), execute_request), evm::DEFAULT_GAS_LIMIT, 0);
         if(!exec_result)
         {
             if(exec_result.error().kind == chain::ExecuteError::Kind::TRANSACTION_REVERTED)

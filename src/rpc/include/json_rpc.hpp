@@ -22,6 +22,7 @@ namespace dcn::rpc
             TRANSPORT,  // socket, TLS or connection failure, or a transient provider fault
             TIMEOUT,    // connect/request deadline elapsed
             THROTTLED,  // provider rate limit
+            QUOTA,      // provider usage quota (daily/monthly plan allowance) exhausted
             LIMIT,      // response or block range too large for the provider
             PROTOCOL,   // malformed response, id mismatch, unparsable quantity
             EXECUTION   // deterministic provider error, including EVM reverts
@@ -33,11 +34,25 @@ namespace dcn::rpc
         std::string data;
 
         // TRANSPORT/TIMEOUT/THROTTLED are worth retrying unchanged. LIMIT needs a
-        // smaller request, so the caller decides. PROTOCOL/EXECUTION are deterministic.
+        // smaller request, so the caller decides. QUOTA lasts until the provider's
+        // billing period resets. PROTOCOL/EXECUTION are deterministic.
         bool retryable() const;
+
+        static RpcError protocol(std::string message);
     };
 
     std::string toString(RpcError::Kind kind);
+
+    // Case-insensitive search of the provider's message; `needle` must be lowercase.
+    bool mentions(const RpcError & error, std::string_view needle);
+
+    // The provider's text says the plan's usage allowance is used up, as opposed to a
+    // short-term rate limit.
+    bool mentionsQuotaExhausted(std::string_view provider_text);
+
+    // The provider already holds this exact signed transaction, e.g. from an attempt
+    // whose response was lost. The transaction hash is the same either way.
+    bool isAlreadyKnown(const RpcError & error);
 
     // One JSON-RPC request/response round trip. Implemented over HTTP in production and
     // by fakes in tests.

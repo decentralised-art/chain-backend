@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -40,6 +41,8 @@ namespace dcn::chain
     bool lessBytes32(const evmc::bytes32 & lhs, const evmc::bytes32 & rhs);
 
     evmc::bytes32 keccakBytes(const std::uint8_t * data, std::size_t size);
+
+    evmc::bytes32 keccakBytes(std::span<const std::uint8_t> bytes);
 
     evmc::bytes32 keccakString(std::string_view value);
 

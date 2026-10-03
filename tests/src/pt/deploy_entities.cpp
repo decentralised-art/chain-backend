@@ -567,7 +567,7 @@ TEST_F(UnitTest, PT_Deploy_Transformation_InvalidInput_CleansTemporarySoliditySo
     EXPECT_FALSE(std::filesystem::exists(source_path)) << std::format("Temporary Solidity source still exists: {}", source_path.string());
 }
 
-TEST_F(UnitTest, PT_Deploy_Transformation_RejectsRebuiltArtifactHashMismatch)
+TEST_F(UnitTest, PT_Deploy_TransformationAndCondition_StoreTheirRuntimeCodeInTheRegistry)
 {
     ASSERT_TRUE(std::filesystem::exists(solcPath()));
     ASSERT_TRUE(std::filesystem::exists(ptPath() / "contracts"));
@@ -579,23 +579,37 @@ TEST_F(UnitTest, PT_Deploy_Transformation_RejectsRebuiltArtifactHashMismatch)
     evm::EVM evm_instance(io_context, EVMC_SHANGHAI, solcPath(), ptPath());
     io_context.run();
     registry::Registry registry(io_context);
+    const std::string owner_hex = evmc::hex(makeAddressFromSuffix("pt_runtime_code_owner"));
 
-    TransformationRecord record;
-    record.mutable_transformation()->set_name("VerifiedReplay");
-    record.mutable_transformation()->set_sol_src("return x;");
-    record.set_owner(evmc::hex(makeAddressFromSuffix("pt_verified_replay_owner")));
+    TransformationRecord transformation;
+    transformation.mutable_transformation()->set_name("StoredCodeAdd");
+    transformation.mutable_transformation()->set_sol_src("return x + args[0];");
+    transformation.set_owner(owner_hex);
 
-    const auto result = runAwaitable(
-        io_context,
-        loader::deployTransformation(
-            evm_instance,
-            registry,
-            record,
-            storage_path,
-            false,
-            chain::bytes32ToHex(chain::keccakString("different artifact"))));
+    ConditionRecord condition;
+    condition.mutable_condition()->set_name("StoredCodeCheck");
+    condition.mutable_condition()->set_sol_src("return args[0] > 0;");
+    condition.set_owner(owner_hex);
 
-    ASSERT_FALSE(result);
-    EXPECT_EQ(result.error().kind, pt::PTDeployError::Kind::INVALID_INPUT);
+    const auto transformation_prepared = runAwaitable(
+        io_context, loader::prepareTransformationPublication(evm_instance, transformation, storage_path));
+    const auto condition_prepared = runAwaitable(
+        io_context, loader::prepareConditionPublication(evm_instance, condition, storage_path));
+    ASSERT_TRUE(transformation_prepared);
+    ASSERT_TRUE(condition_prepared);
+    const std::string transformation_hash = chain::bytes32ToHex(transformation_prepared->publication.runtime_code_hash);
+    const std::string condition_hash = chain::bytes32ToHex(condition_prepared->publication.runtime_code_hash);
+    EXPECT_FALSE(runAwaitable(io_context, registry.getRuntimeCode(transformation_hash)).has_value());
+
+    ASSERT_TRUE(runAwaitable(
+        io_context, loader::deployTransformation(evm_instance, registry, transformation, storage_path)));
+    ASSERT_TRUE(runAwaitable(
+        io_context, loader::deployCondition(evm_instance, registry, condition, storage_path)));
+
+    const auto transformation_code = runAwaitable(io_context, registry.getRuntimeCode(transformation_hash));
+    const auto condition_code = runAwaitable(io_context, registry.getRuntimeCode(condition_hash));
+    ASSERT_TRUE(transformation_code.has_value());
+    ASSERT_TRUE(condition_code.has_value());
+    EXPECT_EQ(*transformation_code, transformation_prepared->runtime_code);
+    EXPECT_EQ(*condition_code, condition_prepared->runtime_code);
 }
-

@@ -134,6 +134,25 @@ TEST_F(UnitTest, Condition_UseProtobuf_PreservesSolSrcForLocalStorage)
     EXPECT_EQ(parsed->sol_src(), condition.sol_src());
 }
 
+TEST_F(UnitTest, Condition_RuntimeCode_IsNullInTheResponseAndAbsentFromDefinitionsWhenUnset)
+{
+    Condition condition = makeConditionSample();
+
+    // Unset, the response carries null and a definition bound into an artifact hash is unchanged.
+    const auto plain_json = parseToJson(condition, use_json);
+    const auto plain_protobuf = parseToJson(condition, use_protobuf);
+    ASSERT_TRUE(plain_json.has_value());
+    ASSERT_TRUE(plain_protobuf.has_value());
+    ASSERT_TRUE(plain_json->contains("runtime_code"));
+    EXPECT_TRUE((*plain_json)["runtime_code"].is_null());
+    EXPECT_EQ(plain_protobuf->find("runtime_code"), std::string::npos);
+
+    condition.set_runtime_code("0x6001");
+    const auto coded = parseToJson(condition, use_json);
+    ASSERT_TRUE(coded.has_value());
+    EXPECT_EQ((*coded)["runtime_code"], "0x6001");
+}
+
 TEST_F(UnitTest, Condition_ConstructSolidityCode_UsesConstructorPattern)
 {
     Condition condition = makeConditionSample();

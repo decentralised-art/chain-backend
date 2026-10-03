@@ -39,7 +39,7 @@ namespace dcn
             co_return std::nullopt;
         }
 
-        const auto contains = co_await rpc::registryContainsEntity(*chain->client, chain->registry, kind, name);
+        const auto contains = co_await rpc::registryContainsEntity(*chain->client, chain::addressToHex(chain->registry), kind, name);
         if(!contains)
         {
             spdlog::warn("Live on-chain name check for '{}' failed: {}", name, contains.error().message);

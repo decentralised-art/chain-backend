@@ -167,7 +167,7 @@ TEST_F(UnitTest, PT_Publication_RegistersEntityAndConsumesNonce)
         fixture.owner, pt::encodePublicationNonceCall(fixture.owner));
     ASSERT_TRUE(nonce_before.has_value());
     ASSERT_GE(nonce_before->size(), 32u);
-    EXPECT_EQ(chain::readUint256(*nonce_before, 0), 0u);
+    EXPECT_EQ(chain::readUint64Word(*nonce_before), 0u);
 
     const auto published = fixture.publishTransformation("PublishedTransform", fixture.owner);
     ASSERT_TRUE(published.has_value())
@@ -177,7 +177,7 @@ TEST_F(UnitTest, PT_Publication_RegistersEntityAndConsumesNonce)
     const auto nonce_after = fixture.callRegistry(
         fixture.owner, pt::encodePublicationNonceCall(fixture.owner));
     ASSERT_TRUE(nonce_after.has_value());
-    EXPECT_EQ(chain::readUint256(*nonce_after, 0), 1u);
+    EXPECT_EQ(chain::readUint64Word(*nonce_after), 1u);
 
     const auto entity_owner = fixture.callRegistry(
         fixture.owner,
@@ -234,7 +234,7 @@ TEST_F(UnitTest, PT_Publication_ClearTransformation_IsOwnerOnly)
             "containsTransformation(string)", {pt::abi::stringComponent("ClearableTransform")}));
     ASSERT_TRUE(still_present.has_value());
     ASSERT_GE(still_present->size(), 32u);
-    EXPECT_EQ(chain::readUint256(*still_present, 0), 1u);
+    EXPECT_EQ(chain::readUint64Word(*still_present), 1u);
 
     const auto owner_clear = fixture.callRegistry(
         fixture.owner,
@@ -247,7 +247,7 @@ TEST_F(UnitTest, PT_Publication_ClearTransformation_IsOwnerOnly)
         fixture.encodeRegistryCall(
             "containsTransformation(string)", {pt::abi::stringComponent("ClearableTransform")}));
     ASSERT_TRUE(after_clear.has_value());
-    EXPECT_EQ(chain::readUint256(*after_clear, 0), 0u);
+    EXPECT_EQ(chain::readUint64Word(*after_clear), 0u);
 }
 
 // Entity ownership moves through the registry, is owner-only, and rejects the zero address.
@@ -598,7 +598,7 @@ TEST_F(UnitTest, PT_Publication_ThirdPartyCallerWithOwnerSignature_Publishes)
     const auto nonce_after = fixture.callRegistry(
         relayer, pt::encodePublicationNonceCall(entity_owner));
     ASSERT_TRUE(nonce_after.has_value());
-    EXPECT_EQ(chain::readUint256(*nonce_after, 0), 1u);
+    EXPECT_EQ(chain::readUint64Word(*nonce_after), 1u);
 }
 
 // A signature from any other key is refused, so a publication cannot be attributed to an
@@ -799,3 +799,44 @@ TEST_F(UnitTest, PT_Publication_ConnectorRegistrationMustMatchItsSignedHash)
     EXPECT_TRUE(accepted.has_value());
 }
 
+// solc rejecting a source is an input error; a compilation that cannot be set up is not.
+TEST_F(UnitTest, PT_Publication_CompileErrors_SeparateRejectedSourceFromLocalFailure)
+{
+    ASSERT_TRUE(std::filesystem::exists(solcPath()));
+    ASSERT_TRUE(std::filesystem::exists(ptPath() / "contracts"));
+
+    PublicationFixture fixture("compile_error_kinds");
+
+    const auto rejected = runAwaitable(fixture.io_context, fixture.evm_instance->compileSource(
+        "Broken.sol", "contract Broken { this is not solidity }", "Broken", fixture.storage_path / "build"));
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(rejected.error().kind, evm::CompileError::Kind::REJECTED);
+
+    const std::string valid = "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\ncontract Fine { function f() external pure returns (uint256) { return 1; } }\n";
+    const auto compiled = runAwaitable(fixture.io_context, fixture.evm_instance->compileSource(
+        "Fine.sol", valid, "Fine", fixture.storage_path / "fine"));
+    ASSERT_TRUE(compiled.has_value()) << compiled.error().message;
+    EXPECT_FALSE(compiled->runtime_code.empty());
+
+    const auto blocked = fixture.storage_path / "blocked";
+    {
+        std::ofstream blocker(blocked);
+        blocker << "not a directory";
+        ASSERT_TRUE(blocker.good());
+    }
+    const auto failed = runAwaitable(fixture.io_context, fixture.evm_instance->compileSource(
+        "Fine.sol", valid, "Fine", blocked / "build"));
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(failed.error().kind, evm::CompileError::Kind::FAILED);
+
+    // A request whose source solc rejects is refused as invalid input.
+    TransformationRecord record;
+    record.set_owner(chain::addressToHex(makeAddressFromByte(0x42)));
+    record.mutable_transformation()->set_name("BrokenAdd");
+    record.mutable_transformation()->set_sol_src("this is not solidity");
+    const auto prepared = runAwaitable(
+        fixture.io_context,
+        loader::prepareTransformationPublication(*fixture.evm_instance, record, fixture.storage_path));
+    ASSERT_FALSE(prepared.has_value());
+    EXPECT_EQ(prepared.error().kind, pt::PTDeployError::Kind::INVALID_INPUT);
+}

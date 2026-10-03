@@ -83,26 +83,41 @@ cmake -S . -B build -DCMAKE_INSTALL_PREFIX=install -DDECENTRALISED_ART_BUILD_TES
 
 ## Sepolia On chain config
 
-First start: deploy registry and runner (one time)
+First start: deploy registry and runner, then keep serving. Every start that
+passes a deploy or upgrade flag runs it again, so drop the flag afterwards.
 
 ```sh
-$env:DCN_CHAIN_RPC     = "https://eth-sepolia.g.alchemy.com/v2/<ALCHEMY_API_KEY>"
-$env:DCN_BOOTSTRAP_KEY = "0x<deployer private key>"
+$env:DCN_CHAIN_RPC    = "https://eth-sepolia.g.alchemy.com/v2/<ALCHEMY_API_KEY>"
+$env:DCN_DEPLOYER_KEY = "0x<deployer private key>"
 
 .\<INSTALL_DIRECTORY>\bin\DecentralisedArtServer.exe `
   --chain-rpc-env DCN_CHAIN_RPC `
   --events-chain-id 11155111 `
-  --publish-bootstrap `
-  --publish --artifact-replicas "<path>" `
+  --publish-deploy `
+  --publish `
   --chain-local-source `
   --chain-batch-size 10
+```
+
+Upgrade or replace contracts of the manifest deployment, then keep serving
+
+```sh
+# keep the proxy addresses, swap their implementations
+# (--publish-upgrade-registry / --publish-upgrade-runner for just one)
+.\<INSTALL_DIRECTORY>\bin\DecentralisedArtServer.exe --chain-rpc-env DCN_CHAIN_RPC --events-chain-id 11155111 `
+  --publish-upgrade --publish
+
+# or deploy a separate runner proxy; the manifest points at it from now on
+# (--publish-deploy-registry does the same for the registry and keeps the runner)
+.\<INSTALL_DIRECTORY>\bin\DecentralisedArtServer.exe --chain-rpc-env DCN_CHAIN_RPC --events-chain-id 11155111 `
+  --publish-deploy-runner --publish
 ```
 
 Next start
 
 ```sh
  .\<INSTALL_DIRECTORY>\bin\DecentralisedArtServer.exe --chain-rpc-env DCN_CHAIN_RPC --events-chain-id 11155111 `
->   --publish --artifact-replicas "<path>" --chain-local-source --chain-batch-size 10
+>   --publish --chain-local-source --chain-batch-size 10
 ```
 
 ---

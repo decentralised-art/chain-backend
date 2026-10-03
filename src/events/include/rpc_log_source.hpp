@@ -38,6 +38,11 @@ namespace dcn::events
         // Used only while the endpoint does not serve the safe/finalized block tags.
         unsigned int confirmations = 12;
 
+        // How long the safe/finalized block tags are reused before they are read again.
+        // They move once per epoch (6.4 minutes on Ethereum), and a stale value only
+        // delays finality, never overstates it.
+        std::chrono::milliseconds finality_refresh_interval{300'000};
+
         // Code hash the registry implementation must have after a proxy upgrade. Empty
         // accepts any implementation that reports the supported protocol version.
         std::string expected_implementation_code_hash;
@@ -98,7 +103,7 @@ namespace dcn::events
 
             asio::awaitable<std::optional<Heights>> _readHeights();
             // nullopt when the anchor block could not be read.
-            asio::awaitable<std::optional<bool>> _anchorHolds(std::int64_t head);
+            asio::awaitable<std::optional<bool>> _anchorHolds(const Heights & heights);
             asio::awaitable<std::optional<std::vector<rpc::json>>> _getLogsNarrowing(
                 std::int64_t from_block,
                 std::int64_t to_block,
@@ -130,6 +135,14 @@ namespace dcn::events
 
             bool _finality_tags_supported = true;
             std::chrono::steady_clock::time_point _finality_tags_retry_at{};
+
+            struct FinalityTags
+            {
+                rpc::BlockHeader safe;
+                rpc::BlockHeader finalized;
+            };
+            std::optional<FinalityTags> _finality_tags;
+            std::chrono::steady_clock::time_point _finality_tags_read_at{};
 
             bool _paused = false;
             RpcLogSourceMetrics _metrics;

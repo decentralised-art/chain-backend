@@ -1,10 +1,14 @@
+#include <algorithm>
+#include <atomic>
 #include <limits>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include <asio/experimental/parallel_group.hpp>
 #include <spdlog/spdlog.h>
 
 #include "registry_projector.hpp"
@@ -23,6 +27,67 @@ namespace dcn::registry
 {
     namespace
     {
+        // Entities whose chain code one projection batch reads at once.
+        constexpr std::size_t CHAIN_CODE_FETCH_CONCURRENCY = 8;
+
+        // The row's topics in order, up to the first absent one.
+        std::vector<std::string> rowTopics(const events::ChangeRecord & row)
+        {
+            std::vector<std::string> topics;
+            for(const auto & topic : row.topics)
+            {
+                if(!topic.has_value()) break;
+                topics.push_back(*topic);
+            }
+            return topics;
+        }
+
+        // The chain code the Added event in `row` needs: runtime code for a transformation
+        // or condition, and the creation code of its publication for every kind. nullopt for
+        // any other row or an undecodable one.
+        std::optional<RegistryProjector::ChainCodeFetch> chainCodeFetchFor(const events::ChangeRecord & row)
+        {
+            const auto registry = evmc::from_hex<chain::Address>(row.registry_address);
+            if(!registry) return std::nullopt;
+            RegistryProjector::ChainCodeFetch fetch{
+                .source_id = row.source_id,
+                .registry = *registry,
+                .block_hash = row.block_hash,
+                .tx_hash = row.tx_hash,
+                .creation_code = true};
+
+            // The row's runtime code hash is the one the entity's registry version records.
+            const auto fill = [&](const chain::Address & entity, const bool runtime_code)
+            {
+                fetch.entity = entity;
+                if(runtime_code && row.runtime_code_hash) fetch.runtime_code_hash = *row.runtime_code_hash;
+            };
+
+            const std::vector<std::string> topics = rowTopics(row);
+            if(row.event_type == events::TRANSFORMATION_ADDED_TYPE)
+            {
+                const auto event = pt::decodeTransformationAddedEvent(row.data_hex, topics);
+                if(!event) return std::nullopt;
+                fill(event->transformation_address, true);
+                return fetch;
+            }
+            if(row.event_type == events::CONDITION_ADDED_TYPE)
+            {
+                const auto event = pt::decodeConditionAddedEvent(row.data_hex, topics);
+                if(!event) return std::nullopt;
+                fill(event->condition_address, true);
+                return fetch;
+            }
+            if(row.event_type == events::CONNECTOR_ADDED_TYPE)
+            {
+                const auto event = pt::decodeConnectorAddedEvent(row.data_hex, topics);
+                if(!event) return std::nullopt;
+                fill(event->connector_address, false);
+                return fetch;
+            }
+            return std::nullopt;
+        }
+
         std::string encodeCall(const std::string & signature, const std::vector<pt::abi::Component> & arguments)
         {
             std::vector<std::uint8_t> call = chain::constructSelector(signature);
@@ -46,7 +111,22 @@ namespace dcn::registry
             std::string content_hash;
             std::string metadata_hash;
             std::string runtime_code_hash;
+            std::vector<std::uint8_t> runtime_code;
         };
+
+        // The entity's runtime bytecode at the block with `block_hash`; nullopt when it cannot
+        // be read or is empty.
+        asio::awaitable<std::optional<std::vector<std::uint8_t>>> readRuntimeCode(
+            const rpc::EthClient & client,
+            const std::string & address_hex,
+            const std::string & block_hash)
+        {
+            const auto code_hex = co_await client.getCodeAtBlock(address_hex, block_hash);
+            if(!code_hex) co_return std::nullopt;
+            const auto code = evmc::from_hex(*code_hex);
+            if(!code || code->empty()) co_return std::nullopt;
+            co_return std::vector<std::uint8_t>(code->begin(), code->end());
+        }
 
         // A transformation or condition as the PT registry holds it at `block_hash`: the
         // fields its Added event carries. The runtime code hash is the entity's code hash,
@@ -95,13 +175,13 @@ namespace dcn::registry
 
             const std::string args_call = encodeCall("getArgsCount()", std::vector<pt::abi::Component>{});
             const auto args_word = co_await client.callAtBlock(*entity_hex, args_call, block_hash);
-            const auto code_hash = co_await rpc::readCodeHash(client, *entity_hex);
+            auto runtime_code = co_await readRuntimeCode(client, *entity_hex, block_hash);
             std::optional<std::uint64_t> args_count;
             if(args_word)
             {
                 if(const auto parsed = rpc::uint64FromWord(*args_word, "args count")) args_count = *parsed;
             }
-            if(!args_count || *args_count > std::numeric_limits<std::uint32_t>::max() || !code_hash || !*code_hash)
+            if(!args_count || *args_count > std::numeric_limits<std::uint32_t>::max() || !runtime_code)
             {
                 spdlog::error("[RegistryProjector] cannot read {} '{}' at {}",
                     pt::entityKindName(kind), name, *entity_hex);
@@ -114,7 +194,8 @@ namespace dcn::registry
                 .args_count = static_cast<std::uint32_t>(*args_count),
                 .content_hash = *content_hash,
                 .metadata_hash = *metadata_hash,
-                .runtime_code_hash = **code_hash};
+                .runtime_code_hash = chain::bytes32ToHex(chain::keccakBytes(runtime_code->data(), runtime_code->size())),
+                .runtime_code = std::move(*runtime_code)};
             co_return state;
         }
     }
@@ -145,6 +226,8 @@ namespace dcn::registry
         // Serialize the hot-store read on the write strand, as FeedProjector does.
         co_await async::ensureOnStrand(_write_strand);
         const auto rows = _store.readChangesSince(_cursor, limit);
+        co_await _prefetchChainCode(rows);
+        co_await async::ensureOnStrand(_write_strand);
         std::size_t done = 0;
         std::int64_t last_advanced_seq = _cursor;
 
@@ -254,6 +337,7 @@ namespace dcn::registry
 
         co_await async::ensureOnStrand(_write_strand);
         const auto rows = _store.readDeadLetters(events::REGISTRY_DEAD_LETTER_BIT, limit);
+        co_await _prefetchChainCode(rows);
 
         std::size_t resolved = 0;
         for(const auto & row : rows)
@@ -285,6 +369,7 @@ namespace dcn::registry
     asio::awaitable<bool> RegistryProjector::_backfillDependencies(
         const EntitySource & source,
         const std::string & block_hash,
+        const std::int64_t block_number,
         const Connector & connector)
     {
         if(!_chain) co_return true;
@@ -306,13 +391,15 @@ namespace dcn::registry
         }
 
         // ponytail: composite and binding connectors are not back-filled; their definition
-        // lives only in their event or artifact, not in readable registry state.
+        // lives only in their event, not in readable registry state.
         for(const auto & [kind, name] : dependencies)
         {
             if(co_await _registry.hasRemoteEntity(kind, name)) continue;
 
             const auto state = co_await readChainEntity(*_chain, source.registry_address, block_hash, kind, name);
             if(!state) co_return false;
+            if(!co_await _registry.putRuntimeCode(state->runtime_code_hash, state->runtime_code)) co_return false;
+            if(!co_await _storeBackfilledCreationCode(source, kind, name, state->address, block_number)) co_return false;
 
             // Read from registry state rather than an event: the origin is the block it was
             // read at, with no log index.
@@ -348,18 +435,210 @@ namespace dcn::registry
         co_return true;
     }
 
+    void RegistryProjector::ChainCodeMisses::merge(ChainCodeMisses other)
+    {
+        runtime_code.merge(other.runtime_code);
+        creation_code.merge(other.creation_code);
+        no_creation_code.merge(other.no_creation_code);
+    }
+
+    asio::awaitable<bool> RegistryProjector::_storeBackfilledCreationCode(
+        const EntitySource & source,
+        const EntityKind kind,
+        const std::string & name,
+        const chain::Address & entity,
+        const std::int64_t latest_block)
+    {
+        if(co_await _registry.hasChainCreationCode(source.source_id, entity)) co_return true;
+
+        // A transient provider failure is retried with the connector's row; any other answer
+        // is final and leaves the entity without creation code.
+        const auto unrecoverable = [&](const std::string_view reason)
+        {
+            spdlog::warn("[RegistryProjector] the creation code of back-filled {} '{}' cannot be recovered ({}); "
+                "it is kept without it and cannot be simulated", pt::entityKindName(kind), name, reason);
+            return true;
+        };
+        const auto failed = [&](const rpc::RpcError & error)
+        {
+            if(!error.retryable() && error.kind != rpc::RpcError::Kind::QUOTA) return unrecoverable(error.message);
+            spdlog::error("[RegistryProjector] cannot recover the creation code of back-filled {} '{}': {}",
+                pt::entityKindName(kind), name, error.message);
+            return false;
+        };
+
+        const auto registry = evmc::from_hex<chain::Address>(source.registry_address);
+        if(!registry) co_return unrecoverable("the registry address is malformed");
+        const auto location = co_await rpc::findEntityPublication(
+            *_chain, source.registry_address, kind, name, entity, latest_block);
+        if(!location) co_return failed(location.error());
+        if(!*location) co_return unrecoverable("no matching publication event");
+
+        auto codes = co_await rpc::readPublishedCreationCodes(*_chain, (**location).tx_hash, (**location).block_hash, *registry);
+        if(!codes) co_return failed(codes.error());
+        const auto code = codes->find(entity);
+        if(code == codes->end()) co_return unrecoverable("its transaction carries no readable publish call");
+
+        if(!co_await _registry.putChainCreationCode(source.source_id, entity, std::move(code->second)))
+        {
+            spdlog::error("[RegistryProjector] cannot store the creation code of back-filled {} '{}'",
+                pt::entityKindName(kind), name);
+            co_return false;
+        }
+        co_return true;
+    }
+
+    asio::awaitable<RegistryProjector::ChainCodeMisses> RegistryProjector::_readChainCode(const std::vector<ChainCodeFetch> & fetches)
+    {
+        ChainCodeMisses misses;
+        for(const auto & fetch : fetches)
+        {
+            if(fetch.runtime_code_hash.empty()) continue;
+            const std::string entity_hex = chain::addressToHex(fetch.entity);
+            auto code = co_await readRuntimeCode(*_chain, entity_hex, fetch.block_hash);
+            if(!code || !co_await _registry.putRuntimeCode(fetch.runtime_code_hash, std::move(*code)))
+            {
+                spdlog::error("[RegistryProjector] cannot read runtime code of {}", entity_hex);
+                misses.runtime_code.insert(fetch.runtime_code_hash);
+            }
+        }
+
+        const auto first = std::ranges::find_if(fetches, &ChainCodeFetch::creation_code);
+        if(first == fetches.end()) co_return misses;
+        auto codes = co_await rpc::readPublishedCreationCodes(*_chain, first->tx_hash, first->block_hash, first->registry);
+        if(!codes)
+        {
+            spdlog::error("[RegistryProjector] cannot read publication transaction {}: {}",
+                first->tx_hash, codes.error().message);
+        }
+
+        for(const auto & fetch : fetches)
+        {
+            if(!fetch.creation_code) continue;
+            const std::string entity_hex = chain::addressToHex(fetch.entity);
+            if(!codes)
+            {
+                misses.creation_code.insert(entity_hex);
+                continue;
+            }
+            const auto code = codes->find(fetch.entity);
+            if(code == codes->end())
+            {
+                spdlog::warn("[RegistryProjector] transaction {} carries no readable publish call for {}; "
+                    "it cannot be simulated", fetch.tx_hash, entity_hex);
+                misses.no_creation_code.insert(entity_hex);
+            }
+            else if(!co_await _registry.putChainCreationCode(fetch.source_id, fetch.entity, std::move(code->second)))
+            {
+                misses.creation_code.insert(entity_hex);
+            }
+        }
+        co_return misses;
+    }
+
+    asio::awaitable<bool> RegistryProjector::_storeChainCode(ChainCodeFetch fetch)
+    {
+        if(!_chain) co_return true;
+        const std::string entity_hex = chain::addressToHex(fetch.entity);
+
+        if(!fetch.runtime_code_hash.empty() && co_await _registry.hasRuntimeCode(fetch.runtime_code_hash))
+        {
+            fetch.runtime_code_hash.clear();
+        }
+        if(fetch.creation_code && (_misses.no_creation_code.contains(entity_hex)
+                                   || co_await _registry.hasChainCreationCode(fetch.source_id, fetch.entity)))
+        {
+            fetch.creation_code = false;
+        }
+        if((!fetch.runtime_code_hash.empty() && _misses.runtime_code.contains(fetch.runtime_code_hash))
+           || (fetch.creation_code && _misses.creation_code.contains(entity_hex)))
+        {
+            spdlog::error("[RegistryProjector] chain code of {} could not be read in this batch", entity_hex);
+            co_return false;
+        }
+        if(fetch.runtime_code_hash.empty() && !fetch.creation_code) co_return true;
+
+        // Built before the co_await: GCC 13 ICEs on braced-init temporaries inside one.
+        const std::vector<ChainCodeFetch> single{std::move(fetch)};
+        const ChainCodeMisses misses = co_await _readChainCode(single);
+        co_return misses.runtime_code.empty() && misses.creation_code.empty();
+    }
+
+    asio::awaitable<void> RegistryProjector::_prefetchChainCode(const std::vector<events::ChangeRecord> & rows)
+    {
+        _misses = {};
+        if(!_chain) co_return;
+
+        // Fetches grouped by the transaction and registry that published them, in row order.
+        std::vector<std::vector<ChainCodeFetch>> groups;
+        std::map<std::pair<std::string, std::string>, std::size_t> group_of;
+        std::set<std::string> planned;
+        for(const auto & row : rows)
+        {
+            if(row.state != events::FINALIZED_STATE || row.source_id == events::LOCAL_SOURCE_ID) continue;
+            auto fetch = chainCodeFetchFor(row);
+            if(!fetch || !planned.insert(chain::addressToHex(fetch->entity)).second) continue;
+
+            if(!fetch->runtime_code_hash.empty() && co_await _registry.hasRuntimeCode(fetch->runtime_code_hash))
+            {
+                fetch->runtime_code_hash.clear();
+            }
+            if(co_await _registry.hasChainCreationCode(fetch->source_id, fetch->entity))
+            {
+                fetch->creation_code = false;
+            }
+            if(fetch->runtime_code_hash.empty() && !fetch->creation_code) continue;
+
+            const auto key = std::pair(chain::normalizeHex(fetch->tx_hash), chain::addressToHex(fetch->registry));
+            const auto [group, added] = group_of.try_emplace(key, groups.size());
+            if(added) groups.emplace_back();
+            groups[group->second].push_back(std::move(*fetch));
+        }
+        if(groups.empty()) co_return;
+
+        // Worker i takes groups i, i+K, i+2K...: at most K transactions are in flight and
+        // the workers share only the stop flag.
+        std::atomic<bool> stop{false};
+        const auto executor = co_await asio::this_coro::executor;
+        using Worker = decltype(asio::co_spawn(executor, _fetchChainCode({}, stop), asio::deferred));
+        std::vector<Worker> workers;
+        const std::size_t worker_count = std::min(CHAIN_CODE_FETCH_CONCURRENCY, groups.size());
+        for(std::size_t first = 0; first < worker_count; ++first)
+        {
+            std::vector<std::vector<ChainCodeFetch>> share;
+            for(std::size_t i = first; i < groups.size(); i += worker_count) share.push_back(groups[i]);
+            workers.push_back(asio::co_spawn(executor, _fetchChainCode(std::move(share), stop), asio::deferred));
+        }
+
+        auto [order, exceptions, misses] = co_await asio::experimental::make_parallel_group(std::move(workers))
+            .async_wait(asio::experimental::wait_for_all(), asio::use_awaitable);
+        (void)order;
+        for(std::size_t i = 0; i < misses.size(); ++i)
+        {
+            // A worker that failed outright leaves its rows to their own reads in order.
+            if(exceptions[i]) continue;
+            _misses.merge(std::move(misses[i]));
+        }
+    }
+
+    asio::awaitable<RegistryProjector::ChainCodeMisses> RegistryProjector::_fetchChainCode(
+        std::vector<std::vector<ChainCodeFetch>> groups,
+        std::atomic<bool> & stop)
+    {
+        ChainCodeMisses misses;
+        for(const auto & group : groups)
+        {
+            if(stop) break;
+            ChainCodeMisses read = co_await _readChainCode(group);
+            if(!read.runtime_code.empty() || !read.creation_code.empty()) stop = true;
+            misses.merge(std::move(read));
+        }
+        co_return misses;
+    }
+
     asio::awaitable<bool> RegistryProjector::_materializeOne(const events::ChangeRecord & row)
     {
-        // Collect non-null topics in order; stop at first nullopt.
-        std::vector<std::string> topics;
-        for(const auto & t : row.topics)
-        {
-            if(!t.has_value())
-            {
-                break;
-            }
-            topics.push_back(*t);
-        }
+        const std::vector<std::string> topics = rowTopics(row);
 
         // Chain versions are canonical: a remote event is written even when a local
         // version of the same name is already resolved, and the difference is recorded.
@@ -384,7 +663,7 @@ namespace dcn::registry
             return evmc::from_hex<chain::Address>(row.entity_address).value_or(decoded);
         };
 
-        // A chain version whose artifact differs from the version currently resolved for
+        // A chain version whose content differs from the version currently resolved for
         // the name. Recorded for operators; the chain version still takes precedence.
         const auto definitionConflict = [&](const EntityKind kind, const std::string & name) -> asio::awaitable<bool>
         {
@@ -447,7 +726,8 @@ namespace dcn::registry
                             chain::addressToHex(event->owner), event->args_count);
                         co_return false;
                     }
-                    co_return true; // already present and matches — idempotent
+                    // Already present with the same definition; a rebuild may have changed its code.
+                    co_return co_await _registry.updateLocalVersionHashes(EntityKind::TRANSFORMATION, event->name, source);
                 }
                 if(diverges)
                 {
@@ -457,6 +737,12 @@ namespace dcn::registry
                         event->name, row.source_id, rec.owner(), rec.transformation().args_count(),
                         chain::addressToHex(event->owner), event->args_count);
                 }
+            }
+
+            const std::optional<ChainCodeFetch> chain_code = local_source ? std::nullopt : chainCodeFetchFor(row);
+            if(chain_code && !co_await _storeChainCode(*chain_code))
+            {
+                co_return false;
             }
 
             TransformationRecord record;
@@ -496,7 +782,8 @@ namespace dcn::registry
                             chain::addressToHex(event->owner), event->args_count);
                         co_return false;
                     }
-                    co_return true;
+                    // Already present with the same definition; a rebuild may have changed its code.
+                    co_return co_await _registry.updateLocalVersionHashes(EntityKind::CONDITION, event->name, source);
                 }
                 if(diverges)
                 {
@@ -506,6 +793,12 @@ namespace dcn::registry
                         event->name, row.source_id, rec.owner(), rec.condition().args_count(),
                         chain::addressToHex(event->owner), event->args_count);
                 }
+            }
+
+            const std::optional<ChainCodeFetch> chain_code = local_source ? std::nullopt : chainCodeFetchFor(row);
+            if(chain_code && !co_await _storeChainCode(*chain_code))
+            {
+                co_return false;
             }
 
             ConditionRecord record;
@@ -543,7 +836,8 @@ namespace dcn::registry
                             event->name, rec.owner(), chain::addressToHex(event->owner));
                         co_return false;
                     }
-                    co_return true;
+                    // Already present with the same definition; a rebuild may have changed its code.
+                    co_return co_await _registry.updateLocalVersionHashes(EntityKind::CONNECTOR, event->name, source);
                 }
                 if(diverges)
                 {
@@ -565,7 +859,12 @@ namespace dcn::registry
             }
 
             ConnectorRecord record = pt::buildConnectorRecordFromEvent(*event);
-            if(!local_source && !co_await _backfillDependencies(source, row.block_hash, record.connector()))
+            const std::optional<ChainCodeFetch> chain_code = local_source ? std::nullopt : chainCodeFetchFor(row);
+            if(!local_source && !co_await _backfillDependencies(source, row.block_hash, row.block_number, record.connector()))
+            {
+                co_return false;
+            }
+            if(chain_code && !co_await _storeChainCode(*chain_code))
             {
                 co_return false;
             }

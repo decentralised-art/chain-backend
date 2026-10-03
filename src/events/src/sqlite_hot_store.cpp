@@ -9,6 +9,7 @@
 
 #include "utils.hpp"
 #include "sqlite/statement.hpp"
+#include "sqlite/column.hpp"
 #include "sqlite/exec.hpp"
 
 #include "sqlite_hot_store.hpp"
@@ -17,43 +18,6 @@ namespace dcn::events
 {
     // Bumped whenever a table definition changes; a database of another version is refused.
     constexpr int HOT_SCHEMA_VERSION = 1;
-
-    static std::optional<std::int64_t> _columnInt64Optional(sqlite3_stmt * stmt, const int index)
-    {
-        if(sqlite3_column_type(stmt, index) == SQLITE_NULL)
-        {
-            return std::nullopt;
-        }
-        return static_cast<std::int64_t>(sqlite3_column_int64(stmt, index));
-    }
-
-    static std::optional<std::string> _columnTextOptional(sqlite3_stmt * stmt, const int index)
-    {
-        const unsigned char * txt = sqlite3_column_text(stmt, index);
-        if(txt == nullptr)
-        {
-            return std::nullopt;
-        }
-        return std::string(reinterpret_cast<const char *>(txt));
-    }
-
-    static int _bindOptionalInt64(sqlite3_stmt * stmt, int index, const std::optional<std::int64_t> & value)
-    {
-        if(!value.has_value())
-        {
-            return sqlite3_bind_null(stmt, index);
-        }
-        return sqlite3_bind_int64(stmt, index, static_cast<sqlite3_int64>(*value));
-    }
-
-    static int _bindOptionalText(sqlite3_stmt * stmt, int index, const std::optional<std::string> & value)
-    {
-        if(!value.has_value())
-        {
-            return sqlite3_bind_null(stmt, index);
-        }
-        return sqlite3_bind_text(stmt, index, value->c_str(), static_cast<int>(value->size()), SQLITE_TRANSIENT);
-    }
 
     // Column list shared by readChangesSince / readDeadLetters; must stay in sync
     // with _changeRecordFromRow below.
@@ -77,22 +41,22 @@ namespace dcn::events
         rec.name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
         rec.owner = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
         rec.data_hex = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 11));
-        rec.topics[0] = _columnTextOptional(stmt, 12);
-        rec.topics[1] = _columnTextOptional(stmt, 13);
-        rec.topics[2] = _columnTextOptional(stmt, 14);
-        rec.topics[3] = _columnTextOptional(stmt, 15);
+        rec.topics[0] = storage::sqlite::columnTextOptional(stmt, 12);
+        rec.topics[1] = storage::sqlite::columnTextOptional(stmt, 13);
+        rec.topics[2] = storage::sqlite::columnTextOptional(stmt, 14);
+        rec.topics[3] = storage::sqlite::columnTextOptional(stmt, 15);
         rec.block_number = static_cast<std::int64_t>(sqlite3_column_int64(stmt, 16));
         rec.tx_index = static_cast<std::int64_t>(sqlite3_column_int64(stmt, 17));
         rec.tx_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 18));
-        rec.block_time = _columnInt64Optional(stmt, 19);
-        rec.content_hash = _columnTextOptional(stmt, 20);
-        rec.metadata_hash = _columnTextOptional(stmt, 21);
-        rec.runtime_code_hash = _columnTextOptional(stmt, 22);
-        if(const auto kind = _columnTextOptional(stmt, 23))
+        rec.block_time = storage::sqlite::columnInt64Optional(stmt, 19);
+        rec.content_hash = storage::sqlite::columnTextOptional(stmt, 20);
+        rec.metadata_hash = storage::sqlite::columnTextOptional(stmt, 21);
+        rec.runtime_code_hash = storage::sqlite::columnTextOptional(stmt, 22);
+        if(const auto kind = storage::sqlite::columnTextOptional(stmt, 23))
         {
             rec.entity_kind = pt::parseEntityKind(*kind);
         }
-        rec.old_owner = _columnTextOptional(stmt, 24);
+        rec.old_owner = storage::sqlite::columnTextOptional(stmt, 24);
         rec.entity_address = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 25));
         return rec;
     }
@@ -623,7 +587,7 @@ namespace dcn::events
                     SQLITE_TRANSIENT);
                 sqlite3_bind_int64(raw_stmt.get(), 5, static_cast<sqlite3_int64>(raw_event.block_number));
                 sqlite3_bind_int64(raw_stmt.get(), 6, static_cast<sqlite3_int64>(raw_event.tx_index));
-                _bindOptionalInt64(raw_stmt.get(), 7, raw_event.block_time);
+                storage::sqlite::bindOptionalInt64(raw_stmt.get(), 7, raw_event.block_time);
                 sqlite3_bind_text(
                     raw_stmt.get(),
                     8,
@@ -636,9 +600,9 @@ namespace dcn::events
                     topic0.c_str(),
                     static_cast<int>(topic0.size()),
                     SQLITE_TRANSIENT);
-                _bindOptionalText(raw_stmt.get(), 10, topic1);
-                _bindOptionalText(raw_stmt.get(), 11, topic2);
-                _bindOptionalText(raw_stmt.get(), 12, topic3);
+                storage::sqlite::bindOptionalText(raw_stmt.get(), 10, topic1);
+                storage::sqlite::bindOptionalText(raw_stmt.get(), 11, topic2);
+                storage::sqlite::bindOptionalText(raw_stmt.get(), 12, topic3);
                 sqlite3_bind_text(
                     raw_stmt.get(),
                     13,
@@ -654,7 +618,7 @@ namespace dcn::events
                     SQLITE_TRANSIENT);
                 sqlite3_bind_int64(raw_stmt.get(), 16, static_cast<sqlite3_int64>(raw_event.seen_at_ms));
                 sqlite3_bind_int64(raw_stmt.get(), 17, static_cast<sqlite3_int64>(now_ms));
-                _bindOptionalInt64(raw_stmt.get(), 18, removed_at);
+                storage::sqlite::bindOptionalInt64(raw_stmt.get(), 18, removed_at);
                 sqlite3_bind_text(raw_stmt.get(), 19, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
                 sqlite3_bind_text(raw_stmt.get(), 20, raw_event.chain_namespace.c_str(), static_cast<int>(raw_event.chain_namespace.size()), SQLITE_TRANSIENT);
 
@@ -793,7 +757,7 @@ namespace dcn::events
                     SQLITE_TRANSIENT);
                 sqlite3_bind_int64(normalized_stmt.get(), 5, static_cast<sqlite3_int64>(decoded->raw.block_number));
                 sqlite3_bind_int64(normalized_stmt.get(), 6, static_cast<sqlite3_int64>(decoded->raw.tx_index));
-                _bindOptionalInt64(normalized_stmt.get(), 7, decoded->raw.block_time);
+                storage::sqlite::bindOptionalInt64(normalized_stmt.get(), 7, decoded->raw.block_time);
                 sqlite3_bind_text(
                     normalized_stmt.get(),
                     8,
@@ -837,7 +801,7 @@ namespace dcn::events
                     sqlite3_bind_null(normalized_stmt.get(), 13);
                 }
 
-                _bindOptionalText(normalized_stmt.get(), 14, decoded->format_hash);
+                storage::sqlite::bindOptionalText(normalized_stmt.get(), 14, decoded->format_hash);
                 sqlite3_bind_text(
                     normalized_stmt.get(),
                     15,
@@ -850,16 +814,16 @@ namespace dcn::events
                     static_cast<sqlite3_int64>(decoded->raw.seen_at_ms));
                 sqlite3_bind_int64(normalized_stmt.get(), 17, static_cast<sqlite3_int64>(now_ms));
                 sqlite3_bind_int64(normalized_stmt.get(), 18, static_cast<sqlite3_int64>(_nextChangeSeq()));
-                _bindOptionalText(normalized_stmt.get(), 19, decoded->content_hash);
-                _bindOptionalText(normalized_stmt.get(), 20, decoded->metadata_hash);
-                _bindOptionalText(normalized_stmt.get(), 21, decoded->runtime_code_hash);
-                _bindOptionalText(
+                storage::sqlite::bindOptionalText(normalized_stmt.get(), 19, decoded->content_hash);
+                storage::sqlite::bindOptionalText(normalized_stmt.get(), 20, decoded->metadata_hash);
+                storage::sqlite::bindOptionalText(normalized_stmt.get(), 21, decoded->runtime_code_hash);
+                storage::sqlite::bindOptionalText(
                     normalized_stmt.get(),
                     22,
                     decoded->entity_kind
                         ? std::optional<std::string>(pt::entityKindName(*decoded->entity_kind))
                         : std::nullopt);
-                _bindOptionalText(normalized_stmt.get(), 23, decoded->old_owner);
+                storage::sqlite::bindOptionalText(normalized_stmt.get(), 23, decoded->old_owner);
                 sqlite3_bind_text(normalized_stmt.get(), 24, source_id.c_str(), static_cast<int>(source_id.size()), SQLITE_TRANSIENT);
                 sqlite3_bind_text(normalized_stmt.get(), 25, decoded->raw.chain_namespace.c_str(), static_cast<int>(decoded->raw.chain_namespace.size()), SQLITE_TRANSIENT);
 
@@ -1100,7 +1064,7 @@ namespace dcn::events
                 // The anchor hash belongs to the finalized height it was reported with.
                 if(effective_finalized != clamped_finalized)
                 {
-                    effective_finalized_hash = _columnTextOptional(existing_finality_stmt.get(), 3).value_or("");
+                    effective_finalized_hash = storage::sqlite::columnTextOptional(existing_finality_stmt.get(), 3).value_or("");
                 }
             }
 
@@ -1446,7 +1410,7 @@ namespace dcn::events
         }
         return FinalityCheckpoint{
             .finalized_block = static_cast<std::int64_t>(sqlite3_column_int64(stmt.get(), 0)),
-            .finalized_hash = _columnTextOptional(stmt.get(), 1).value_or("")};
+            .finalized_hash = storage::sqlite::columnTextOptional(stmt.get(), 1).value_or("")};
     }
 
     bool SQLiteHotStore::_initializeHotSchema()

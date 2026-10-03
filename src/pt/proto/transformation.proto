@@ -4,8 +4,12 @@ package dcn;
 
 message Transformation {
     string name = 1;
-    string sol_src = 2; // execution input; kept in local storage or a verified artifact, never in the registry response
+    string sol_src = 2; // execution input; kept in local storage, never in the registry response
     uint32 args_count = 3; // chain-derivable (emitted by TransformationAdded / contract getArgsCount())
+    // Response only: 0x-prefixed hex of the deployed runtime bytecode, from the registry, or
+    // null in a response while unknown; never an input. Optional so it is never printed unset: definitions bound into artifact content
+    // hashes serialize exactly as without it.
+    optional string runtime_code = 4;
 }
 
 // Internal full record (used in storage, indexing, etc.)
