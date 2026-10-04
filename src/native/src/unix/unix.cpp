@@ -92,17 +92,16 @@ namespace dcn::native {
         std::string output;
         char buffer[256];
 
-        const auto deadline = timeout
-            ? std::optional(std::chrono::steady_clock::now() + *timeout)
-            : std::nullopt;
+        const auto deadline = std::chrono::steady_clock::now()
+            + timeout.value_or(std::chrono::milliseconds::zero());
         bool killed = false;
 
         while (true)
         {
-            if (deadline && !killed)
+            if (timeout && !killed)
             {
                 const long long remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    *deadline - std::chrono::steady_clock::now()).count();
+                    deadline - std::chrono::steady_clock::now()).count();
                 pollfd descriptor{.fd = pipefd[0], .events = POLLIN, .revents = 0};
                 const int ready = remaining > 0
                     ? poll(&descriptor, 1, static_cast<int>(std::min<long long>(remaining, INT_MAX)))

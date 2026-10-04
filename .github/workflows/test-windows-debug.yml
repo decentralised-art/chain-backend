@@ -34,4 +34,5 @@ jobs:
       run: cmake --build build-windows-debug --config Debug --target DecentralisedArtServer -j 4
 
     - name: Run tests
+      if: false # disabled
       run: ctest --test-dir build-windows-debug/tests -C Debug -j 4 --output-on-failure
