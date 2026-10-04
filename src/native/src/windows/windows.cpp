@@ -104,13 +104,19 @@ namespace dcn::native{
         si.hStdError  = write_pipe; // Capture stderr too
         si.dwFlags |= STARTF_USESTDHANDLES;
 
+        // With a deadline the child runs in a job of its own, so the deadline terminates
+        // everything it starts too, including descendants holding the pipe open. It starts
+        // suspended until it is in the job, so nothing escapes it.
+        HANDLE job = timeout ? CreateJobObjectA(NULL, NULL) : NULL;
+        const DWORD creation_flags = job ? CREATE_SUSPENDED : 0;
+
         if (!CreateProcessA(
             NULL,         // No module name (use command line)
             cmd_line.data(), // Command line
             NULL,         // Process handle not inheritable
             NULL,         // Thread handle not inheritable
             TRUE,        // Set handle inheritance to FALSE
-            0,            // No creation flags
+            creation_flags,
             NULL,         // Use parent's environment block
             NULL,         // Use parent's starting directory 
             &si,          // Pointer to STARTUPINFO structure
@@ -119,27 +125,41 @@ namespace dcn::native{
         {
             CloseHandle(write_pipe);
             CloseHandle(read_pipe);
+            if (job) CloseHandle(job);
             spdlog::error("CreateProcess failed: {}", GetLastError());
             throw std::runtime_error("CreateProcess failed: " + std::to_string(GetLastError()));
         }
 
         CloseHandle(write_pipe);
 
-        // Terminates a child that outlives its deadline; reading the pipe then ends.
-        // ponytail: only the direct child is killed, which is all solc needs. A tool that
-        // starts subprocesses would keep the pipe open past the deadline; put the child in
-        // a job object if one ever does.
+        if (job && !AssignProcessToJobObject(job, pi.hProcess))
+        {
+            // Then the deadline can stop only the child itself.
+            CloseHandle(job);
+            job = NULL;
+        }
+        if (creation_flags & CREATE_SUSPENDED)
+        {
+            ResumeThread(pi.hThread);
+        }
+
+        // Terminates a run that outlives its deadline, the child or a descendant still holding
+        // the pipe; reading the pipe then ends.
         std::atomic<bool> timed_out{false};
+        const HANDLE finished = timeout ? CreateEventA(NULL, TRUE, FALSE, NULL) : NULL;
         std::thread watchdog;
         if (timeout)
         {
             const DWORD timeout_ms = static_cast<DWORD>(std::clamp<long long>(timeout->count(), 0, 0xFFFFFFFELL));
-            watchdog = std::thread([process = pi.hProcess, timeout_ms, &timed_out]()
+            watchdog = std::thread([process = pi.hProcess, finished, job, timeout_ms, &timed_out]()
             {
-                if (WaitForSingleObject(process, timeout_ms) == WAIT_TIMEOUT)
+                if (WaitForSingleObject(finished ? finished : process, timeout_ms) == WAIT_TIMEOUT)
                 {
                     timed_out = true;
-                    TerminateProcess(process, 1);
+                    if (!job || !TerminateJobObject(job, 1))
+                    {
+                        TerminateProcess(process, 1);
+                    }
                 }
             });
         }
@@ -157,9 +177,21 @@ namespace dcn::native{
 
         // Wait until child process exits
         WaitForSingleObject(pi.hProcess, INFINITE);
+        if (finished)
+        {
+            SetEvent(finished);
+        }
         if (watchdog.joinable())
         {
             watchdog.join();
+        }
+        if (finished)
+        {
+            CloseHandle(finished);
+        }
+        if (job)
+        {
+            CloseHandle(job);
         }
 
         // Read the return code

@@ -63,6 +63,11 @@ namespace dcn::native {
         if (pid == 0)
         {
             // Child process
+            if (timeout)
+            {
+                // Its own process group, so the deadline kills everything it starts.
+                setpgid(0, 0);
+            }
             close(pipefd[0]); // Close read end
             dup2(pipefd[1], STDOUT_FILENO);
             dup2(pipefd[1], STDERR_FILENO);
@@ -77,6 +82,11 @@ namespace dcn::native {
         }
 
         // Parent process
+        if (timeout)
+        {
+            // Also set here, so the group exists whichever of the two runs first.
+            setpgid(pid, pid);
+        }
         close(pipefd[1]); // Close write end
 
         std::string output;
@@ -103,8 +113,12 @@ namespace dcn::native {
                 }
                 if (ready == 0)
                 {
-                    // The child outlived its deadline: stop it and drain what it wrote.
-                    kill(pid, SIGKILL);
+                    // The child outlived its deadline: stop it and everything it started,
+                    // then drain what they wrote.
+                    if (kill(-pid, SIGKILL) != 0)
+                    {
+                        kill(pid, SIGKILL);
+                    }
                     killed = true;
                     continue;
                 }

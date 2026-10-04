@@ -472,7 +472,7 @@ namespace
     std::shared_ptr<publish::Signer> signerFromHexKey(const std::string & hex_key)
     {
         const std::filesystem::path key_path =
-            std::filesystem::temp_directory_path() / std::format("dcn_pt_key_{}.hex", hex_key.substr(2, 8));
+            std::filesystem::temp_directory_path() / std::format("dcn_pt_key_{}_{}.hex", currentTestName(), hex_key.substr(2, 8));
         std::ofstream out(key_path, std::ios::trunc);
         out << hex_key;
         out.close();

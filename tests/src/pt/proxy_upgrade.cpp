@@ -198,7 +198,7 @@ namespace
     // A second, empty registry next to the one the EVM deployed at startup.
     std::expected<chain::Address, std::string> deployEmptyRegistry(ProxyTestEnv & env)
     {
-        const std::filesystem::path out_dir = env.evm_instance.getPTPath() / "out";
+        const std::filesystem::path & out_dir = env.evm_instance.getPTOutPath();
         runAwaitable(env.io_context, env.evm_instance.setGas(env.genesis_address, evm::DEFAULT_GAS_LIMIT));
 
         const auto implementation = runAwaitable(
@@ -224,9 +224,8 @@ namespace
         return *proxy;
     }
 
-    std::filesystem::path writeRunnerV2Source()
+    std::filesystem::path writeRunnerV2Source(const std::filesystem::path & source_dir)
     {
-        const std::filesystem::path source_dir = buildPath() / "tests" / "proxy_upgrade_sources";
         std::filesystem::create_directories(source_dir);
 
         const std::filesystem::path source_path = source_dir / "RunnerV2.sol";
@@ -250,9 +249,8 @@ contract RunnerV2 is Runner {
 
     std::expected<chain::Address, std::string> deployRunnerV2(ProxyTestEnv & env)
     {
-        const auto source_path = writeRunnerV2Source();
-        const std::filesystem::path out_dir = buildPath() / "tests" / "proxy_upgrade_build";
-        std::filesystem::create_directories(out_dir);
+        const std::filesystem::path out_dir = env.evm_instance.getPTOutPath() / "runner_v2";
+        const auto source_path = writeRunnerV2Source(out_dir);
 
         const bool compile_ok = runAwaitable(
             env.io_context,

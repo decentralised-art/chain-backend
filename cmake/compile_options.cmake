@@ -22,6 +22,14 @@ if (MSVC)
 
     set(CMAKE_CONFIGURATION_TYPES "Release;Debug;RelWithDebInfo" CACHE STRING "" FORCE)
 
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" AND CMAKE_GENERATOR MATCHES "^Visual Studio")
+        add_compile_options(/MP)
+        # Share the compiler process limit across projects; defaults to the logical CPU count.
+        list(APPEND CMAKE_VS_GLOBALS
+            UseMultiToolTask=true
+            EnforceProcessCountAcrossBuilds=true)
+    endif()
+
     add_compile_options(
         /nologo # Suppress compiler startup banner
         /EHa # Enables standard C++ exception handling plus SEH (Structured Exception Handling)

@@ -94,7 +94,7 @@ namespace dcn::evm
         using EmittedLogRecord = EVMStorage::EmittedLogRecord;
 
         EVM(asio::io_context & io_context, evmc_revision rev, std::filesystem::path solc_path, std::filesystem::path pt_path);
-        ~EVM() = default;
+        ~EVM();
 
         EVM(const EVM&) = delete;
         EVM& operator=(const EVM&) = delete;
@@ -155,6 +155,10 @@ namespace dcn::evm
         const std::filesystem::path & getSolcPath() const;
         const std::filesystem::path & getPTPath() const;
 
+        // Where this instance compiled the PT contracts it deployed at startup: a directory
+        // of its own, so EVM instances sharing one PT path never touch each other's output.
+        const std::filesystem::path & getPTOutPath() const;
+
     protected:
         asio::awaitable<bool> loadPT();
 
@@ -166,6 +170,7 @@ namespace dcn::evm
 
         std::filesystem::path _solc_path;
         std::filesystem::path _pt_path;
+        std::filesystem::path _pt_out_path;
         std::string _solc_version;
 
         mutable asio::thread_pool _compile_pool{1};

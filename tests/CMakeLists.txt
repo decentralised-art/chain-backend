@@ -23,6 +23,32 @@ set(DECENTRALISED_ART_TEST_SOLC_PATH
 set(DECENTRALISED_ART_TEST_PT_PATH
     "${DECENTRALISED_ART_TEST_PT_PATH_DEFAULT}"
     CACHE PATH "Path to PT Solidity runtime directory used by unit tests")
+set(DECENTRALISED_ART_TEST_SOLC_CACHE_DIR
+    "${CMAKE_BINARY_DIR}/tests/solc_cache"
+    CACHE PATH "solc output cache for tests run through ctest; empty makes tests run the real solc for every compilation")
+
+# With a cache directory, tests compile through a caching stand-in for solc (tools/solc_cache.cpp)
+# that ctest points at the cache.
+set(SOLC_CACHE_TARGET "DecentralisedArtTestSolcCache")
+set(TEST_ENVIRONMENT_PROPERTY)
+if(DECENTRALISED_ART_TEST_SOLC_CACHE_DIR)
+    add_executable("${SOLC_CACHE_TARGET}" "tools/solc_cache.cpp")
+    target_compile_definitions("${SOLC_CACHE_TARGET}"
+        PRIVATE DECENTRALISED_ART_REAL_SOLC_PATH="${DECENTRALISED_ART_TEST_SOLC_PATH}")
+    target_link_libraries("${SOLC_CACHE_TARGET}" PRIVATE DecentralisedArtServerLib)
+    set_target_properties("${SOLC_CACHE_TARGET}" PROPERTIES CXX_STANDARD 23)
+    if(APPLE)
+        set_target_properties("${SOLC_CACHE_TARGET}" PROPERTIES BUILD_RPATH "@loader_path")
+    elseif(UNIX)
+        set_target_properties("${SOLC_CACHE_TARGET}" PROPERTIES BUILD_RPATH "$ORIGIN")
+    endif()
+
+    set(TEST_SOLC_PATH "$<TARGET_FILE:${SOLC_CACHE_TARGET}>")
+    set(TEST_ENVIRONMENT_PROPERTY
+        ENVIRONMENT "DECENTRALISED_ART_TEST_SOLC_CACHE_DIR=${DECENTRALISED_ART_TEST_SOLC_CACHE_DIR}")
+else()
+    set(TEST_SOLC_PATH "${DECENTRALISED_ART_TEST_SOLC_PATH}")
+endif()
 
 function(configure_test_target test_target)
     target_include_directories("${test_target}"
@@ -33,8 +59,14 @@ function(configure_test_target test_target)
     target_compile_definitions("${test_target}"
         PRIVATE
             DECENTRALISED_ART_TEST_BINARY_DIR="${CMAKE_BINARY_DIR}"
-            DECENTRALISED_ART_TEST_SOLC_PATH="${DECENTRALISED_ART_TEST_SOLC_PATH}"
-            DECENTRALISED_ART_TEST_PT_PATH="${DECENTRALISED_ART_TEST_PT_PATH}")
+            DECENTRALISED_ART_TEST_SOLC_PATH="${TEST_SOLC_PATH}"
+            DECENTRALISED_ART_TEST_PT_PATH="${DECENTRALISED_ART_TEST_PT_PATH}"
+            DECENTRALISED_ART_TEST_SOLC_CACHE=$<TARGET_EXISTS:${SOLC_CACHE_TARGET}>
+            DECENTRALISED_ART_TEST_REAL_SOLC_PATH="${DECENTRALISED_ART_TEST_SOLC_PATH}")
+
+    if(TARGET "${SOLC_CACHE_TARGET}")
+        add_dependencies("${test_target}" "${SOLC_CACHE_TARGET}")
+    endif()
 
     target_link_libraries("${test_target}"
         PRIVATE
@@ -119,6 +151,7 @@ add_executable("${UNIT_TEST_TARGET}"
     "src/chain_abi.cpp"
     "src/native_process.cpp"
     "src/evm_storage.cpp"
+    "src/solc_cache.cpp"
 
     # --- rpc module test files ---
     "src/rpc/http_transport_tests.cpp"
@@ -152,7 +185,7 @@ add_executable("${UNIT_TEST_TARGET}"
 
 configure_test_target("${UNIT_TEST_TARGET}")
 copy_evmone_runtime_to_target("${UNIT_TEST_TARGET}")
-gtest_discover_tests("${UNIT_TEST_TARGET}" PROPERTIES LABELS "unit")
+gtest_discover_tests("${UNIT_TEST_TARGET}" PROPERTIES LABELS "unit" ${TEST_ENVIRONMENT_PROPERTY})
 
 if(DECENTRALISED_ART_BUILD_STRESS_TESTS)
     add_executable("${STRESS_TEST_TARGET}"
@@ -162,5 +195,5 @@ if(DECENTRALISED_ART_BUILD_STRESS_TESTS)
 
     configure_test_target("${STRESS_TEST_TARGET}")
     copy_evmone_runtime_to_target("${STRESS_TEST_TARGET}")
-    gtest_discover_tests("${STRESS_TEST_TARGET}" PROPERTIES LABELS "stress")
+    gtest_discover_tests("${STRESS_TEST_TARGET}" PROPERTIES LABELS "stress" ${TEST_ENVIRONMENT_PROPERTY})
 endif()

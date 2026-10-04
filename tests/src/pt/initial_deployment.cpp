@@ -1,4 +1,5 @@
 #include "unit-tests.hpp"
+#include "fake_solc.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <ranges>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #ifndef DECENTRALISED_ART_TEST_BINARY_DIR
@@ -52,6 +54,10 @@ namespace
         std::uint64_t runner_protocol_version = 0;
         bool registry_rejected_zero_owner = false;
         bool runner_rejected_zero_owner = false;
+        std::filesystem::path pt_out_path;
+        bool pt_out_holds_compiled_pt = false;
+        bool pt_out_paths_differ = false;
+        bool pt_out_removed = false;
     };
 
     bool isZeroAddress(const chain::Address & address)
@@ -109,6 +115,17 @@ namespace
 
             snapshot.registry_address = evm.getRegistryAddress();
             snapshot.runner_address = evm.getRunnerAddress();
+
+            snapshot.pt_out_path = evm.getPTOutPath();
+            snapshot.pt_out_holds_compiled_pt =
+                std::filesystem::exists(snapshot.pt_out_path / "registry" / "RegistryBase.bin") &&
+                std::filesystem::exists(snapshot.pt_out_path / "runner" / "Runner.bin");
+            {
+                // Never run, so it compiles nothing; it only claims its own output directory.
+                asio::io_context idle_io_context;
+                const evm::EVM idle_evm(idle_io_context, EVMC_SHANGHAI, solc_path, pt_path);
+                snapshot.pt_out_paths_differ = idle_evm.getPTOutPath() != snapshot.pt_out_path;
+            }
 
             auto registry_owner_future = asio::co_spawn(io_context, evm::fetchOwner(evm, snapshot.registry_address), asio::use_future);
             auto runner_owner_future = asio::co_spawn(io_context, evm::fetchOwner(evm, snapshot.runner_address), asio::use_future);
@@ -212,6 +229,7 @@ namespace
             snapshot.error_message = "PT bootstrap failed with unknown exception";
         }
 
+        snapshot.pt_out_removed = !snapshot.pt_out_path.empty() && !std::filesystem::exists(snapshot.pt_out_path);
         return snapshot;
     }
 
@@ -272,4 +290,44 @@ TEST_F(UnitTest, PT_OwnableBase_RejectsZeroOwner)
     ASSERT_TRUE(snapshot.success) << snapshot.error_message;
     EXPECT_TRUE(snapshot.registry_rejected_zero_owner);
     EXPECT_TRUE(snapshot.runner_rejected_zero_owner);
+}
+
+TEST_F(UnitTest, PT_InitialDeployment_CompilesIntoAPrivateDirectoryRemovedWithTheEVM)
+{
+    const auto & snapshot = getPTBootstrapSnapshot();
+    ASSERT_TRUE(snapshot.success) << snapshot.error_message;
+    EXPECT_TRUE(snapshot.pt_out_holds_compiled_pt) << snapshot.pt_out_path.string();
+    EXPECT_TRUE(snapshot.pt_out_paths_differ);
+    EXPECT_TRUE(snapshot.pt_out_removed) << snapshot.pt_out_path.string();
+}
+
+TEST_F(UnitTest, PT_InitialDeployment_RemovesItsOutputOnlyAfterTheRunningCompilationEnds)
+{
+    const std::filesystem::path dir =
+        std::filesystem::path(DECENTRALISED_ART_TEST_BINARY_DIR) / "tests" / "initial_deployment" / currentTestName();
+    std::filesystem::remove_all(dir);
+    // Still compiling when the EVM goes away, and writing into its output after that.
+    const auto solc = writeFakeSolc(dir, dir / "started", std::chrono::seconds(2));
+
+    std::filesystem::path pt_out_path;
+    {
+        asio::io_context io_context;
+        evm::EVM evm_instance(io_context, EVMC_SHANGHAI, solc, ptPath());
+        pt_out_path = evm_instance.getPTOutPath();
+
+        std::thread io_thread([&io_context]() { io_context.run(); });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        while(!std::filesystem::exists(dir / "started") && std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        io_context.stop();
+        io_thread.join();
+        ASSERT_TRUE(std::filesystem::exists(dir / "started"));
+    }
+
+    EXPECT_FALSE(std::filesystem::exists(pt_out_path)) << pt_out_path.string();
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }

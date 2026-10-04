@@ -422,6 +422,7 @@ if(WIN32)
             COMMAND ${CMAKE_COMMAND} -E echo 
                     "Generate configurtaion marker ${EVMONE_CONFIG_MARKER}"
             COMMAND ${CMAKE_COMMAND} -E touch "${EVMONE_CONFIG_MARKER}"
+        BYPRODUCTS "${EVMONE_INSTALL_DIR}/lib/${EVMONE_STATIC_LIBRARY}"
         COMMENT "Configuring Evmone"
     )
 
@@ -457,6 +458,7 @@ elseif(APPLE)
         COMMAND ${CMAKE_COMMAND} -E echo 
                     "Generate configurtaion marker ${EVMONE_CONFIG_MARKER}"
         COMMAND ${CMAKE_COMMAND} -E touch "${EVMONE_CONFIG_MARKER}"
+        BYPRODUCTS "${EVMONE_INSTALL_DIR}/lib/${EVMONE_SHARED_LIBRARY}"
         COMMENT "Configuring Evmone"
     )
 
@@ -489,6 +491,7 @@ elseif(UNIX)
         COMMAND ${CMAKE_COMMAND} -E echo 
                     "Generate configurtaion marker ${EVMONE_CONFIG_MARKER}"
         COMMAND ${CMAKE_COMMAND} -E touch "${EVMONE_CONFIG_MARKER}"
+        BYPRODUCTS "${EVMONE_INSTALL_DIR}/lib/${EVMONE_SHARED_LIBRARY}"
         COMMENT "Configuring Evmone"
     )
 

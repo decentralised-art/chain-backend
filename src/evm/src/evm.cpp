@@ -5,6 +5,7 @@
 #include "evm.hpp"
 
 #include <cctype>
+#include <random>
 #include <regex>
 
 #include <nlohmann/json.hpp>
@@ -69,6 +70,13 @@ namespace dcn::evm
             {
                 return std::unexpected(std::format("cannot run '{}': {}", solc_path.string(), error.what()));
             }
+        }
+
+        std::filesystem::path _makePTOutPath()
+        {
+            std::random_device rng;
+            const std::uint64_t id = (static_cast<std::uint64_t>(rng()) << 32) | rng();
+            return std::filesystem::temp_directory_path() / std::format("dcn-pt-out-{:016x}", id);
         }
 
         std::string _readSolcVersion(const std::filesystem::path & solc_path)
@@ -293,6 +301,7 @@ namespace dcn::evm
         _strand(asio::make_strand(io_context)),
         _solc_path(std::move(solc_path)),
         _pt_path(std::move(pt_path)),
+        _pt_out_path(_makePTOutPath()),
         _storage(_vm, _rev)
     {
         if (!_vm)
@@ -335,6 +344,21 @@ namespace dcn::evm
             });
     }
     
+    EVM::~EVM()
+    {
+        // A compilation still running writes into _pt_out_path: let it finish (SOLC_TIMEOUT
+        // bounds it) and drop the queued ones before removing the directory.
+        _compile_pool.stop();
+        _compile_pool.join();
+
+        std::error_code ec;
+        std::filesystem::remove_all(_pt_out_path, ec);
+        if(ec)
+        {
+            spdlog::warn("Cannot remove PT output directory '{}': {}", _pt_out_path.string(), ec.message());
+        }
+    }
+
     chain::Address EVM::getRegistryAddress() const
     {
         return _registry_address;
@@ -353,6 +377,11 @@ namespace dcn::evm
     const std::filesystem::path & EVM::getPTPath() const 
     {
         return _pt_path;
+    }
+
+    const std::filesystem::path & EVM::getPTOutPath() const
+    {
+        return _pt_out_path;
     }
 
     asio::awaitable<bool> EVM::addAccount(chain::Address address, std::uint64_t initial_gas) noexcept
@@ -728,7 +757,7 @@ namespace dcn::evm
     { 
         const auto  contracts_dir = _pt_path    / "contracts";
         const auto node_modules = _pt_path      / "node_modules";
-        const auto  out_dir = _pt_path          / "out";
+        const auto  out_dir = _pt_out_path;
         const auto proxy_out_dir = out_dir      / "proxy";
 
         std::filesystem::create_directories(out_dir);

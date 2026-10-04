@@ -8,6 +8,14 @@ using namespace std::chrono_literals;
 
 namespace dcn::tests
 {
+    // "Suite_Name" of the running test: unique per test, so files named with it are never
+    // shared by tests running in parallel processes.
+    inline std::string currentTestName()
+    {
+        const auto * info = ::testing::UnitTest::GetInstance()->current_test_info();
+        return info ? std::string(info->test_suite_name()) + "_" + info->name() : std::string("no_test");
+    }
+
     class BaseUnitTest : public testing::Test
     {
         public:
