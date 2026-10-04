@@ -1,10 +1,10 @@
 #include "unit-tests.hpp"
 #include "events_test_harness.hpp"
+#include "crypto.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
-#include <cstring>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -23,6 +23,9 @@ namespace
     // Hardhat's first development account.
     constexpr const char * WALLET_KEY = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
     constexpr const char * WALLET_ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+
+    // A nonce is 33 bytes of lower-case hex.
+    constexpr std::size_t NONCE_LENGTH = 66;
 
     http::Request withAuthorization(const std::string & value)
     {
@@ -79,11 +82,20 @@ namespace
         return request;
     }
 
-    auth::LoginSettings siteSettings()
+    auth::LoginSettings siteSettings(std::string secret = {})
     {
         return auth::LoginSettings{
             .origins = {"https://decentralised.art", "http://localhost:54321"},
-            .chain_id = 11155111};
+            .chain_id = 11155111,
+            .secret = std::move(secret)};
+    }
+
+    json signedLogin(const publish::Signer & wallet, const auth::LoginChallenge & challenge)
+    {
+        return json{
+            {"address", WALLET_ADDRESS},
+            {"nonce", challenge.nonce},
+            {"signature", personalSign(wallet, challenge.message)}};
     }
 }
 
@@ -101,7 +113,23 @@ TEST_F(UnitTest, Chain_AddressToChecksumHex_MatchesTheEip55Vectors)
     }
 }
 
-TEST_F(UnitTest, Auth_LoginOrigins_AreStoredCanonicallySoTheBrowserOriginMatches)
+TEST_F(UnitTest, Crypto_HmacSha256_MatchesRfc4231AndRandomBytesDiffer)
+{
+    // RFC 4231 test case 2.
+    const auto mac = crypto::hmacSha256("Jefe", "what do ya want for nothing?");
+    EXPECT_EQ(evmc::hex(evmc::bytes_view(mac.data(), mac.size())),
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+
+    const std::string first = crypto::randomBytes(32);
+    EXPECT_EQ(first.size(), 32U);
+    EXPECT_NE(first, crypto::randomBytes(32));
+
+    EXPECT_TRUE(crypto::equalConstantTime("abc", "abc"));
+    EXPECT_FALSE(crypto::equalConstantTime("abc", "abd"));
+    EXPECT_FALSE(crypto::equalConstantTime("abc", "abcd"));
+}
+
+TEST_F(UnitTest, Auth_LoginSettings_AreCanonicalizedAndValidated)
 {
     asio::io_context io_context;
     // Accepted, but not as a browser serializes it.
@@ -123,6 +151,15 @@ TEST_F(UnitTest, Auth_LoginOrigins_AreStoredCanonicallySoTheBrowserOriginMatches
     {
         EXPECT_THROW(auth::AuthManager(io_context, auth::LoginSettings{.origins = origins}), std::invalid_argument);
     }
+
+    std::vector<std::string> too_many;
+    for(std::size_t i = 0; i <= auth::MAX_LOGIN_ORIGINS; ++i) too_many.push_back(std::format("http://localhost:{}", i + 1));
+    EXPECT_THROW(auth::AuthManager(io_context, auth::LoginSettings{.origins = too_many}), std::invalid_argument);
+    too_many.pop_back();
+    EXPECT_NO_THROW(auth::AuthManager(io_context, auth::LoginSettings{.origins = too_many}));
+
+    EXPECT_THROW(auth::AuthManager(io_context, siteSettings(std::string(auth::MIN_SECRET_SIZE - 1, 's'))), std::invalid_argument);
+    EXPECT_NO_THROW(auth::AuthManager(io_context, siteSettings(std::string(auth::MIN_SECRET_SIZE, 's'))));
 }
 
 TEST_F(UnitTest, API_Nonce_IssuesAnEip4361MessageNamingOneOfTheConfiguredOrigins)
@@ -140,8 +177,8 @@ TEST_F(UnitTest, API_Nonce_IssuesAnEip4361MessageNamingOneOfTheConfiguredOrigins
     const json body = issue("http://localhost:54321");
     const std::string nonce = body.at("nonce").get<std::string>();
     const std::string message = body.at("message").get<std::string>();
-    EXPECT_EQ(nonce.size(), 16U);
-    EXPECT_TRUE(std::ranges::all_of(nonce, [](const char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0; }));
+    EXPECT_EQ(nonce.size(), NONCE_LENGTH);
+    EXPECT_TRUE(std::ranges::all_of(nonce, [](const char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })) << nonce;
 
     EXPECT_TRUE(message.starts_with(std::format(
         "http://localhost:54321 wants you to sign in with your Ethereum account:\n{}\n\n"
@@ -152,6 +189,9 @@ TEST_F(UnitTest, API_Nonce_IssuesAnEip4361MessageNamingOneOfTheConfiguredOrigins
         "Nonce: {}\n"
         "Issued At: ", WALLET_ADDRESS, nonce))) << message;
     EXPECT_NE(message.find("\nExpiration Time: "), std::string::npos) << message;
+
+    // Each request gets its own nonce.
+    EXPECT_NE(issue("http://localhost:54321").at("nonce"), nonce);
 
     // An origin that is not ours, or none at all, gets the first configured one.
     for(const std::string origin : {"https://evil.example", ""})
@@ -211,22 +251,21 @@ TEST_F(UnitTest, API_Auth_RedeemsASignedIssuedMessageOnce)
     const auto wallet = makeWallet();
     ASSERT_EQ(chain::addressToChecksumHex(wallet->address()), WALLET_ADDRESS);
 
-    const auto issued = runAwaitable(io_context, auth_manager.issueLogin(wallet->address(), "https://decentralised.art"));
-    ASSERT_TRUE(issued.has_value());
-    const json body{
-        {"address", WALLET_ADDRESS},
-        {"nonce", issued->nonce},
-        {"signature", personalSign(*wallet, issued->message)}};
+    const json body = signedLogin(*wallet, auth_manager.issueLogin(wallet->address(), "https://decentralised.art"));
 
     const auto response = runAwaitable(io_context, POST_auth(authRequest(body), {}, {}, auth_manager));
     ASSERT_EQ(response.getCode(), http::Code::OK) << response.getBody();
+    // The token travels in the body only.
+    EXPECT_TRUE(response.getHeader(http::Header::Authorization).empty());
     const std::string token = json::parse(response.getBody()).at("access_token").get<std::string>();
-    const auto authenticated = runAwaitable(io_context, auth_manager.verifyAccessToken(token));
+    const auto authenticated = auth_manager.verifyAccessToken(token);
     ASSERT_TRUE(authenticated.has_value());
     EXPECT_EQ(*authenticated, wallet->address());
 
     // Replaying the same nonce and signature is refused.
-    EXPECT_EQ(runAwaitable(io_context, POST_auth(authRequest(body), {}, {}, auth_manager)).getCode(), http::Code::BadRequest);
+    const auto replay = runAwaitable(io_context, POST_auth(authRequest(body), {}, {}, auth_manager));
+    EXPECT_EQ(replay.getCode(), http::Code::BadRequest);
+    EXPECT_NE(json::parse(replay.getBody()).at("message").get<std::string>().find("nonce"), std::string::npos);
 }
 
 TEST_F(UnitTest, API_Auth_RefusesSignaturesOfAnythingButTheMessageIssuedToTheSigner)
@@ -240,15 +279,11 @@ TEST_F(UnitTest, API_Auth_RefusesSignaturesOfAnythingButTheMessageIssuedToTheSig
         const json body{{"address", address}, {"nonce", nonce}, {"signature", personalSign(*wallet, signed_message)}};
         return runAwaitable(io_context, POST_auth(authRequest(body), {}, {}, auth_manager)).getCode() == http::Code::BadRequest;
     };
-    const auto issue = [&](const chain::Address & address)
-    {
-        return runAwaitable(io_context, auth_manager.issueLogin(address, "")).value();
-    };
+    const auto issue = [&](const chain::Address & address) { return auth_manager.issueLogin(address, ""); };
 
     // The format this server used to accept.
     const auto legacy = issue(wallet->address());
-    const std::string legacy_message = "Login nonce: " + legacy.nonce;
-    EXPECT_TRUE(refused(WALLET_ADDRESS, legacy.nonce, legacy_message));
+    EXPECT_TRUE(refused(WALLET_ADDRESS, legacy.nonce, "Login nonce: " + legacy.nonce));
 
     // An issued message with a site the server did not name.
     const auto rewritten = issue(wallet->address());
@@ -267,9 +302,23 @@ TEST_F(UnitTest, API_Auth_RefusesSignaturesOfAnythingButTheMessageIssuedToTheSig
     const auto mismatched = issue(wallet->address());
     EXPECT_TRUE(refused(WALLET_ADDRESS, mismatched.nonce, mismatched.message + " "));
 
-    // A nonce the server never issued.
+    // A nonce the server never issued, or an issued one with any field altered.
     const auto unissued = issue(wallet->address());
+    EXPECT_TRUE(refused(WALLET_ADDRESS, std::string(NONCE_LENGTH, '0'), unissued.message));
     EXPECT_TRUE(refused(WALLET_ADDRESS, "0000000000000000", unissued.message));
+    for(const std::size_t position : {std::size_t{14}, std::size_t{17}, std::size_t{20}, NONCE_LENGTH - 1})
+    {
+        const auto tampered = issue(wallet->address());
+        std::string nonce = tampered.nonce;
+        nonce[position] = nonce[position] == '0' ? '1' : '0';
+        EXPECT_TRUE(refused(WALLET_ADDRESS, nonce, tampered.message)) << position;
+    }
+
+    // Only the spelling the server issued.
+    const auto upper = issue(wallet->address());
+    std::string upper_nonce = upper.nonce;
+    std::ranges::transform(upper_nonce, upper_nonce.begin(), [](const char c) { return static_cast<char>(std::toupper(static_cast<unsigned char>(c))); });
+    if(upper_nonce != upper.nonce) EXPECT_TRUE(refused(WALLET_ADDRESS, upper_nonce, upper.message));
 
     const auto missing = runAwaitable(io_context, POST_auth(authRequest(json{{"address", WALLET_ADDRESS}}), {}, {}, auth_manager));
     EXPECT_EQ(missing.getCode(), http::Code::BadRequest);
@@ -284,55 +333,88 @@ TEST_F(UnitTest, Auth_IssueLogin_KeepsEarlierMessagesForTheSameAddressValid)
     auth::AuthManager auth_manager(io_context, siteSettings());
     const auto wallet = makeWallet();
 
-    const auto first = runAwaitable(io_context, auth_manager.issueLogin(wallet->address(), ""));
+    const auto first = auth_manager.issueLogin(wallet->address(), "");
     // Anyone may ask for a message for any address; that must not void one already issued.
-    (void)runAwaitable(io_context, auth_manager.issueLogin(wallet->address(), ""));
+    const auto second = auth_manager.issueLogin(wallet->address(), "");
 
-    ASSERT_TRUE(first.has_value());
-    EXPECT_EQ(runAwaitable(io_context, auth_manager.consumeLogin(wallet->address(), first->nonce)), first->message);
+    for(const auto & challenge : {first, second})
+    {
+        const auto token = runAwaitable(io_context,
+            auth_manager.login(wallet->address(), challenge.nonce, personalSign(*wallet, challenge.message)));
+        EXPECT_TRUE(token.has_value());
+    }
 }
 
-TEST_F(UnitTest, Auth_IssueLogin_RefusesOncePendingMessagesReachTheCap)
+TEST_F(UnitTest, API_Auth_InstancesSharingTheSecretRedeemEachOthersNoncesAndTokens)
 {
     asio::io_context io_context;
-    auth::AuthManager auth_manager(io_context);
-    const chain::Address address = makeAddressFromByte(0x01);
+    const std::string secret(auth::MIN_SECRET_SIZE, 'k');
+    auth::AuthManager issuer(io_context, siteSettings(secret));
+    auth::AuthManager redeemer(io_context, siteSettings(secret));
+    const auto wallet = makeWallet();
 
-    std::optional<auth::LoginChallenge> last;
-    for(std::size_t i = 0; i < auth::MAX_PENDING_LOGINS; ++i)
-    {
-        last = runAwaitable(io_context, auth_manager.issueLogin(address, ""));
-        ASSERT_TRUE(last.has_value()) << i;
-    }
-    EXPECT_FALSE(runAwaitable(io_context, auth_manager.issueLogin(address, "")).has_value());
+    const json body = signedLogin(*wallet, issuer.issueLogin(wallet->address(), "http://localhost:54321"));
+    const auto response = runAwaitable(io_context, POST_auth(authRequest(body), {}, {}, redeemer));
+    ASSERT_EQ(response.getCode(), http::Code::OK) << response.getBody();
 
-    // Redeeming one frees its slot.
-    EXPECT_TRUE(runAwaitable(io_context, auth_manager.consumeLogin(address, last->nonce)).has_value());
-    EXPECT_TRUE(runAwaitable(io_context, auth_manager.issueLogin(address, "")).has_value());
+    const std::string token = json::parse(response.getBody()).at("access_token").get<std::string>();
+    const auto on_issuer = issuer.verifyAccessToken(token);
+    ASSERT_TRUE(on_issuer.has_value());
+    EXPECT_EQ(*on_issuer, wallet->address());
+
+    EXPECT_EQ(runAwaitable(io_context, POST_auth(authRequest(body), {}, {}, redeemer)).getCode(), http::Code::BadRequest);
 }
 
-TEST_F(UnitTest, API_Authenticate_ReadsTheBearerTokenAfterAnyWhitespace)
+TEST_F(UnitTest, Auth_InstancesWithoutASharedSecretRefuseEachOthersNoncesAndTokens)
+{
+    asio::io_context io_context;
+    auth::AuthManager issuer(io_context, siteSettings());
+    auth::AuthManager other(io_context, siteSettings());
+    const auto wallet = makeWallet();
+
+    EXPECT_FALSE(other.verifyAccessToken(issuer.generateAccessToken(wallet->address())).has_value());
+
+    const auto challenge = issuer.issueLogin(wallet->address(), "");
+    const auto token = runAwaitable(io_context,
+        other.login(wallet->address(), challenge.nonce, personalSign(*wallet, challenge.message)));
+    ASSERT_FALSE(token.has_value());
+    EXPECT_EQ(token.error().kind, auth::AuthError::Kind::INVALID_NONCE);
+}
+
+TEST_F(UnitTest, API_Authenticate_ReadsOneCaseInsensitiveBearerToken)
 {
     asio::io_context io_context;
     auth::AuthManager auth_manager(io_context);
     const chain::Address owner = makeAddressFromByte(0x42);
-    const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(owner));
+    const std::string token = auth_manager.generateAccessToken(owner);
 
     for(const std::string & header : {
             std::format("Bearer {}", token),
-            std::format("Bearer \t {}", token),
-            std::format("Bearer {} trailing", token),
-            std::format("BearerX Bearer {}", token)})
+            std::format("bearer {}", token),
+            std::format("BEARER \t {}", token),
+            std::format("  Bearer {}  ", token)})
     {
         const auto result = runAwaitable(io_context, authenticate(withAuthorization(header), auth_manager));
         ASSERT_TRUE(result.has_value()) << header;
         EXPECT_EQ(*result, owner);
     }
 
-    for(const std::string & header : {std::string("Bearer"), std::string("Bearer   "), std::format("Bearer{}", token), token})
+    for(const std::string & header : {
+            std::string("Bearer"), std::string("Bearer   "), std::format("Bearer{}", token), token,
+            std::format("Bearer {} trailing", token), std::format("BearerX Bearer {}", token),
+            std::format("Basic Bearer {}", token), std::string("Basic dXNlcjpwYXNz")})
     {
         EXPECT_FALSE(runAwaitable(io_context, authenticate(withAuthorization(header), auth_manager)).has_value()) << header;
     }
+
+    // Two Authorization headers are ambiguous, even when one carries a valid token.
+    http::Request doubled = withAuthorization(std::format("Bearer {}", token));
+    doubled.addHeader(http::Header::Authorization, "Basic dXNlcjpwYXNz");
+    EXPECT_FALSE(runAwaitable(io_context, authenticate(doubled, auth_manager)).has_value());
+
+    http::Request none;
+    none.setMethod(http::Method::POST).setPath(http::URL("/connector")).setVersion("HTTP/1.1");
+    EXPECT_FALSE(runAwaitable(io_context, authenticate(none, auth_manager)).has_value());
 }
 
 TEST_F(UnitTest, API_Authenticate_RefusesAHeaderAtTheSizeLimitWithoutCrashing)
@@ -346,86 +428,26 @@ TEST_F(UnitTest, API_Authenticate_RefusesAHeaderAtTheSizeLimitWithoutCrashing)
     EXPECT_FALSE(result.has_value());
 }
 
-TEST_F(UnitTest, Auth_AccessToken_StaysValidWhenAnotherLoginSweepsExpiredTokens)
-{
-    // Tokens are issued in the past, never ahead of the wall clock their JWT is checked on.
-    asio::io_context io_context;
-    const auto wall_clock = std::chrono::system_clock::now();
-    auto now = wall_clock - std::chrono::minutes{6};
-    auth::AuthManager auth_manager(io_context, {}, [&now] { return now; });
-
-    // Enough tokens that the next login sweeps; all but `live` are expired by then.
-    std::vector<std::string> expired_tokens;
-    for(std::size_t i = 0; i + 1 < auth::ACCESS_TOKEN_SWEEP_MIN; ++i)
-    {
-        chain::Address address{};
-        std::memcpy(address.bytes, &i, sizeof(i));
-        expired_tokens.push_back(runAwaitable(io_context, auth_manager.generateAccessToken(address)));
-    }
-    now = wall_clock - std::chrono::minutes{2};
-    const chain::Address live = makeAddressFromByte(0xEE);
-    const std::string live_token = runAwaitable(io_context, auth_manager.generateAccessToken(live));
-
-    now = wall_clock;
-    const chain::Address sweeper = makeAddressFromByte(0xEF);
-    const std::string sweeper_token = runAwaitable(io_context, auth_manager.generateAccessToken(sweeper));
-
-    const auto live_result = runAwaitable(io_context, auth_manager.verifyAccessToken(live_token));
-    ASSERT_TRUE(live_result.has_value());
-    EXPECT_EQ(*live_result, live);
-    EXPECT_TRUE(runAwaitable(io_context, auth_manager.verifyAccessToken(sweeper_token)).has_value());
-    EXPECT_FALSE(runAwaitable(io_context, auth_manager.verifyAccessToken(expired_tokens.front())).has_value());
-    EXPECT_EQ(runAwaitable(io_context, auth_manager.storage()).access_tokens, 2U);
-}
-
-TEST_F(UnitTest, Auth_AccessToken_SweepsAndShrinksABurstOnceItExpiresEvenBelowTheSizeThreshold)
-{
-    asio::io_context io_context;
-    const auto wall_clock = std::chrono::system_clock::now();
-    auto now = wall_clock - std::chrono::minutes{6};
-    auth::AuthManager auth_manager(io_context, {}, [&now] { return now; });
-    const auto address_of = [](const std::size_t i)
-    {
-        chain::Address address{};
-        std::memcpy(address.bytes, &i, sizeof(i));
-        return address;
-    };
-
-    // The burst leaves the size threshold (8192) above what the map holds (6144), and the
-    // table's capacity above the compaction floor.
-    constexpr std::size_t burst = 6 * auth::ACCESS_TOKEN_SWEEP_MIN;
-    for(std::size_t i = 0; i < burst; ++i)
-    {
-        (void)runAwaitable(io_context, auth_manager.generateAccessToken(address_of(i)));
-    }
-    const auto peak = runAwaitable(io_context, auth_manager.storage());
-    ASSERT_EQ(peak.access_tokens, burst);
-    ASSERT_GT(peak.access_token_capacity, 4 * auth::ACCESS_TOKEN_SWEEP_MIN);
-
-    // Once the burst expired, a re-login by one of its addresses sweeps the rest and
-    // releases the table built for it.
-    now = wall_clock;
-    const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(address_of(0)));
-    const auto after = runAwaitable(io_context, auth_manager.storage());
-    EXPECT_EQ(after.access_tokens, 1U);
-    EXPECT_LT(after.access_token_capacity, auth::ACCESS_TOKEN_SWEEP_MIN);
-    EXPECT_TRUE(runAwaitable(io_context, auth_manager.verifyAccessToken(token)).has_value());
-}
-
 TEST_F(UnitTest, Auth_AccessToken_ExpiresAfterItsTtl)
 {
-    // Issued in the past, so its JWT is valid on the wall clock and only the retained expiry refuses it.
     asio::io_context io_context;
-    const auto wall_clock = std::chrono::system_clock::now();
-    auto now = wall_clock - std::chrono::minutes{4};
+    const auto start = std::chrono::system_clock::now();
+    auto now = start;
     auth::AuthManager auth_manager(io_context, {}, [&now] { return now; });
     const chain::Address owner = makeAddressFromByte(0x42);
 
-    const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(owner));
-    now = wall_clock;
-    EXPECT_TRUE(runAwaitable(io_context, auth_manager.verifyAccessToken(token)).has_value());
-    now = wall_clock + std::chrono::minutes{1} + std::chrono::seconds{1};
-    EXPECT_FALSE(runAwaitable(io_context, auth_manager.verifyAccessToken(token)).has_value());
+    const std::string token = auth_manager.generateAccessToken(owner);
+    now = start + auth::ACCESS_TOKEN_TTL - std::chrono::minutes{1};
+    EXPECT_TRUE(auth_manager.verifyAccessToken(token).has_value());
+    now = start + auth::ACCESS_TOKEN_TTL + std::chrono::seconds{1};
+    EXPECT_FALSE(auth_manager.verifyAccessToken(token).has_value());
+
+    // Nor is a token accepted before it was issued.
+    now = start - std::chrono::minutes{1};
+    EXPECT_FALSE(auth_manager.verifyAccessToken(token).has_value());
+
+    EXPECT_FALSE(auth_manager.verifyAccessToken("").has_value());
+    EXPECT_FALSE(auth_manager.verifyAccessToken("not.a.jwt").has_value());
 }
 
 TEST_F(UnitTest, API_Auth_RefusesAMessageRedeemedAfterItExpires)
@@ -435,12 +457,39 @@ TEST_F(UnitTest, API_Auth_RefusesAMessageRedeemedAfterItExpires)
     auth::AuthManager auth_manager(io_context, siteSettings(), [&now] { return now; });
     const auto wallet = makeWallet();
 
-    const auto issued = runAwaitable(io_context, auth_manager.issueLogin(wallet->address(), ""));
-    ASSERT_TRUE(issued.has_value());
+    const json body = signedLogin(*wallet, auth_manager.issueLogin(wallet->address(), ""));
     now += auth::LOGIN_TTL;
 
-    const json body{{"address", WALLET_ADDRESS}, {"nonce", issued->nonce}, {"signature", personalSign(*wallet, issued->message)}};
     EXPECT_EQ(runAwaitable(io_context, POST_auth(authRequest(body), {}, {}, auth_manager)).getCode(), http::Code::BadRequest);
+}
+
+TEST_F(UnitTest, Auth_Login_KeepsRefusingARedeemedNonceUntilItExpires)
+{
+    asio::io_context io_context;
+    const auto start = std::chrono::system_clock::now();
+    auto now = start;
+    auth::AuthManager auth_manager(io_context, siteSettings(), [&now] { return now; });
+    const auto wallet = makeWallet();
+    const auto login = [&](const auth::LoginChallenge & challenge)
+    {
+        return runAwaitable(io_context,
+            auth_manager.login(wallet->address(), challenge.nonce, personalSign(*wallet, challenge.message)));
+    };
+
+    const auto early = auth_manager.issueLogin(wallet->address(), "");
+    ASSERT_TRUE(login(early).has_value());
+
+    now = start + auth::LOGIN_TTL - std::chrono::seconds{2};
+    const auto late = auth_manager.issueLogin(wallet->address(), "");
+    ASSERT_TRUE(login(late).has_value());
+    EXPECT_FALSE(login(early).has_value());
+
+    // Once `early` expires, the next login drops it from the redeemed set; `late` stays refused.
+    now = start + auth::LOGIN_TTL + std::chrono::seconds{1};
+    ASSERT_TRUE(login(auth_manager.issueLogin(wallet->address(), "")).has_value());
+    const auto replay = login(late);
+    ASSERT_FALSE(replay.has_value());
+    EXPECT_EQ(replay.error().kind, auth::AuthError::Kind::INVALID_NONCE);
 }
 
 TEST_F(UnitTest, API_Auth_RefusesAnInvalidRecoveryIdWithoutAborting)
@@ -452,130 +501,13 @@ TEST_F(UnitTest, API_Auth_RefusesAnInvalidRecoveryIdWithoutAborting)
     // 4..26 and 31..255 leave a recovery id outside 0..3 once 27 is taken off.
     for(const std::string v : {"04", "1a", "1f", "ff"})
     {
-        const auto issued = runAwaitable(io_context, auth_manager.issueLogin(wallet->address(), ""));
-        ASSERT_TRUE(issued.has_value());
-        std::string signature = personalSign(*wallet, issued->message);
+        const auto issued = auth_manager.issueLogin(wallet->address(), "");
+        std::string signature = personalSign(*wallet, issued.message);
         signature.replace(signature.size() - 2, 2, v);
 
-        const json body{{"address", WALLET_ADDRESS}, {"nonce", issued->nonce}, {"signature", signature}};
+        const json body{{"address", WALLET_ADDRESS}, {"nonce", issued.nonce}, {"signature", signature}};
         const auto response = runAwaitable(io_context, POST_auth(authRequest(body), {}, {}, auth_manager));
         EXPECT_EQ(response.getCode(), http::Code::BadRequest) << v;
         EXPECT_EQ(json::parse(response.getBody()).at("message"), "Invalid signature") << v;
     }
-}
-
-TEST_F(UnitTest, Auth_IssueLogin_AdmitsAgainOnceSaturatingMessagesExpire)
-{
-    asio::io_context io_context;
-    auto now = std::chrono::system_clock::now();
-    auth::AuthManager auth_manager(io_context, {}, [&now] { return now; });
-    const chain::Address address = makeAddressFromByte(0x01);
-
-    const auto first = runAwaitable(io_context, auth_manager.issueLogin(address, ""));
-    ASSERT_TRUE(first.has_value());
-    now += std::chrono::minutes{1};
-    for(std::size_t i = 1; i < auth::MAX_PENDING_LOGINS; ++i)
-    {
-        ASSERT_TRUE(runAwaitable(io_context, auth_manager.issueLogin(address, "")).has_value()) << i;
-    }
-
-    // Saturated: refused until the oldest message expires, then admitted again.
-    EXPECT_FALSE(runAwaitable(io_context, auth_manager.issueLogin(address, "")).has_value());
-    now += auth::LOGIN_TTL - std::chrono::minutes{1} - std::chrono::seconds{1};
-    EXPECT_FALSE(runAwaitable(io_context, auth_manager.issueLogin(address, "")).has_value());
-    now += std::chrono::seconds{1};
-    const auto admitted = runAwaitable(io_context, auth_manager.issueLogin(address, ""));
-    ASSERT_TRUE(admitted.has_value());
-
-    // The expired message is gone; the newer ones are still redeemable.
-    EXPECT_FALSE(runAwaitable(io_context, auth_manager.consumeLogin(address, first->nonce)).has_value());
-    EXPECT_TRUE(runAwaitable(io_context, auth_manager.consumeLogin(address, admitted->nonce)).has_value());
-}
-
-TEST_F(UnitTest, Auth_AccessToken_IsSignedWithAPerInstanceSecret)
-{
-    asio::io_context io_context;
-    auth::AuthManager issuer(io_context);
-    auth::AuthManager other(io_context);
-    const chain::Address owner = makeAddressFromByte(0x07);
-
-    const std::string token = runAwaitable(io_context, issuer.generateAccessToken(owner));
-    // Registers a different token for the owner on `other`, so only the signature can refuse it.
-    (void)runAwaitable(io_context, other.generateAccessToken(owner));
-
-    EXPECT_FALSE(runAwaitable(io_context, other.verifyAccessToken(token)).has_value());
-}
-
-TEST_F(UnitTest, Auth_IssueLogin_RecoversFromRepeatedSaturation)
-{
-    asio::io_context io_context;
-    auto now = std::chrono::system_clock::now();
-    auth::AuthManager auth_manager(io_context, {}, [&now] { return now; });
-    const chain::Address address = makeAddressFromByte(0x01);
-    const auto fill = [&](const std::size_t count)
-    {
-        for(std::size_t i = 0; i < count; ++i)
-        {
-            ASSERT_TRUE(runAwaitable(io_context, auth_manager.issueLogin(address, "")).has_value()) << i;
-        }
-        EXPECT_FALSE(runAwaitable(io_context, auth_manager.issueLogin(address, "")).has_value());
-    };
-
-    fill(auth::MAX_PENDING_LOGINS);
-    for(int round = 0; round < 2; ++round)
-    {
-        // Everything pending expires; the sweep that empties the map must not stop the next one.
-        now += auth::LOGIN_TTL;
-        ASSERT_TRUE(runAwaitable(io_context, auth_manager.issueLogin(address, "")).has_value()) << round;
-        fill(auth::MAX_PENDING_LOGINS - 1);
-    }
-}
-
-TEST_F(UnitTest, Auth_IssueLogin_ReclaimsStaggeredExpiriesOneAtATime)
-{
-    asio::io_context io_context;
-    const auto start = std::chrono::system_clock::now();
-    auto now = start;
-    auth::AuthManager auth_manager(io_context, {}, [&now] { return now; });
-    const chain::Address address = makeAddressFromByte(0x01);
-
-    // One message per millisecond, so they expire one by one.
-    for(std::size_t i = 0; i < auth::MAX_PENDING_LOGINS; ++i)
-    {
-        ASSERT_TRUE(runAwaitable(io_context, auth_manager.issueLogin(address, "")).has_value()) << i;
-        now += std::chrono::milliseconds{1};
-    }
-    EXPECT_FALSE(runAwaitable(io_context, auth_manager.issueLogin(address, "")).has_value());
-
-    // Each expiry frees exactly one slot.
-    now = start + auth::LOGIN_TTL;
-    for(int step = 0; step < 3; ++step)
-    {
-        EXPECT_TRUE(runAwaitable(io_context, auth_manager.issueLogin(address, "")).has_value()) << step;
-        EXPECT_FALSE(runAwaitable(io_context, auth_manager.issueLogin(address, "")).has_value()) << step;
-        now += std::chrono::milliseconds{1};
-    }
-
-    const auto storage = runAwaitable(io_context, auth_manager.storage());
-    EXPECT_EQ(storage.pending_logins, auth::MAX_PENDING_LOGINS);
-    EXPECT_EQ(storage.pending_login_queue, auth::MAX_PENDING_LOGINS);
-}
-
-TEST_F(UnitTest, Auth_IssueLogin_DropsRedeemedNoncesFromTheExpiryQueue)
-{
-    asio::io_context io_context;
-    auth::AuthManager auth_manager(io_context);
-    const chain::Address address = makeAddressFromByte(0x01);
-
-    // Redeemed nonces stay queued until the queue passes twice the cap, then are dropped.
-    for(std::size_t i = 0; i <= 2 * auth::MAX_PENDING_LOGINS; ++i)
-    {
-        const auto issued = runAwaitable(io_context, auth_manager.issueLogin(address, ""));
-        ASSERT_TRUE(issued.has_value()) << i;
-        ASSERT_TRUE(runAwaitable(io_context, auth_manager.consumeLogin(address, issued->nonce)).has_value()) << i;
-    }
-
-    const auto storage = runAwaitable(io_context, auth_manager.storage());
-    EXPECT_EQ(storage.pending_logins, 0U);
-    EXPECT_EQ(storage.pending_login_queue, 1U);
 }

@@ -135,6 +135,40 @@ namespace dcn::http
         return path_parts;
     }
 
+    std::optional<std::string> decodeQueryComponent(const std::string_view component)
+    {
+        const auto hex_value = [](const char c) -> int
+        {
+            if(c >= '0' && c <= '9') return c - '0';
+            if(c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if(c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+
+        std::string decoded;
+        decoded.reserve(component.size());
+        for(std::size_t i = 0; i < component.size(); ++i)
+        {
+            if(component[i] == '+')
+            {
+                decoded += ' ';
+                continue;
+            }
+            if(component[i] != '%')
+            {
+                decoded += component[i];
+                continue;
+            }
+            if(i + 2 >= component.size()) return std::nullopt;
+            const int high = hex_value(component[i + 1]);
+            const int low = hex_value(component[i + 2]);
+            if(high < 0 || low < 0) return std::nullopt;
+            decoded += static_cast<char>(high * 16 + low);
+            i += 2;
+        }
+        return decoded;
+    }
+
     absl::flat_hash_map<std::string, std::string> splitQuerySegments(const std::string& query)
     {
         absl::flat_hash_map<std::string, std::string> query_map;
@@ -149,14 +183,14 @@ namespace dcn::http
             auto pos = segment.find('=');
             if (pos == std::string::npos) continue; // skip invalid segments
 
-            std::string key = segment.substr(0, pos);
-            std::string value = segment.substr(pos + 1);
+            auto key = decodeQueryComponent(std::string_view(segment).substr(0, pos));
+            auto value = decodeQueryComponent(std::string_view(segment).substr(pos + 1));
+            if (!key || !value) continue; // skip malformed percent-encoding
 
-            if (!key.empty())
-                query_map[std::move(key)] = std::move(value);
+            if (!key->empty())
+                query_map[std::move(*key)] = std::move(*value);
         }
 
         return query_map;
     }
 }
-

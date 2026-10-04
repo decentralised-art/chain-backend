@@ -55,6 +55,13 @@ namespace dcn::chain
         return normalizeHex(evmc::hex(address));
     }
 
+    std::optional<chain::Address> addressFromHex(std::string_view hex)
+    {
+        if(hex.starts_with("0x")) hex.remove_prefix(2);
+        if(hex.size() != 2 * sizeof(chain::Address::bytes)) return std::nullopt;
+        return evmc::from_hex<chain::Address>(hex);
+    }
+
     std::string addressToChecksumHex(const chain::Address & address)
     {
         // A letter is upper case where the matching nibble of keccak256(lower-case hex) is 8 or more.

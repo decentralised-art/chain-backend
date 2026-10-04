@@ -53,6 +53,26 @@ TEST_F(UnitTest, API_Account_Get_InvalidAddressArgumentReturnsBadRequest)
     EXPECT_EQ(body["message"], "Invalid address argument");
 }
 
+TEST_F(UnitTest, API_Account_Get_ShortAddressReturnsBadRequest)
+{
+    asio::io_context io_context;
+    registry::Registry registry(io_context);
+
+    http::Request request;
+    request.setMethod(http::Method::GET)
+        .setPath(http::URL("/account/0x1234?limit=10"))
+        .setVersion("HTTP/1.1");
+
+    std::vector<server::RouteArg> args{makeStringRouteArg("0x1234")};
+    server::QueryArgsList query_args;
+    query_args.emplace("limit", makeUintRouteArg(10));
+
+    const auto response = runAwaitable(io_context, GET_accountInfo(request, std::move(args), std::move(query_args), registry));
+    ASSERT_EQ(response.getCode(), http::Code::BadRequest);
+    const auto body = nlohmann::json::parse(response.getBody());
+    EXPECT_EQ(body["message"], "Invalid address");
+}
+
 TEST_F(UnitTest, API_Account_Get_MissingLimitReturnsBadRequest)
 {
     asio::io_context io_context;

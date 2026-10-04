@@ -81,6 +81,9 @@ namespace dcn::config
         // Origins of the sites users sign in through; sign-in messages name only these.
         std::vector<std::string> auth_origins;
 
+        // Key for sign-in nonces and access tokens; empty for a random key per process.
+        std::string auth_secret;
+
         IngestionConfig chain_ingestion;
         ExecuteConfig execute;
         PublishConfig publish;

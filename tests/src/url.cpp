@@ -44,6 +44,27 @@ TEST_F(UnitTest, URL_CanonicalOrigin_SerializesAsABrowserReportsIt)
     }
 }
 
+TEST_F(UnitTest, URL_SplitQuerySegments_DecodesFormUrlEncodedKeysAndValues)
+{
+    const auto query = http::splitQuerySegments(
+        "origin=http%3A%2F%2Flocalhost%3A54321&raw=http://localhost:1&after=%20FMT%2BB+C&%6Cimit=2&bad=%2&worse=%zz&empty=");
+
+    EXPECT_EQ(query.at("origin"), "http://localhost:54321");
+    EXPECT_EQ(query.at("raw"), "http://localhost:1");
+    EXPECT_EQ(query.at("after"), " FMT+B C");
+    EXPECT_EQ(query.at("limit"), "2");
+    EXPECT_EQ(query.at("empty"), "");
+    EXPECT_FALSE(query.contains("bad"));
+    EXPECT_FALSE(query.contains("worse"));
+
+    EXPECT_EQ(http::decodeQueryComponent("%41%62c"), std::optional<std::string>("Abc"));
+    EXPECT_EQ(http::decodeQueryComponent("%00"), std::optional<std::string>(std::string(1, '\0')));
+    for(const std::string component : {"%", "%4", "%G0", "a%"})
+    {
+        EXPECT_FALSE(http::decodeQueryComponent(component).has_value()) << component;
+    }
+}
+
 TEST_F(UnitTest, URL_GetPathModule_StripsQueryForSingleSegmentPath)
 {
     const http::URL url("/accounts?limit=2&after=abc");

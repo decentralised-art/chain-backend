@@ -274,7 +274,7 @@ namespace dcn
             co_return response;
         }
 
-        std::optional<chain::Address> address_res = evmc::from_hex<chain::Address>(address_arg.value());
+        std::optional<chain::Address> address_res = chain::addressFromHex(address_arg.value());
         if(!address_res)
         {
             response.setCode(http::Code::BadRequest)

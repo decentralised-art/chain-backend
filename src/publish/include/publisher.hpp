@@ -40,21 +40,21 @@ namespace dcn::publish
         };
 
         Kind kind = Kind::UPSTREAM;
-        std::string message;
-        std::string tx_hash;
+        std::string message{};
+        std::string tx_hash{};
 
         // Connector dependencies absent from, or different on, the target registry.
-        std::vector<std::string> missing;
-        std::vector<std::string> mismatched;
+        std::vector<std::string> missing{};
+        std::vector<std::string> mismatched{};
     };
 
     struct PublishResult
     {
-        std::string tx_hash;
-        std::string entity_address;
+        std::string tx_hash{};
+        std::string entity_address{};
         std::int64_t block_number = 0;
-        std::string owner;
-        std::string content_hash;
+        std::string owner{};
+        std::string content_hash{};
         // True when the registry already held this exact publication.
         bool already_published = false;
     };

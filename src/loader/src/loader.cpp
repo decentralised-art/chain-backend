@@ -1592,11 +1592,6 @@ namespace dcn::loader
                 spdlog::error("Unhandled exception while importing transformation '{}': {}", name, e.what());
                 success = false;
             }
-            catch(...)
-            {
-                spdlog::error("Unhandled unknown exception while importing transformation '{}'", name);
-                success = false;
-            }
         }
 
         for(std::size_t i = 0; i < condition_names.size(); ++i)
@@ -1621,11 +1616,6 @@ namespace dcn::loader
                 spdlog::error("Unhandled exception while importing condition '{}': {}", name, e.what());
                 success = false;
             }
-            catch(...)
-            {
-                spdlog::error("Unhandled unknown exception while importing condition '{}'", name);
-                success = false;
-            }
         }
 
         for(std::size_t i = 0; i < connector_names.size(); ++i)
@@ -1648,11 +1638,6 @@ namespace dcn::loader
             catch(const std::exception & e)
             {
                 spdlog::error("Unhandled exception while importing connector '{}': {}", name, e.what());
-                success = false;
-            }
-            catch(...)
-            {
-                spdlog::error("Unhandled unknown exception while importing connector '{}'", name);
                 success = false;
             }
         }

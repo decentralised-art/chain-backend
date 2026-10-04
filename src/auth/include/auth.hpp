@@ -2,18 +2,17 @@
 
 #include <chrono>
 #include <cstdint>
-#include <deque>
-#include <optional>
-#include <random>
-#include <string>
 #include <expected>
 #include <format>
 #include <functional>
+#include <optional>
+#include <queue>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
-#include <regex>
 
-#include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 #include <spdlog/spdlog.h>
 #include <secp256k1.h>
 #include <secp256k1_recovery.h>
@@ -48,20 +47,29 @@ namespace dcn::auth
     /// How long an issued sign-in message can be redeemed at /auth.
     constexpr auto LOGIN_TTL = std::chrono::minutes{5};
 
-    /// Most sign-in messages awaiting /auth at once; bounds the memory /nonce can claim.
-    constexpr std::size_t MAX_PENDING_LOGINS = 16384;
+    /// How long an access token is accepted after it is issued.
+    constexpr auto ACCESS_TOKEN_TTL = std::chrono::minutes{5};
 
-    /// Retained access tokens below which a login never sweeps expired ones.
-    constexpr std::size_t ACCESS_TOKEN_SWEEP_MIN = 1024;
+    /// Fewest bytes a configured secret may have.
+    constexpr std::size_t MIN_SECRET_SIZE = 32;
+
+    /// Most sign-in origins a server can be configured with.
+    constexpr std::size_t MAX_LOGIN_ORIGINS = 256;
 
     struct LoginSettings
     {
         /// Origins of the sites a user may sign in through, e.g. `https://decentralised.art`.
         /// The first is used when a request names none of them. Each is `http(s)://host[:port]`;
-        /// AuthManager stores them as http::canonicalOrigin serializes them.
+        /// AuthManager stores them as http::canonicalOrigin serializes them. A nonce names its
+        /// origin by position, so instances sharing `secret` list the same origins in the same order.
         std::vector<std::string> origins{"http://localhost"};
 
         std::uint64_t chain_id = 1;
+
+        /// Key for sign-in nonces and access tokens, at least MIN_SECRET_SIZE bytes. Instances
+        /// that share it redeem each other's nonces and accept each other's tokens. Empty: a
+        /// random key per instance, so nothing it issues outlives it or works on another.
+        std::string secret;
     };
 
     struct LoginChallenge
@@ -72,13 +80,21 @@ namespace dcn::auth
         std::string message;
     };
 
+    /**
+     * @brief Issues and checks EIP-4361 sign-ins and the access tokens they grant.
+     *
+     * A nonce carries its issue time and origin under an HMAC, so issuing one stores nothing:
+     * /nonce costs no memory however often it is called. The only state is the set of nonces
+     * redeemed and not yet expired, which keeps each nonce to a single redemption.
+     */
     class AuthManager
     {
         public:
             AuthManager() = delete;
-            /// `now` is the time source for message and token expiry.
-            /// @throws std::invalid_argument when `login_settings` has no origin or one that is
-            /// not an http(s)://host[:port] origin.
+            /// `now` is the time source for nonce and token expiry.
+            /// @throws std::invalid_argument when `login_settings` has no origin, more than
+            /// MAX_LOGIN_ORIGINS, one that is not an http(s)://host[:port] origin, or a secret
+            /// shorter than MIN_SECRET_SIZE.
             AuthManager(
                 asio::io_context & io_context,
                 LoginSettings login_settings = {},
@@ -98,82 +114,60 @@ namespace dcn::auth
              * The message names `origin` when it is one of the configured origins, and the
              * first configured origin otherwise, so it never names a site that is not ours:
              * a wallet then warns a user signing it anywhere else.
-             *
-             * @return nullopt while MAX_PENDING_LOGINS unexpired messages await /auth.
              */
-            asio::awaitable<std::optional<LoginChallenge>> issueLogin(const chain::Address & address, const std::string & origin);
+            LoginChallenge issueLogin(const chain::Address & address, std::string_view origin) const;
 
             /**
-             * @brief The unexpired sign-in message issued to `address` under `nonce`, for its
-             * signature to be checked against.
+             * @brief An access token for `address`, once `signature` is its wallet's signature of
+             * the unexpired message issued to it under `nonce`.
              *
-             * A known nonce is consumed either way, so a message can be redeemed once.
-             * @return nullopt for an unknown nonce, an expired message, or another address.
+             * A nonce is redeemed at most once by this instance.
+             * @return INVALID_NONCE for a nonce not issued to `address`, expired, or already
+             * redeemed; INVALID_SIGNATURE for a signature of anything else.
              */
-            asio::awaitable<std::optional<std::string>> consumeLogin(const chain::Address & address, const std::string & nonce);
+            asio::awaitable<std::expected<std::string, AuthError>> login(chain::Address address, std::string nonce, std::string signature);
 
-            asio::awaitable<bool> verifySignature(const chain::Address & address, const std::string& signature, const std::string& message);
+            /// Whether `signature` is `address`'s EIP-191 `personal_sign` signature of `message`.
+            static bool verifySignature(const chain::Address & address, std::string_view signature, std::string_view message);
 
-            asio::awaitable<std::string> generateAccessToken(const chain::Address & address);
+            std::string generateAccessToken(const chain::Address & address) const;
 
-            asio::awaitable<std::expected<chain::Address, AuthError>> verifyAccessToken(std::string token) const;
-
-            asio::awaitable<void> invalidateAccessToken(const chain::Address & address);
-
-            struct Storage
-            {
-                /// Access tokens held, expired ones not yet swept included.
-                std::size_t access_tokens = 0;
-                /// Slots the access token table has allocated.
-                std::size_t access_token_capacity = 0;
-                /// Sign-in messages awaiting /auth, expired ones not yet reclaimed included.
-                std::size_t pending_logins = 0;
-                /// Entries of the expiry queue, redeemed nonces not yet dropped included.
-                std::size_t pending_login_queue = 0;
-            };
-
-            /// What the manager holds in memory.
-            asio::awaitable<Storage> storage() const;
+            std::expected<chain::Address, AuthError> verifyAccessToken(std::string_view token) const;
 
         private:
-            struct AccessToken
+            struct OpenedNonce
             {
-                std::string token;
-                std::chrono::system_clock::time_point expires_at;
-            };
-
-            struct PendingLogin
-            {
-                chain::Address address;
                 std::string message;
                 std::chrono::system_clock::time_point expires_at;
             };
 
-            asio::strand<asio::io_context::executor_type> _strand;
+            std::string loginMessage(
+                const chain::Address & address,
+                std::size_t origin_index,
+                std::string_view nonce,
+                std::chrono::sys_seconds issued_at) const;
 
-            /// HMAC key for access tokens, drawn per process: tokens do not outlive it anyway,
-            /// since the issued tokens are only kept in memory.
-            const std::string _SECRET;
+            /// The message `nonce` was issued for to `address`, if this key issued it and it is unexpired.
+            std::optional<OpenedNonce> openNonce(const chain::Address & address, std::string_view nonce) const;
+
+            asio::strand<asio::io_context::executor_type> _strand;
 
             const LoginSettings _login_settings;
 
             const std::function<std::chrono::system_clock::time_point()> _now;
 
-            static std::random_device _rng;
+            /// Keys derived from the secret, one per use.
+            const std::string _nonce_key;
+            const std::string _token_key;
 
-            /// Issued sign-in messages awaiting /auth, by nonce.
-            absl::flat_hash_map<std::string, PendingLogin> _pending_logins;
+            /// Redeemed nonces that have not expired yet.
+            absl::flat_hash_set<std::string> _redeemed;
 
-            /// (expiry, nonce) of issued messages in issue order, which is expiry order.
-            std::deque<std::pair<std::chrono::system_clock::time_point, std::string>> _pending_login_queue;
-
-            absl::flat_hash_map<chain::Address, AccessToken> _access_tokens;
-
-            /// Retained tokens at which the next login sweeps the expired ones.
-            std::size_t _access_tokens_sweep_at = ACCESS_TOKEN_SWEEP_MIN;
-
-            /// Time from which the next login sweeps the expired tokens whatever their number.
-            std::chrono::system_clock::time_point _access_tokens_sweep_after{};
+            /// (expiry, nonce) of `_redeemed`, soonest expiry on top.
+            std::priority_queue<
+                std::pair<std::chrono::system_clock::time_point, std::string>,
+                std::vector<std::pair<std::chrono::system_clock::time_point, std::string>>,
+                std::greater<>> _redeemed_expiry;
     };
 }
 

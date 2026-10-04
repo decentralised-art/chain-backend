@@ -64,20 +64,20 @@ namespace dcn::pt
     struct ConnectorRegistration
     {
         std::uint32_t dimensions_count = 0;
-        std::vector<std::uint32_t> composite_dim_ids;
-        std::vector<std::string> composite_names;
-        std::vector<std::uint32_t> binding_dim_ids;
-        std::vector<std::uint32_t> binding_slot_ids;
-        std::vector<std::string> binding_names;
-        std::string condition_name;
-        std::vector<std::int32_t> condition_args;
-        std::vector<std::uint32_t> static_ri_positions;
-        std::vector<std::uint32_t> static_ri_start_points;
-        std::vector<std::uint32_t> static_ri_transform_shifts;
-        std::vector<std::uint32_t> transformation_dim_ids;
-        std::vector<std::string> transformation_names;
-        std::vector<std::uint32_t> transformation_arg_counts;
-        std::vector<std::int32_t> transformation_args;
+        std::vector<std::uint32_t> composite_dim_ids{};
+        std::vector<std::string> composite_names{};
+        std::vector<std::uint32_t> binding_dim_ids{};
+        std::vector<std::uint32_t> binding_slot_ids{};
+        std::vector<std::string> binding_names{};
+        std::string condition_name{};
+        std::vector<std::int32_t> condition_args{};
+        std::vector<std::uint32_t> static_ri_positions{};
+        std::vector<std::uint32_t> static_ri_start_points{};
+        std::vector<std::uint32_t> static_ri_transform_shifts{};
+        std::vector<std::uint32_t> transformation_dim_ids{};
+        std::vector<std::string> transformation_names{};
+        std::vector<std::uint32_t> transformation_arg_counts{};
+        std::vector<std::int32_t> transformation_args{};
 
         bool operator==(const ConnectorRegistration &) const = default;
     };

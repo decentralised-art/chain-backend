@@ -119,12 +119,12 @@ namespace dcn::registry
             // and conditions) and the creation code its publication transaction carried.
             struct ChainCodeFetch
             {
-                std::string source_id;
+                std::string source_id{};
                 chain::Address registry{};
                 chain::Address entity{};
-                std::string block_hash;
-                std::string tx_hash;
-                std::string runtime_code_hash;   // empty when the runtime code is not needed
+                std::string block_hash{};
+                std::string tx_hash{};
+                std::string runtime_code_hash{};   // empty when the runtime code is not needed
                 bool creation_code = false;
             };
 

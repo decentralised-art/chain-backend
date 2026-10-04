@@ -1,55 +1,47 @@
 #include "api.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <string_view>
+
 namespace dcn
 {
-    static const std::string ACCESS_TOKEN_PREFIX = "access_token=";
-
-    static parse::Result<std::string> _getAccessTokenFromHeader(const http::Request & request) 
+    static parse::Result<std::string> _getAccessTokenFromHeader(const http::Request & request)
     {
         const auto auth_res = request.getHeader(http::Header::Authorization);
-        if(auth_res.empty())
+        if(auth_res.size() != 1)
         {
-            return std::unexpected(parse::ParseError{parse::ParseError::Kind::INVALID_VALUE, "Authorization header not found"});
+            return std::unexpected(parse::ParseError{parse::ParseError::Kind::INVALID_VALUE, "Expected one Authorization header"});
         }
 
-        const std::string auth_header = std::accumulate(auth_res.begin(), auth_res.end(), std::string(""));
-
-        if (auth_header.empty()) {
-            return std::unexpected(parse::ParseError{parse::ParseError::Kind::INVALID_VALUE, "Header string is empty"});
-        }
-
-        // `Bearer`, whitespace, then the token up to the next whitespace. A plain scan: the
-        // header is unauthenticated input, and std::regex recurses per character.
+        // RFC 6750: the case-insensitive `Bearer` scheme, whitespace, then a token without any.
         constexpr std::string_view scheme = "Bearer";
-        constexpr std::string_view whitespace = " \t\n\v\f\r";
-        const std::string_view header = auth_header;
-        for(std::size_t pos = header.find(scheme); pos != std::string_view::npos; pos = header.find(scheme, pos))
+        const std::string_view header = utils::trimView(auth_res.front());
+        if(header.size() <= scheme.size()
+            || !utils::equalsIgnoreCase(header.substr(0, scheme.size()), scheme)
+            || std::isspace(static_cast<unsigned char>(header[scheme.size()])) == 0)
         {
-            pos += scheme.size();
-            const std::size_t token_begin = header.find_first_not_of(whitespace, pos);
-            if(token_begin == pos || token_begin == std::string_view::npos) continue;
-
-            const std::size_t token_end = header.find_first_of(whitespace, token_begin);
-            return std::string(header.substr(token_begin, token_end - token_begin));
+            return std::unexpected(parse::ParseError{parse::ParseError::Kind::INVALID_VALUE, "Expected a Bearer token"});
         }
 
-        return std::unexpected(parse::ParseError{parse::ParseError::Kind::INVALID_VALUE, "Token not found in header"});
+        const std::string_view token = utils::trimView(header.substr(scheme.size()));
+        if(token.empty() || std::ranges::any_of(token, [](const char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; }))
+        {
+            return std::unexpected(parse::ParseError{parse::ParseError::Kind::INVALID_VALUE, "Expected a single Bearer token"});
+        }
+        return std::string(token);
     }
 
     asio::awaitable<std::expected<chain::Address, auth::AuthError>> authenticate(const http::Request & request, const auth::AuthManager & auth_manager)
     {
-        // try to obtain token from authorization header
         const parse::Result<std::string> token_res = _getAccessTokenFromHeader(request);
-
-        if (!token_res) 
+        if(!token_res)
         {
             spdlog::error("Failed to parse token");
             co_return std::unexpected(auth::AuthError{auth::AuthError::Kind::INVALID_TOKEN});
         }
-        const std::string & token = token_res.value();
 
-        const auto verification_res = co_await auth_manager.verifyAccessToken(token);
-
+        const auto verification_res = auth_manager.verifyAccessToken(*token_res);
         if(!verification_res)
         {
             spdlog::error("Failed to verify token");
@@ -89,7 +81,7 @@ namespace dcn
             co_return response;
         }
 
-        const std::optional<chain::Address> address_res = evmc::from_hex<chain::Address>(address_arg.value());
+        const std::optional<chain::Address> address_res = chain::addressFromHex(address_arg.value());
         if(!address_res)
         {
             response.setCode(http::Code::BadRequest)
@@ -124,22 +116,12 @@ namespace dcn
             if(!origin_header.empty()) origin = origin_header.front();
         }
 
-        const auto challenge = co_await auth_manager.issueLogin(*address_res, origin);
-        if(!challenge)
-        {
-            spdlog::warn("Refusing a sign-in message: {} are already pending", auth::MAX_PENDING_LOGINS);
-            response.setCode(http::Code::ServiceUnavailable)
-                .setBodyWithContentLength(json{
-                    {"message", "Too many sign-ins are pending; try again shortly"}
-                }.dump());
-
-            co_return response;
-        }
+        const auto challenge = auth_manager.issueLogin(*address_res, origin);
 
         response.setCode(http::Code::OK)
             .setBodyWithContentLength(json{
-                {"nonce", challenge->nonce},
-                {"message", challenge->message}
+                {"nonce", challenge.nonce},
+                {"message", challenge.message}
             }.dump());
 
         co_return response;
@@ -172,7 +154,7 @@ namespace dcn
         {
             response.setCode(http::Code::BadRequest)
                 .setBodyWithContentLength(json{
-                    {"message", "Invalid number of arguments. Expected 1 argument."}
+                    {"message", "Invalid number of arguments. Expected no arguments."}
                 }.dump());
 
             co_return response;
@@ -203,10 +185,7 @@ namespace dcn
         }
 
         const std::string address_str = auth_request.at("address").get<std::string>();
-        const std::string signature = auth_request.at("signature").get<std::string>();
-        const std::string nonce = auth_request.at("nonce").get<std::string>();
-
-        auto address_res = evmc::from_hex<chain::Address>(address_str);
+        auto address_res = chain::addressFromHex(address_str);
         if(!address_res)
         {
             response.setCode(http::Code::BadRequest)
@@ -216,39 +195,24 @@ namespace dcn
 
             co_return response;
         }
-        const chain::Address & address = address_res.value();
 
-        // The signature is checked against the message this server issued under the nonce.
-        const auto message = co_await auth_manager.consumeLogin(address, nonce);
-        if(!message)
+        const auto access_token = co_await auth_manager.login(
+            *address_res, auth_request.at("nonce").get<std::string>(), auth_request.at("signature").get<std::string>());
+        if(!access_token)
         {
             response.setCode(http::Code::BadRequest)
                 .setBodyWithContentLength(json {
-                    {"message", "Unknown or expired nonce; request a new one from /nonce"}
+                    {"message", access_token.error().kind == auth::AuthError::Kind::INVALID_SIGNATURE
+                        ? "Invalid signature"
+                        : "Unknown, expired or already redeemed nonce; request a new one from /nonce"}
                 }.dump());
 
             co_return response;
         }
 
-        if(co_await auth_manager.verifySignature(address, signature, *message) == false)
-        {
-            response.setCode(http::Code::BadRequest)
-                .setBodyWithContentLength(json {
-                    {"message", "Invalid signature"}
-                }.dump());
-                
-            co_return response;
-        }
-
-        const std::string access_token = co_await auth_manager.generateAccessToken(address);
-        
-        // set access token in authorization header
-        // Authorization: Bearer <token>
-        // also include access token in response
         response.setCode(http::Code::OK)
-            .setHeader(http::Header::Authorization, std::format("Bearer {}", access_token))
             .setBodyWithContentLength(json {
-                {"access_token", access_token}
+                {"access_token", *access_token}
             }.dump());
 
         co_return response;

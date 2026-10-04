@@ -252,7 +252,7 @@ namespace dcn
             return std::get<0>(lhs) < std::get<0>(rhs);
         });
 
-        for(unsigned int i = 0; i < connector.condition_args_size(); ++i)
+        for(int i = 0; i < connector.condition_args_size(); ++i)
         {
             condition_args_code += std::format(
                 "conditionArgs[{}] = int32({});\n",

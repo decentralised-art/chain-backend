@@ -32,10 +32,10 @@ namespace dcn::registry
         std::string chain_namespace = "local";
         std::uint64_t chain_id = 1;
         std::string registry_address = "0x0";
-        std::string content_hash;
-        std::string metadata_hash;
-        std::string runtime_code_hash;
-        std::string block_hash;
+        std::string content_hash{};
+        std::string metadata_hash{};
+        std::string runtime_code_hash{};
+        std::string block_hash{};
         std::int64_t log_index = 0;
         bool definition_conflict = false;
     };

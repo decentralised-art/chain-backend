@@ -1,6 +1,5 @@
 #pragma once
 #include <string>
-#include <regex>
 #include <algorithm>
 
 #include <absl/hash/hash.h>

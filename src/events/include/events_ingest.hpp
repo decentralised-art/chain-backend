@@ -35,7 +35,7 @@ namespace dcn::events
 
         // Hash of block `finalized` when the source knows it: persisted as the anchor a
         // later poll uses to detect a reorg below finality.
-        std::string finalized_hash;
+        std::string finalized_hash{};
     };
 
     // Inclusive block span a poll scanned completely. Every log the source can decode

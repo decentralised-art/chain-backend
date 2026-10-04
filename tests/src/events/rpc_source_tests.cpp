@@ -131,10 +131,10 @@ namespace
         std::int64_t head = 0;
         std::int64_t safe = 0;
         std::int64_t finalized = 0;
-        std::vector<json> logs;
+        std::vector<json> logs{};
         int forced_limit_errors = 0;
         std::vector<std::pair<std::int64_t, std::int64_t>> log_queries;
-        std::function<std::string(const json &)> call_responder;
+        std::function<std::string(const json &)> call_responder{};
 
         std::string respond(const json & request)
         {
@@ -289,7 +289,7 @@ TEST_F(UnitTest, Rpc_JsonRpcClient_DoesNotRetryAnExhaustedQuota)
 {
     asio::io_context io_context;
 
-    for(const std::string message : {
+    for(const std::string & message : {
         std::string("Monthly capacity limit exceeded. Visit the dashboard to upgrade your scaling policy"),
         std::string("daily request count exceeded, request rate limited")})
     {

@@ -76,8 +76,12 @@ TEST_F(UnitTest, Native_AppendQuotedArgument_FollowsTheCrtArgvRules)
     EXPECT_EQ(quoted(""), R"("")");
     EXPECT_EQ(quoted("a b"), R"("a b")");
     EXPECT_EQ(quoted("tab\there"), "\"tab\there\"");
-    EXPECT_EQ(quoted(R"(say "hi")"), R"("say \"hi\"")");
-    EXPECT_EQ(quoted(R"(a\"b)"), R"("a\\\"b")");
+    // Kept out of the macro arguments: MSVC's traditional preprocessor mis-lexes raw strings holding \".
+    const std::string quoted_say_hi = R"("say \"hi\"")";
+    const std::string backslash_quote = R"(a\"b)";
+    const std::string quoted_backslash_quote = R"("a\\\"b")";
+    EXPECT_EQ(quoted(R"(say "hi")"), quoted_say_hi);
+    EXPECT_EQ(quoted(backslash_quote), quoted_backslash_quote);
     EXPECT_EQ(quoted(R"(C:\my dir\)"), R"("C:\my dir\\")");
 }
 #endif

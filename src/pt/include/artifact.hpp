@@ -27,22 +27,22 @@ namespace dcn::pt
     struct ArtifactBundle
     {
         EntityKind kind = EntityKind::CONNECTOR;
-        std::string name;
-        nlohmann::json definition;
-        std::string sol_src;
-        std::string generated_solidity;
-        std::string pt_revision;
-        std::string solc_version;
+        std::string name{};
+        nlohmann::json definition{};
+        std::string sol_src{};
+        std::string generated_solidity{};
+        std::string pt_revision{};
+        std::string solc_version{};
         std::string evm_version = "shanghai";
         bool optimizer = true;
         std::uint32_t optimizer_runs = 200;
         bool via_ir = true;
-        std::vector<std::string> imports;
+        std::vector<std::string> imports{};
         // Hash of compiler-emitted init bytecode before constructor arguments are appended.
-        std::string creation_code_hash;
-        std::string runtime_code_hash;
-        std::string metadata_hash;
-        std::vector<ArtifactDependency> dependencies;
+        std::string creation_code_hash{};
+        std::string runtime_code_hash{};
+        std::string metadata_hash{};
+        std::vector<ArtifactDependency> dependencies{};
     };
 
     /// Canonical bytes of a valid bundle; an error for an invalid or oversized one.

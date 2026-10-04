@@ -45,7 +45,7 @@ namespace dcn::rpc
     struct HttpResponse
     {
         int status = 0;
-        std::string body;
+        std::string body{};
     };
 
     // HTTP/1.1 client for one endpoint. Every request owns its connection for its whole

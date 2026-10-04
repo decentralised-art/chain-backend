@@ -70,6 +70,16 @@ namespace dcn::http
     }
 
     std::vector<std::string> splitPathSegments(const std::string path);
+
+    /**
+     * @brief `component` of a query with application/x-www-form-urlencoded escapes undone:
+     * `+` is a space and `%XY` the byte with hex value XY.
+     * @return nullopt for a `%` not followed by two hex digits.
+     */
+    std::optional<std::string> decodeQueryComponent(std::string_view component);
+
+    /// The `key=value` pairs of `query`, decoded with decodeQueryComponent. Pairs without `=`
+    /// or with malformed escapes are skipped.
     absl::flat_hash_map<std::string, std::string> splitQuerySegments(const std::string& query);
 
     /**

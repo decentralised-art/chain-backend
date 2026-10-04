@@ -2987,7 +2987,8 @@ export async function loginWithMetaMask()
     try {
         const [address] = await window.ethereum.request({ method: 'eth_requestAccounts' });
         // Browsers send no Origin header on a same-origin GET, so the page names its own.
-        const nonceRes = await fetch(apiUrl(`/nonce/${address}?origin=${window.location.origin}`));
+        const nonceQuery = new URLSearchParams({ origin: window.location.origin });
+        const nonceRes = await fetch(apiUrl(`/nonce/${encodeURIComponent(address)}?${nonceQuery.toString()}`));
         const nonceBody = await nonceRes.json();
         if (!nonceRes.ok) {
             throw new Error(nonceBody?.message ?? `HTTP ${nonceRes.status}`);

@@ -31,20 +31,20 @@ namespace dcn::rpc
     struct TransactionReceipt
     {
         bool success = false;
-        std::string tx_hash;
+        std::string tx_hash{};
         std::int64_t block_number = 0;
-        std::string block_hash;
-        std::string contract_address;   // empty unless the transaction created a contract
+        std::string block_hash{};
+        std::string contract_address{};   // empty unless the transaction created a contract
         std::uint64_t gas_used = 0;
-        std::vector<json> logs;
+        std::vector<json> logs{};
     };
 
     // A transaction as eth_getTransactionByHash reports it.
     struct TransactionInfo
     {
-        std::string tx_hash;
-        std::string block_hash;   // empty while the transaction is pending
-        std::string input;
+        std::string tx_hash{};
+        std::string block_hash{};   // empty while the transaction is pending
+        std::string input{};
     };
 
     struct FeeEstimate
