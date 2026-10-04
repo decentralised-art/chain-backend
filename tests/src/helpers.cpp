@@ -45,6 +45,14 @@ TEST_F(UnitTest, Utils_EqualsIgnoreCase_ComparesPrefixViews)
     EXPECT_FALSE(utils::equalsIgnoreCase(std::string_view("http").substr(0, 8), "https://"));
 }
 
+TEST_F(UnitTest, Utils_UtcTimestamp_FormatsRfc3339TruncatedToTheSecond)
+{
+    using namespace std::chrono;
+    EXPECT_EQ(utils::utcTimestamp(system_clock::time_point{}), "1970-01-01T00:00:00Z");
+    EXPECT_EQ(utils::utcTimestamp(sys_days{2026y / October / 4} + 12h + 5min + 9s + 999ms), "2026-10-04T12:05:09Z");
+    EXPECT_EQ(utils::utcTimestamp(sys_days{2024y / February / 29} + 23h + 59min + 59s), "2024-02-29T23:59:59Z");
+}
+
 TEST_F(UnitTest, Parse_DumpJsonLossy_ReplacesInvalidUtf8)
 {
     EXPECT_EQ(parse::dumpJsonLossy(json{{"a", 1}}), R"({"a":1})");

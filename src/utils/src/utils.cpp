@@ -47,6 +47,17 @@ namespace dcn::utils
             .count();
     }
 
+    std::string utcTimestamp(const std::chrono::system_clock::time_point time)
+    {
+        const auto seconds = std::chrono::floor<std::chrono::seconds>(time);
+        const auto days = std::chrono::floor<std::chrono::days>(seconds);
+        const std::chrono::year_month_day date{days};
+        const std::chrono::hh_mm_ss clock{seconds - days};
+        return std::format("{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}Z",
+            static_cast<int>(date.year()), static_cast<unsigned>(date.month()), static_cast<unsigned>(date.day()),
+            clock.hours().count(), clock.minutes().count(), clock.seconds().count());
+    }
+
     bool equalsIgnoreCase(const std::string_view a, const std::string_view b) {
     return a.size() == b.size() &&
            std::equal(a.begin(), a.end(), b.begin(), [](char a, char b) {

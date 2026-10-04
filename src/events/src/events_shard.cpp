@@ -1,3 +1,4 @@
+#include <chrono>
 #include <format>
 
 #include "events_shard.hpp"
@@ -11,17 +12,12 @@ namespace dcn::events
 
     EventShardId MonthlyEventShardRouter::shardForFinalizedBlockTime(const std::uint64_t chain_id, const std::int64_t unix_seconds) const
     {
-        std::time_t tt = static_cast<std::time_t>(unix_seconds);
-        std::tm tm_utc{};
-#if defined(_WIN32)
-        gmtime_s(&tm_utc, &tt);
-#else
-        gmtime_r(&tt, &tm_utc);
-#endif
+        const std::chrono::sys_seconds time{std::chrono::seconds{unix_seconds}};
+        const std::chrono::year_month_day date{std::chrono::floor<std::chrono::days>(time)};
         return EventShardId{
             .chain_id = chain_id,
-            .year = tm_utc.tm_year + 1900,
-            .month = tm_utc.tm_mon + 1
+            .year = static_cast<int>(date.year()),
+            .month = static_cast<int>(static_cast<unsigned>(date.month()))
         };
     }
 

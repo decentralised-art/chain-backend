@@ -2,6 +2,9 @@
 
 #include "events_sql_assertions.hpp"
 #include "events_test_harness.hpp"
+#include "events_shard.hpp"
+
+#include <chrono>
 
 using namespace dcn;
 using namespace dcn::tests;
@@ -344,4 +347,22 @@ TEST_F(UnitTest, Events_Archive_PruneRetainsBothRowsWhenFeedPairIsUnexported)
         EXPECT_EQ(edb.scalarInt64("SELECT COUNT(1) FROM normalized_events_hot;"), 1);
         EXPECT_EQ(edb.scalarInt64("SELECT COUNT(1) FROM raw_events_hot;"), 1);
     }
+}
+
+TEST_F(UnitTest, Events_ShardRouter_PicksTheUtcMonthOfTheBlockTime)
+{
+    using namespace std::chrono;
+    const events::MonthlyEventShardRouter router("archive");
+    const auto month_of = [&](const sys_seconds time)
+    {
+        const events::EventShardId shard = router.shardForFinalizedBlockTime(CHAIN_ID, time.time_since_epoch().count());
+        EXPECT_EQ(shard.chain_id, CHAIN_ID);
+        return std::pair{shard.year, shard.month};
+    };
+
+    EXPECT_EQ(month_of(sys_seconds{}), std::pair(1970, 1));
+    EXPECT_EQ(month_of(sys_seconds{} - 1s), std::pair(1969, 12));
+    EXPECT_EQ(month_of(sys_days{2024y / March / 1} - 1s), std::pair(2024, 2));
+    EXPECT_EQ(month_of(sys_days{2024y / March / 1}), std::pair(2024, 3));
+    EXPECT_EQ(month_of(sys_days{2026y / October / 4} + 12h), std::pair(2026, 10));
 }

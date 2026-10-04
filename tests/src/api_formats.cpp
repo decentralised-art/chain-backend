@@ -229,19 +229,10 @@ TEST_F(UnitTest, API_Formats_Get_InvalidAfterCursorReturnsBadRequest)
     EXPECT_EQ(body["message"], "Invalid after cursor");
 }
 
-TEST_F(UnitTest, API_Formats_Get_ZeroLimitReturnsEmptyPageWithTotals)
+TEST_F(UnitTest, API_Formats_Get_ZeroLimitReturnsBadRequest)
 {
     asio::io_context io_context;
     registry::Registry registry(io_context);
-
-    const std::string owner_hex = evmc::hex(makeAddressFromByte(0xC1));
-    ASSERT_TRUE(addScalarConnector(io_context, registry, "TIME", owner_hex, 0x51));
-
-    {
-        ConnectorRecord fmt_a = makeConnectorRecord("FMT_A", owner_hex);
-        addDimension(fmt_a, "TIME");
-        ASSERT_TRUE(runAwaitable(io_context, registry.addConnector(makeAddressFromByte(0x61), std::move(fmt_a))));
-    }
 
     http::Request request;
     request.setMethod(http::Method::GET)
@@ -252,15 +243,9 @@ TEST_F(UnitTest, API_Formats_Get_ZeroLimitReturnsEmptyPageWithTotals)
     query_args.emplace("limit", makeUintRouteArg(0));
 
     const auto response = runAwaitable(io_context, GET_formats(request, {}, std::move(query_args), registry));
-    ASSERT_EQ(response.getCode(), http::Code::OK);
+    ASSERT_EQ(response.getCode(), http::Code::BadRequest);
     const auto body = nlohmann::json::parse(response.getBody());
-    EXPECT_EQ(body["limit"], 0);
-    EXPECT_EQ(body["total_formats"], 1);
-    ASSERT_TRUE(body["formats"].is_array());
-    EXPECT_TRUE(body["formats"].empty());
-    ASSERT_TRUE(body["cursor"].is_object());
-    EXPECT_EQ(body["cursor"]["has_more"], false);
-    EXPECT_EQ(body["cursor"]["next_after"], nullptr);
+    EXPECT_EQ(body["message"], "Invalid argument limit. limit error: Out of range.");
 }
 
 TEST_F(UnitTest, API_Formats_Head_MirrorsValidationAndReturnsNoBody)
@@ -289,6 +274,20 @@ TEST_F(UnitTest, API_Formats_Head_MirrorsValidationAndReturnsNoBody)
                .setVersion("HTTP/1.1");
 
         const auto response = runAwaitable(io_context, HEAD_formats(request, {}, {}, registry));
+        ASSERT_EQ(response.getCode(), http::Code::BadRequest);
+        EXPECT_TRUE(response.getBody().empty());
+    }
+
+    {
+        http::Request request;
+        request.setMethod(http::Method::HEAD)
+               .setPath(http::URL("/formats?limit=0"))
+               .setVersion("HTTP/1.1");
+
+        server::QueryArgsList query_args;
+        query_args.emplace("limit", makeUintRouteArg(0));
+
+        const auto response = runAwaitable(io_context, HEAD_formats(request, {}, std::move(query_args), registry));
         ASSERT_EQ(response.getCode(), http::Code::BadRequest);
         EXPECT_TRUE(response.getBody().empty());
     }

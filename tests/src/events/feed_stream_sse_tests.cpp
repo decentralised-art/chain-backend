@@ -265,3 +265,28 @@ TEST_F(UnitTest, Events_API_FeedStream_StaleCursor_IsStructuredInMeta)
     EXPECT_GE(meta.value("min_available_seq", 0), 2);
     EXPECT_GE(meta.value("replay_floor_seq", 0), 2);
 }
+
+TEST_F(UnitTest, Events_API_Feed_RejectsZeroAndOversizedLimit)
+{
+    const auto paths = makeTempEventsPaths("feed_limit_bounds");
+    asio::io_context io_context;
+    feed::Feed feed_obj(io_context, paths.feed_db, paths.feed_archive_root, 10);
+
+    for(const std::size_t limit : {std::size_t{0}, std::size_t{257}})
+    {
+        server::QueryArgsList query_args;
+        query_args.emplace("limit", makeUintQueryArg(limit));
+
+        const auto response = runAwaitable(io_context, GET_feed(http::Request{}, {}, std::move(query_args), feed_obj));
+        EXPECT_EQ(response.getCode(), http::Code::BadRequest) << "limit=" << limit;
+        const auto body = json::parse(response.getBody(), nullptr, false);
+        ASSERT_FALSE(body.is_discarded());
+        EXPECT_EQ(body.value("message", std::string{}), "Invalid argument limit. limit error: Out of range.");
+    }
+
+    server::QueryArgsList query_args;
+    query_args.emplace("limit", makeUintQueryArg(1));
+    const auto response = runAwaitable(io_context, GET_feed(http::Request{}, {}, std::move(query_args), feed_obj));
+    ASSERT_EQ(response.getCode(), http::Code::OK);
+    EXPECT_EQ(json::parse(response.getBody()).value("limit", 0), 1);
+}

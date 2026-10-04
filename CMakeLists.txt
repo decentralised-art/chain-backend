@@ -31,6 +31,17 @@ message(STATUS "bin directory ${CMAKE_INSTALL_BINDIR}")
 include(cmake/compile_options.cmake)
 include(cmake/dependencies.cmake)
 
+# Project-only MSVC flags. Set after the dependencies so third-party targets keep
+# their own exception and warning settings instead of getting conflicting ones.
+if(MSVC)
+    string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+    add_compile_options(
+        /EHa # Enables standard C++ exception handling plus SEH (Structured Exception Handling)
+        /W4 # Enables aggressive compiler warnings
+        /w14062 # Warns on an enumerator a switch does not handle, as -Wswitch does
+    )
+endif()
+
 add_subdirectory(src)
 
 # create static library target

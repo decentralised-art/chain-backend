@@ -32,9 +32,6 @@ if (MSVC)
 
     add_compile_options(
         /nologo # Suppress compiler startup banner
-        /EHa # Enables standard C++ exception handling plus SEH (Structured Exception Handling)
-        /W4 # Enables aggressive compiler warnings
-        /w14062 # Warns on an enumerator a switch does not handle, as -Wswitch does
         /utf-8 # Set source and execution character set to UTF-8
         /permissive- # Enforce standard compliance
 

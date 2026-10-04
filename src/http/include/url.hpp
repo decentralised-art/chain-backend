@@ -1,7 +1,9 @@
 #pragma once
 
 #include <format>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <sstream>
 
@@ -69,6 +71,16 @@ namespace dcn::http
 
     std::vector<std::string> splitPathSegments(const std::string path);
     absl::flat_hash_map<std::string, std::string> splitQuerySegments(const std::string& query);
+
+    /**
+     * @brief The serialized origin a browser reports for `origin` (as `window.location.origin`
+     * or the `Origin` header): lower-case scheme and host, and the port only when it is not
+     * the scheme's default.
+     *
+     * Accepts `http(s)://host[:port]` with no path, where host is a DNS name or IPv4 address.
+     * @return nullopt for anything else.
+     */
+    std::optional<std::string> canonicalOrigin(std::string_view origin);
 }
 
 template <>

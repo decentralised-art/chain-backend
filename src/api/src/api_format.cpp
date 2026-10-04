@@ -52,7 +52,7 @@ namespace dcn
         }
 
         auto limit_res = parse::parseRouteArgAs<std::size_t>(query_args.at("limit"));
-        if(limit_res && limit_res.value() > MAX_LIMIT)
+        if(limit_res && (limit_res.value() == 0 || limit_res.value() > MAX_LIMIT))
         {
             limit_res = std::unexpected(parse::ParseError{parse::ParseError::Kind::OUT_OF_RANGE});
         }
@@ -114,7 +114,7 @@ namespace dcn
         }
 
         auto limit_res = parse::parseRouteArgAs<std::size_t>(query_args.at("limit"));
-        if(limit_res && limit_res.value() > MAX_LIMIT)
+        if(limit_res && (limit_res.value() == 0 || limit_res.value() > MAX_LIMIT))
         {
             limit_res = std::unexpected(parse::ParseError{parse::ParseError::Kind::OUT_OF_RANGE});
         }
@@ -243,7 +243,7 @@ namespace dcn
         }
 
         auto limit_res = parse::parseRouteArgAs<std::size_t>(query_args.at("limit"));
-        if(limit_res && limit_res.value() > MAX_LIMIT)
+        if(limit_res && (limit_res.value() == 0 || limit_res.value() > MAX_LIMIT))
         {
             limit_res = std::unexpected(parse::ParseError{parse::ParseError::Kind::OUT_OF_RANGE});
         }

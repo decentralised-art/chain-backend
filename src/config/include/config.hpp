@@ -78,6 +78,9 @@ namespace dcn::config
         // Largest HTTP request body accepted, in bytes.
         std::uint32_t max_request_body_size;
 
+        // Origins of the sites users sign in through; sign-in messages name only these.
+        std::vector<std::string> auth_origins;
+
         IngestionConfig chain_ingestion;
         ExecuteConfig execute;
         PublishConfig publish;

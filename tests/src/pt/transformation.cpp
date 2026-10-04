@@ -235,3 +235,25 @@ TEST_F(UnitTest, SolidityIdentifier_RejectsAssemblyKeyword)
 {
     EXPECT_FALSE(pt::isValidSolidityIdentifier("assembly"));
 }
+
+TEST_F(UnitTest, CountUsedArgs_CountsOnePastTheHighestArgsIndex)
+{
+    EXPECT_EQ(pt::countUsedArgs(""), 0U);
+    EXPECT_EQ(pt::countUsedArgs("return x;"), 0U);
+    EXPECT_EQ(pt::countUsedArgs("return x + args[0];"), 1U);
+    EXPECT_EQ(pt::countUsedArgs("return args[2] * args[0] + args[1];"), 3U);
+    EXPECT_EQ(pt::countUsedArgs("myargs[4]"), 5U);
+    EXPECT_EQ(pt::countUsedArgs("args[args[1]]"), 2U);
+    EXPECT_EQ(pt::countUsedArgs("args[] args[x] args[1 ] args[7"), 0U);
+    EXPECT_EQ(pt::countUsedArgs("args[4294967294]"), 4294967295U);
+    EXPECT_EQ(pt::countUsedArgs("args[4294967295]"), std::nullopt);
+    EXPECT_EQ(pt::countUsedArgs("args[99999999999999999999999]"), std::nullopt);
+}
+
+TEST_F(UnitTest, CountUsedArgs_ScansAMegabyteOfSourceWithoutCrashing)
+{
+    const std::string digits = "args[" + std::string(1024 * 1024, '1');
+    EXPECT_EQ(pt::countUsedArgs(digits + "]"), std::nullopt);
+    EXPECT_EQ(pt::countUsedArgs(digits), 0U);
+    EXPECT_FALSE(countTransformationArgs(digits + "]").has_value());
+}

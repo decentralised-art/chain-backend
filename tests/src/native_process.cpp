@@ -60,3 +60,24 @@ TEST_F(UnitTest, Native_RunProcess_KillsEverythingAProcessStartedAtItsTimeout)
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 }
+
+#if defined(_WIN32)
+TEST_F(UnitTest, Native_AppendQuotedArgument_FollowsTheCrtArgvRules)
+{
+    const auto quoted = [](const std::string & arg)
+    {
+        std::string command_line;
+        native::appendQuotedArgument(command_line, arg);
+        return command_line;
+    };
+
+    EXPECT_EQ(quoted("plain"), "plain");
+    EXPECT_EQ(quoted(R"(back\slash)"), R"(back\slash)");
+    EXPECT_EQ(quoted(""), R"("")");
+    EXPECT_EQ(quoted("a b"), R"("a b")");
+    EXPECT_EQ(quoted("tab\there"), "\"tab\there\"");
+    EXPECT_EQ(quoted(R"(say "hi")"), R"("say \"hi\"")");
+    EXPECT_EQ(quoted(R"(a\"b)"), R"("a\\\"b")");
+    EXPECT_EQ(quoted(R"(C:\my dir\)"), R"("C:\my dir\\")");
+}
+#endif

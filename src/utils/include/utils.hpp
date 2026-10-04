@@ -36,6 +36,9 @@ namespace dcn::utils
 
     std::int64_t nowMs();
 
+    /// RFC 3339 UTC timestamp to the second, e.g. `2026-10-04T12:00:00Z`.
+    std::string utcTimestamp(std::chrono::system_clock::time_point time);
+
     template<class DataT, class ChildT, template<typename...> class ChildListT>
     std::vector<std::string> topologicalSort(   
         const absl::flat_hash_map<std::string, DataT> & data,

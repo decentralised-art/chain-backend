@@ -758,7 +758,9 @@ export async function fetchBeforeExecute() {
 
         const container = document.getElementById('treeContainer');
         container.style.display = 'block';
-        container.innerHTML = `<p>Failed to fetch connectors. ${e.message} </p>`;
+        const message = document.createElement('p');
+        message.textContent = `Failed to fetch connectors. ${e.message}`;
+        container.replaceChildren(message);
     }
 }
 

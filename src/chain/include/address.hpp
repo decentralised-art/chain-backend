@@ -27,4 +27,7 @@ namespace dcn::chain
 
     std::string addressToHex(const chain::Address & address);
 
+    /// `0x`-prefixed hex with the EIP-55 mixed-case checksum.
+    std::string addressToChecksumHex(const chain::Address & address);
+
 }

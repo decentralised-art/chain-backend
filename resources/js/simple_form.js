@@ -2986,10 +2986,15 @@ export async function loginWithMetaMask()
 
     try {
         const [address] = await window.ethereum.request({ method: 'eth_requestAccounts' });
-        const nonceRes = await fetch(apiUrl(`/nonce/${address}`));
-        const { nonce } = await nonceRes.json();
+        // Browsers send no Origin header on a same-origin GET, so the page names its own.
+        const nonceRes = await fetch(apiUrl(`/nonce/${address}?origin=${window.location.origin}`));
+        const nonceBody = await nonceRes.json();
+        if (!nonceRes.ok) {
+            throw new Error(nonceBody?.message ?? `HTTP ${nonceRes.status}`);
+        }
 
-        const message = `Login nonce: ${nonce}`;
+        // The server's EIP-4361 message; /auth checks the signature against it by nonce.
+        const { nonce, message } = nonceBody;
         const signature = await window.ethereum.request({
             method: 'personal_sign',
             params: [message, address],
@@ -2998,13 +3003,13 @@ export async function loginWithMetaMask()
         const authRes = await fetch(apiUrl('/auth'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ address, signature, message }),
+            body: JSON.stringify({ address, nonce, signature }),
         });
 
         const result = await authRes.json();
 
         if (result.access_token) {
-            loginStatusDiv.innerHTML = `<p style="color: green;">✅ Authenticated as ${address}</p>`;
+            loginStatusDiv.innerHTML = `<p style="color: green;">✅ Authenticated as ${escapeHtml(address)}</p>`;
             setAccessToken(result.access_token);
             window.dispatchEvent(new CustomEvent('site-nav:auth', { detail: { address } }));
             return true;
@@ -3014,7 +3019,7 @@ export async function loginWithMetaMask()
         }
     } catch (err) {
         console.error(err);
-        loginStatusDiv.innerHTML = `<p style="color: red;">⚠️ Error: ${err.message}</p>`;
+        loginStatusDiv.innerHTML = `<p style="color: red;">⚠️ Error: ${escapeHtml(err.message)}</p>`;
     }
 
     return false;

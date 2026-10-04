@@ -10,6 +10,33 @@
 #include <spdlog/spdlog.h>
 
 namespace dcn::native{
+    void appendQuotedArgument(std::string & command_line, const std::string & arg)
+    {
+        if (!arg.empty() && arg.find_first_of(" \t\n\v\"") == std::string::npos)
+        {
+            command_line += arg;
+            return;
+        }
+
+        // The CRT's argv rules: backslashes are literal unless they precede a quote, where
+        // each pair yields one backslash and an odd one escapes the quote.
+        command_line += '"';
+        std::size_t backslashes = 0;
+        for (const char c : arg)
+        {
+            if (c == '\\')
+            {
+                ++backslashes;
+                continue;
+            }
+            command_line.append(c == '"' ? backslashes * 2 + 1 : backslashes, '\\');
+            command_line += c;
+            backslashes = 0;
+        }
+        command_line.append(backslashes * 2, '\\');
+        command_line += '"';
+    }
+
     bool configureTerminal()
     {
         bool success = true;
@@ -58,25 +85,19 @@ namespace dcn::native{
         std::vector<std::string> args,
         std::optional<std::chrono::milliseconds> timeout)
     {
-        std::ostringstream oss;
+        std::string full_cmd;
 
-        // Quote the command if it contains spaces
-        if (command.find(' ') != std::string::npos)
-            oss << "\"" << command << "\"";
+        // The program name is read up to the closing quote, without escapes.
+        if (command.find_first_of(" \t") != std::string::npos)
+            full_cmd += "\"" + command + "\"";
         else
-            oss << command;
+            full_cmd += command;
 
-        // Append each argument, quoting if needed
         for (const auto& arg : args)
         {
-            oss << ' ';
-            if (arg.find(' ') != std::string::npos)
-                oss << "\"" << arg << "\"";
-            else
-                oss << arg;
+            full_cmd += ' ';
+            appendQuotedArgument(full_cmd, arg);
         }
-
-        const std::string& full_cmd = oss.str();
 
         std::vector<char> cmd_line(full_cmd.size() + 1, '\0');
         strcpy_s(cmd_line.data(), cmd_line.size(), full_cmd.c_str());

@@ -10,37 +10,15 @@ namespace dcn
 {
     parse::Result<std::uint32_t> countConditionArgs(const std::string & sol_src)
     {
-        std::regex used_args_pattern(R"(args\[(\d+)\])");
-        std::uint32_t argc = 0;
-
-        std::smatch match;
-        auto it = sol_src.cbegin();
-        while (std::regex_search(it, sol_src.cend(), match, used_args_pattern))
+        const auto argc = pt::countUsedArgs(sol_src);
+        if(!argc)
         {
-            try
-            {
-                unsigned long value = std::stoul(match[1].str());
-
-                if (value >= std::numeric_limits<std::uint32_t>::max()) {
-                    spdlog::error("Condition args index overflows uint32_t argc computation");
-                    return std::unexpected(parse::ParseError{
-                        parse::ParseError::Kind::INVALID_VALUE,
-                        "Condition args index must be less than uint32_t max"});
-                }
-                argc = std::max(argc, static_cast<std::uint32_t>(value) + 1U);
-            }
-            catch(const std::exception& e)
-            {
-                spdlog::error("Invalid argument index: {}", match[1].str());
-                return std::unexpected(parse::ParseError{
-                    parse::ParseError::Kind::INVALID_VALUE,
-                    std::format("Invalid condition args index `{}`", match[1].str())});
-            }
-
-            it = match.suffix().first;
+            spdlog::error("Condition args index overflows uint32_t argc computation");
+            return std::unexpected(parse::ParseError{
+                parse::ParseError::Kind::INVALID_VALUE,
+                "Condition args index must be less than uint32_t max"});
         }
-
-        return argc;
+        return *argc;
     }
 
     parse::Result<std::string> constructConditionSolidityCode(const Condition & condition)

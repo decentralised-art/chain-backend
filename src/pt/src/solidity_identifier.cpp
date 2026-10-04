@@ -1,6 +1,8 @@
 #include "solidity_identifier.hpp"
 
+#include <algorithm>
 #include <charconv>
+#include <limits>
 #include <string_view>
 #include <unordered_set>
 
@@ -131,5 +133,34 @@ namespace dcn::pt
         }
 
         return true;
+    }
+
+    std::optional<std::uint32_t> countUsedArgs(const std::string_view sol_src)
+    {
+        // A plain scan: user source reaches this, and std::regex recurses per character.
+        constexpr std::string_view open = "args[";
+        std::uint32_t argc = 0;
+
+        for(std::size_t pos = sol_src.find(open); pos != std::string_view::npos; pos = sol_src.find(open, pos))
+        {
+            pos += open.size();
+            const std::size_t digits_end = std::min(sol_src.find_first_not_of("0123456789", pos), sol_src.size());
+            if(digits_end == pos || digits_end == sol_src.size() || sol_src[digits_end] != ']')
+            {
+                continue;
+            }
+
+            std::uint64_t index = 0;
+            const auto [ptr, ec] = std::from_chars(sol_src.data() + pos, sol_src.data() + digits_end, index);
+            if(ec != std::errc{} || index >= std::numeric_limits<std::uint32_t>::max())
+            {
+                return std::nullopt;
+            }
+
+            argc = std::max(argc, static_cast<std::uint32_t>(index) + 1U);
+            pos = digits_end + 1;
+        }
+
+        return argc;
     }
 }

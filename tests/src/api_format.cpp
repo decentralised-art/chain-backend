@@ -277,7 +277,7 @@ TEST_F(UnitTest, API_Format_Get_LimitAboveMaxReturnsBadRequest)
     EXPECT_EQ(body["message"], "Invalid argument limit. limit error: Out of range.");
 }
 
-TEST_F(UnitTest, API_Format_Get_ZeroLimitReturnsEmptyPage)
+TEST_F(UnitTest, API_Format_Get_ZeroLimitReturnsBadRequest)
 {
     asio::io_context io_context;
     registry::Registry registry(io_context);
@@ -295,17 +295,10 @@ TEST_F(UnitTest, API_Format_Get_ZeroLimitReturnsEmptyPage)
     query_args.emplace("limit", makeUintRouteArg(0));
 
     const auto response = runAwaitable(io_context, GET_format(request, std::move(args), std::move(query_args), registry));
-    ASSERT_EQ(response.getCode(), http::Code::OK);
+    ASSERT_EQ(response.getCode(), http::Code::BadRequest);
 
     const auto body = nlohmann::json::parse(response.getBody());
-    EXPECT_EQ(body["format_hash"], format_hash_hex);
-    EXPECT_EQ(body["limit"], 0);
-    EXPECT_EQ(body["total_connectors"], 0);
-    ASSERT_TRUE(body["cursor"].is_object());
-    EXPECT_EQ(body["cursor"]["has_more"], false);
-    EXPECT_EQ(body["cursor"]["next_after"], nullptr);
-    ASSERT_TRUE(body["connectors"].is_array());
-    EXPECT_TRUE(body["connectors"].empty());
+    EXPECT_EQ(body["message"], "Invalid argument limit. limit error: Out of range.");
 }
 
 TEST_F(UnitTest, API_Format_Get_InvalidAfterCursorReturnsBadRequest)

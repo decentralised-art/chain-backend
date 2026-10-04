@@ -74,26 +74,29 @@ TEST_F(UnitTest, API_Account_Get_MissingLimitReturnsBadRequest)
     EXPECT_EQ(body["message"], "Missing argument limit");
 }
 
-TEST_F(UnitTest, API_Account_Get_LimitAboveMaxReturnsBadRequest)
+TEST_F(UnitTest, API_Account_Get_LimitOutOfRangeReturnsBadRequest)
 {
     asio::io_context io_context;
     registry::Registry registry(io_context);
 
     const std::string owner_hex = evmc::hex(makeAddressFromByte(0xA2));
 
-    http::Request request;
-    request.setMethod(http::Method::GET)
-        .setPath(http::URL("/account/" + owner_hex + "?limit=257"))
-        .setVersion("HTTP/1.1");
+    for(const std::size_t limit : {std::size_t{0}, std::size_t{257}})
+    {
+        http::Request request;
+        request.setMethod(http::Method::GET)
+            .setPath(http::URL("/account/" + owner_hex + "?limit=" + std::to_string(limit)))
+            .setVersion("HTTP/1.1");
 
-    std::vector<server::RouteArg> args{makeStringRouteArg(owner_hex)};
-    server::QueryArgsList query_args;
-    query_args.emplace("limit", makeUintRouteArg(257));
+        std::vector<server::RouteArg> args{makeStringRouteArg(owner_hex)};
+        server::QueryArgsList query_args;
+        query_args.emplace("limit", makeUintRouteArg(limit));
 
-    const auto response = runAwaitable(io_context, GET_accountInfo(request, std::move(args), std::move(query_args), registry));
-    ASSERT_EQ(response.getCode(), http::Code::BadRequest);
-    const auto body = nlohmann::json::parse(response.getBody());
-    EXPECT_EQ(body["message"], "Invalid argument limit. limit error: Out of range.");
+        const auto response = runAwaitable(io_context, GET_accountInfo(request, std::move(args), std::move(query_args), registry));
+        ASSERT_EQ(response.getCode(), http::Code::BadRequest) << "limit=" << limit;
+        const auto body = nlohmann::json::parse(response.getBody());
+        EXPECT_EQ(body["message"], "Invalid argument limit. limit error: Out of range.");
+    }
 }
 
 TEST_F(UnitTest, API_Account_Get_InvalidLimitReturnsBadRequest)
