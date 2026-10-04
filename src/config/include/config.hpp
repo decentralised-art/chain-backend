@@ -31,27 +31,37 @@ namespace dcn::config
     };
 
     /// On-chain publication. Owners send and pay for their own publication transactions:
-    /// the server prepares and confirms them and holds no key for them. A key is needed
-    /// only to bootstrap a private deployment.
+    /// the server prepares and confirms them and holds no key for them. The deployer key
+    /// is needed only to deploy or upgrade the PT contracts of the manifest deployment.
     struct PublishConfig
     {
         bool enabled = false;
 
-        // Reviewed canonical manifest, or the one this server wrote when it bootstrapped
-        // a private deployment.
+        // Reviewed canonical manifest, or the one this server wrote when it deployed a
+        // private deployment.
         std::filesystem::path manifest_path;
 
-        // Deploy registry/runner when no deployment is configured. Suitable for private
-        // and development chains; a canonical public deployment is an explicit release
-        // operation with a committed manifest.
-        bool bootstrap = false;
+        // Deployment actions run with the deployer key at every startup that requests
+        // them, registry first, before the server resolves its deployment. Each rewrites
+        // the manifest. Deploying replaces the contract with a new proxy; upgrading points
+        // the existing proxy at a new implementation. Deploying and upgrading the same
+        // contract together is rejected.
+        bool deploy_registry = false;
+        bool deploy_runner = false;
+        bool upgrade_registry = false;
+        bool upgrade_runner = false;
 
-        // The bootstrap key is accepted only from a protected file or an environment
+        // The deployer key is accepted only from a protected file or an environment
         // secret; a command-line value would be visible in the process table.
-        std::filesystem::path bootstrap_key_file;
-        std::string bootstrap_key_env = "DCN_BOOTSTRAP_KEY";
-        std::uint64_t bootstrap_max_gas = 12'000'000;
-        std::uint64_t bootstrap_max_fee_per_gas_wei = 200'000'000'000;
+        std::filesystem::path deployer_key_file;
+        std::string deployer_key_env;
+        std::uint64_t deployer_max_gas = 12'000'000;
+        std::uint64_t deployer_max_fee_per_gas_wei = 200'000'000'000;
+
+        bool hasDeploymentAction() const
+        {
+            return deploy_registry || deploy_runner || upgrade_registry || upgrade_runner;
+        }
     };
 
     struct Config
@@ -60,10 +70,6 @@ namespace dcn::config
         std::filesystem::path logs_path;
         std::filesystem::path resources_path;
         std::filesystem::path storage_path;
-
-        // http(s) URLs and local directories that serve artifacts by content hash.
-        std::vector<std::string> artifact_gateways;
-        std::vector<std::filesystem::path> artifact_replicas;
 
         bool verbose;
 

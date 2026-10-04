@@ -11,6 +11,8 @@
 #include <asio/ssl.hpp>
 #include <spdlog/spdlog.h>
 
+#include "utils.hpp"
+
 #if defined(_WIN32)
     #include <windows.h>
     #include <wincrypt.h>
@@ -35,41 +37,9 @@ namespace dcn::rpc
             return RpcError{.kind = RpcError::Kind::TRANSPORT, .code = 0, .message = std::move(message)};
         }
 
-        RpcError _protocolError(std::string message)
-        {
-            return RpcError{.kind = RpcError::Kind::PROTOCOL, .code = 0, .message = std::move(message)};
-        }
-
         RpcError _fromEc(const std::error_code & ec, const std::string_view stage)
         {
             return _transportError(std::format("{} failed: {}", stage, ec.message()));
-        }
-
-        std::string _toLower(std::string_view value)
-        {
-            std::string out;
-            out.reserve(value.size());
-            for(const char c : value)
-            {
-                out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-            }
-            return out;
-        }
-
-        std::string_view _trim(std::string_view value)
-        {
-            while(!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
-            while(!value.empty() && (value.back() == ' ' || value.back() == '\t' || value.back() == '\r'
-                                     || value.back() == '\n'))
-            {
-                value.remove_suffix(1);
-            }
-            return value;
-        }
-
-        bool _startsWithCaseInsensitive(const std::string_view text, const std::string_view prefix)
-        {
-            return text.size() >= prefix.size() && _toLower(text.substr(0, prefix.size())) == prefix;
         }
 
         std::string _bracketed(const std::string & host)
@@ -278,20 +248,20 @@ namespace dcn::rpc
             const std::string_view status_line(headers.data(), status_end == std::string::npos ? headers.size() : status_end);
             if(!status_line.starts_with("HTTP/1."))
             {
-                return std::unexpected(_protocolError("malformed HTTP status line"));
+                return std::unexpected(RpcError::protocol("malformed HTTP status line"));
             }
             head.keep_alive = !status_line.starts_with("HTTP/1.0");
 
             const std::size_t first_space = status_line.find(' ');
             if(first_space == std::string_view::npos || status_line.size() < first_space + 4)
             {
-                return std::unexpected(_protocolError("malformed HTTP status line"));
+                return std::unexpected(RpcError::protocol("malformed HTTP status line"));
             }
             const std::string_view code_text = status_line.substr(first_space + 1, 3);
             const auto [code_end, code_ec] = std::from_chars(code_text.data(), code_text.data() + code_text.size(), head.status);
             if(code_ec != std::errc{} || code_end != code_text.data() + code_text.size() || head.status < 100)
             {
-                return std::unexpected(_protocolError("malformed HTTP status code"));
+                return std::unexpected(RpcError::protocol("malformed HTTP status code"));
             }
 
             std::size_t line_begin = status_end == std::string::npos ? headers.size() : status_end + 2;
@@ -312,8 +282,8 @@ namespace dcn::rpc
                     continue;
                 }
 
-                const std::string name = _toLower(_trim(line.substr(0, colon)));
-                const std::string value = _toLower(_trim(line.substr(colon + 1)));
+                const std::string name = utils::toLower(std::string(utils::trimView(line.substr(0, colon))));
+                const std::string value = utils::toLower(std::string(utils::trimView(line.substr(colon + 1))));
 
                 if(name == "content-length")
                 {
@@ -322,7 +292,7 @@ namespace dcn::rpc
                     if(parse_ec != std::errc{} || end != value.data() + value.size()
                        || (head.content_length && *head.content_length != parsed))
                     {
-                        return std::unexpected(_protocolError("malformed Content-Length"));
+                        return std::unexpected(RpcError::protocol("malformed Content-Length"));
                     }
                     head.content_length = parsed;
                 }
@@ -505,7 +475,7 @@ namespace dcn::rpc
             if(ec) co_return std::unexpected(_fromEc(ec, "response header read"));
             if(header_size > MAX_HEADER_BYTES)
             {
-                co_return std::unexpected(_protocolError("response headers exceed size limit"));
+                co_return std::unexpected(RpcError::protocol("response headers exceed size limit"));
             }
 
             const auto head = _parseHead(_take(buffer, header_size));
@@ -523,14 +493,14 @@ namespace dcn::rpc
                     if(ec) co_return std::unexpected(_fromEc(ec, "chunk size read"));
 
                     const std::string size_line = _take(buffer, line_size);
-                    const std::string_view trimmed = _trim(size_line);
+                    const std::string_view trimmed = utils::trimView(size_line);
                     const std::string_view size_text = trimmed.substr(0, trimmed.find(';'));
                     std::size_t chunk_size = 0;
                     const auto [end, parse_ec] = std::from_chars(
                         size_text.data(), size_text.data() + size_text.size(), chunk_size, 16);
                     if(size_text.empty() || parse_ec != std::errc{} || end != size_text.data() + size_text.size())
                     {
-                        co_return std::unexpected(_protocolError("malformed chunk size"));
+                        co_return std::unexpected(RpcError::protocol("malformed chunk size"));
                     }
 
                     if(chunk_size == 0)
@@ -551,7 +521,7 @@ namespace dcn::rpc
                     std::string chunk = _take(buffer, chunk_size + 2);
                     if(!chunk.ends_with("\r\n"))
                     {
-                        co_return std::unexpected(_protocolError("chunk is not terminated by CRLF"));
+                        co_return std::unexpected(RpcError::protocol("chunk is not terminated by CRLF"));
                     }
                     chunk.resize(chunk_size);
                     response.body += chunk;
@@ -573,7 +543,7 @@ namespace dcn::rpc
                     trailer_bytes += line_size;
                     if(trailer_bytes > MAX_HEADER_BYTES)
                     {
-                        co_return std::unexpected(_protocolError("chunk trailer exceeds size limit"));
+                        co_return std::unexpected(RpcError::protocol("chunk trailer exceeds size limit"));
                     }
                 }
             }
@@ -740,6 +710,11 @@ namespace dcn::rpc
             }
             if(status == 429)
             {
+                if(mentionsQuotaExhausted(response.body))
+                {
+                    return std::unexpected(RpcError{
+                        .kind = RpcError::Kind::QUOTA, .code = status, .message = "provider usage quota exhausted"});
+                }
                 return std::unexpected(RpcError{
                     .kind = RpcError::Kind::THROTTLED, .code = status, .message = "provider rate limited request"});
             }
@@ -821,12 +796,12 @@ namespace dcn::rpc
         Endpoint endpoint;
 
         std::string_view rest;
-        if(_startsWithCaseInsensitive(url, "https://"))
+        if(utils::equalsIgnoreCase(url.substr(0, 8), "https://"))
         {
             endpoint.tls = true;
             rest = url.substr(8);
         }
-        else if(_startsWithCaseInsensitive(url, "http://"))
+        else if(utils::equalsIgnoreCase(url.substr(0, 7), "http://"))
         {
             endpoint.tls = false;
             rest = url.substr(7);

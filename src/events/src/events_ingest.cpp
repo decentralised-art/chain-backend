@@ -5,6 +5,7 @@
 #include "events_ingest.hpp"
 #include "emitted_log_source.hpp"
 #include "chain.hpp"
+#include "parser.hpp"
 #include "pt.hpp"
 #include "registry_events.hpp"
 
@@ -12,13 +13,6 @@ namespace dcn::events
 {
     namespace
     {
-        // Chain-supplied strings are arbitrary bytes; invalid UTF-8 is replaced rather
-        // than allowed to throw out of the ingestion loop.
-        std::string dumpPayload(const json & payload)
-        {
-            return payload.dump(-1, ' ', false, json::error_handler_t::replace);
-        }
-
         std::optional<evmc::bytes32> readBytes32(const std::span<const std::uint8_t> data, const std::size_t offset)
         {
             if(offset > data.size() || data.size() - offset < 32) return std::nullopt;
@@ -113,7 +107,7 @@ namespace dcn::events
                 .content_hash = chain::bytes32ToHex(*content_hash),
                 .metadata_hash = chain::bytes32ToHex(*metadata_hash),
                 .entity_kind = kind,
-                .decoded_json = dumpPayload(json{{"name", *name}, {"owner", chain::addressToHex(*owner)}})
+                .decoded_json = parse::dumpJsonLossy(json{{"name", *name}, {"owner", chain::addressToHex(*owner)}})
             };
         }
 
@@ -140,7 +134,7 @@ namespace dcn::events
                 .entity_address = chain::addressToHex(*entity),
                 .entity_kind = kind,
                 .old_owner = chain::addressToHex(*old_owner),
-                .decoded_json = dumpPayload(json{
+                .decoded_json = parse::dumpJsonLossy(json{
                     {"kind", std::string(pt::entityKindName(kind))},
                     {"name", *name},
                     {"old_owner", chain::addressToHex(*old_owner)},
@@ -215,7 +209,7 @@ namespace dcn::events
                                  .metadata_hash = chain::bytes32ToHex(connector->metadata_hash),
                                  .runtime_code_hash = chain::bytes32ToHex(connector->runtime_code_hash),
                                  .entity_kind = pt::EntityKind::CONNECTOR,
-                                 .decoded_json = dumpPayload(payload)};
+                                 .decoded_json = parse::dumpJsonLossy(payload)};
         }
 
         if (topic0 == _transformation_topic)
@@ -248,7 +242,7 @@ namespace dcn::events
                                  .metadata_hash = chain::bytes32ToHex(transformation->metadata_hash),
                                  .runtime_code_hash = chain::bytes32ToHex(transformation->runtime_code_hash),
                                  .entity_kind = pt::EntityKind::TRANSFORMATION,
-                                 .decoded_json = dumpPayload(payload)};
+                                 .decoded_json = parse::dumpJsonLossy(payload)};
         }
 
         if (topic0 == _condition_topic)
@@ -281,7 +275,7 @@ namespace dcn::events
                                  .metadata_hash = chain::bytes32ToHex(condition->metadata_hash),
                                  .runtime_code_hash = chain::bytes32ToHex(condition->runtime_code_hash),
                                  .entity_kind = pt::EntityKind::CONDITION,
-                                 .decoded_json = dumpPayload(payload)};
+                                 .decoded_json = parse::dumpJsonLossy(payload)};
         }
 
         return std::nullopt;

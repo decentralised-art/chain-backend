@@ -183,6 +183,8 @@ namespace dcn::parse
 
         json_obj["name"] = condition.name();
         json_obj["args_count"] = condition.args_count();
+        // Always present; null while the deployed runtime code is unknown.
+        json_obj["runtime_code"] = condition.has_runtime_code() ? json(condition.runtime_code()) : json(nullptr);
 
         return json_obj;
     }
@@ -198,7 +200,7 @@ namespace dcn::parse
         else return std::unexpected(ParseError{ParseError::Kind::INVALID_VALUE, "invalid name"});
         
 
-        // sol_src is an execution input hydrated from local storage or a verified artifact.
+        // sol_src is an execution input, kept in the local definition of an entity created here.
         if (json_obj.contains("sol_src")) {
             condition.set_sol_src(json_obj["sol_src"].get<std::string>());
         }

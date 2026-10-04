@@ -49,6 +49,10 @@ namespace dcn::registry
 
             ~Registry() = default;
 
+            // Selects the remote deployment visible alongside local entities and clears
+            // cached resolutions. Stored versions of other deployments are retained.
+            asio::awaitable<bool> selectRemoteSource(std::string source_id);
+
             // expected_format_hash, when set, is the chain-emitted format hash. The registry is a
             // mirror of chain state, so a locally-recomputed hash that disagrees with the chain is a
             // divergence: addConnector refuses rather than storing a hash the POST response/event
@@ -114,6 +118,9 @@ namespace dcn::registry
             asio::awaitable<std::optional<EntityLocation>> getEntityLocation(EntityKind kind, const std::string & name) const;
             asio::awaitable<bool> hasRemoteEntity(EntityKind kind, const std::string & name) const;
             asio::awaitable<bool> hasLocalEntity(EntityKind kind, const std::string & name) const;
+            // A local entity rebuilt with other code, e.g. by another compiler, keeps its
+            // definition; its local version takes the hashes of its latest event.
+            asio::awaitable<bool> updateLocalVersionHashes(EntityKind kind, std::string name, EntitySource source);
             asio::awaitable<bool> removeEntityVersion(EntityKind kind, std::string source_id, std::string name);
             asio::awaitable<bool> changeEntityOwner(
                 EntityKind kind,
@@ -121,15 +128,18 @@ namespace dcn::registry
                 std::string name,
                 chain::Address old_owner,
                 chain::Address new_owner);
-            asio::awaitable<std::vector<ArtifactReference>> getArtifactsDue(
-                std::int64_t now_ms,
-                std::size_t limit) const;
-            asio::awaitable<bool> setArtifactState(
-                EntityKind kind,
-                std::string source_id,
-                std::string name,
-                pt::ArtifactState state,
-                std::int64_t retry_at_ms);
+
+            // Runtime code never changes under its hash, so reads are served from memory once
+            // the code has been read or stored.
+            asio::awaitable<bool> putRuntimeCode(std::string code_hash, std::vector<std::uint8_t> code);
+            asio::awaitable<std::optional<std::vector<std::uint8_t>>> getRuntimeCode(std::string code_hash) const;
+            asio::awaitable<bool> hasRuntimeCode(std::string code_hash) const;
+
+            // The creation code the chain deployed `entity` of `source_id` from.
+            asio::awaitable<bool> putChainCreationCode(std::string source_id, chain::Address entity, std::vector<std::uint8_t> code);
+            asio::awaitable<std::optional<std::vector<std::uint8_t>>> getChainCreationCode(
+                std::string source_id, chain::Address entity) const;
+            asio::awaitable<bool> hasChainCreationCode(std::string source_id, chain::Address entity) const;
 
             asio::awaitable<bool> addConditionsBatch(
                 std::vector<std::pair<chain::Address, ConditionRecord>> conditions,
@@ -172,6 +182,8 @@ namespace dcn::registry
 
         private:
             static constexpr std::size_t kHotCacheCapacity = 1024;
+            // Runtime code is up to 24 KiB per entry on EIP-170 chains.
+            static constexpr std::size_t kRuntimeCodeCacheCapacity = 256;
 
             asio::strand<asio::io_context::executor_type> _strand;
             std::unique_ptr<IRegistryStore> _store;
@@ -179,6 +191,7 @@ namespace dcn::registry
             mutable LruCache<std::string, std::optional<evmc::bytes32>> _format_hash_cache;
             mutable LruCache<std::string, std::optional<TransformationRecordHandle>> _transformation_record_cache;
             mutable LruCache<std::string, std::optional<ConditionRecordHandle>> _condition_record_cache;
+            mutable LruCache<std::string, std::shared_ptr<const std::vector<std::uint8_t>>> _runtime_code_cache;
     };
 }
 

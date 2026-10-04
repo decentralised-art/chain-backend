@@ -2,6 +2,7 @@
 
 #include "fake_eth_node.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <string>
 #include <vector>
@@ -90,4 +91,51 @@ TEST_F(UnitTest, Pt_DecodeParticles_RefusesMalformedRunnerOutputWithoutReadingPa
     auto oversized = bytesOf(encodeParticlesResult({{"/Root:0", {1}}}));
     oversized[oversized.size() - 5] = 0x01;
     EXPECT_FALSE(parse::decodeBytes<std::vector<Particles>>(oversized).has_value());
+}
+
+TEST_F(UnitTest, Chain_ReadUint64Word_RejectsOverflowAndShortInput)
+{
+    std::vector<std::uint8_t> word(32, 0);
+    word[31] = 0x2A;
+    EXPECT_EQ(chain::readUint64Word(word), std::optional<std::uint64_t>(42));
+
+    std::fill(word.begin() + 24, word.end(), 0xFF);
+    EXPECT_EQ(chain::readUint64Word(word), std::optional<std::uint64_t>(std::numeric_limits<std::uint64_t>::max()));
+
+    word[23] = 0x01;
+    EXPECT_FALSE(chain::readUint64Word(word).has_value());
+
+    EXPECT_FALSE(chain::readUint64Word(std::vector<std::uint8_t>(31, 0)).has_value());
+    EXPECT_FALSE(chain::readUint64Word(std::vector<std::uint8_t>(32, 0), 1).has_value());
+    EXPECT_FALSE(chain::readUint64Word(word.data(), word.size(), std::numeric_limits<std::size_t>::max() - 8).has_value());
+}
+
+TEST_F(UnitTest, Chain_ReadAddressWord_RejectsWrappingOffset)
+{
+    const std::vector<std::uint8_t> word(32, 0);
+    EXPECT_TRUE(chain::readAddressWord(word).has_value());
+    EXPECT_FALSE(chain::readAddressWord(word.data(), word.size(), std::numeric_limits<std::size_t>::max() - 8).has_value());
+}
+
+TEST_F(UnitTest, Chain_ToHexQuantity_EncodesSignedAndUnsigned)
+{
+    EXPECT_EQ(chain::toHexQuantity(0), "0x0");
+    EXPECT_EQ(chain::toHexQuantity(std::int64_t{-5}), "0x0");
+    EXPECT_EQ(chain::toHexQuantity(std::int64_t{255}), "0xff");
+    EXPECT_EQ(chain::toHexQuantity(std::numeric_limits<std::uint64_t>::max()), "0xffffffffffffffff");
+}
+
+TEST_F(UnitTest, Chain_IsBytes32Hex_RequiresExactly32Bytes)
+{
+    const std::string hash(64, 'a');
+    EXPECT_TRUE(chain::isBytes32Hex(hash));
+    EXPECT_TRUE(chain::isBytes32Hex("0x" + hash));
+    EXPECT_FALSE(chain::isBytes32Hex("0x" + hash.substr(2)));
+    EXPECT_FALSE(chain::isBytes32Hex("0x" + std::string(63, 'a') + "g"));
+}
+
+TEST_F(UnitTest, Chain_KeccakBytes_SpanMatchesPointerForm)
+{
+    const std::vector<std::uint8_t> bytes{1, 2, 3};
+    EXPECT_EQ(chain::keccakBytes(bytes), chain::keccakBytes(bytes.data(), bytes.size()));
 }

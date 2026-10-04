@@ -690,8 +690,8 @@ namespace dcn::registry
             return lhs_bytes == rhs_bytes;
         }
 
-        // The registry mirrors only chain-derivable state. Executable source remains in the
-        // content-addressed artifact, while args_count is stored for reads and validation.
+        // The registry mirrors only chain-derivable state: a local entity's source stays in
+        // its retained definition, while args_count is stored for reads and validation.
         static void normalizeForRegistry(TransformationRecord & record)
         {
             auto * transformation = record.mutable_transformation();
@@ -809,6 +809,20 @@ namespace dcn::registry
         }
 
         template<typename KeyT, typename ValueT>
+        static void eraseHotCacheEntry(LruCache<KeyT, ValueT> & cache, const KeyT & key)
+        {
+            const auto it = cache.entries.find(key);
+            if(it == cache.entries.end())
+            {
+                return;
+            }
+
+            cache.order.erase(it->second.order_it);
+            cache.entries.erase(it);
+            spdlog::debug("Cache remove [{}] key={}", cache.name, cacheKeyToString(key));
+        }
+
+        template<typename KeyT, typename ValueT>
         static void clearHotCache(LruCache<KeyT, ValueT> & cache, const char * reason)
         {
             if(cache.entries.empty())
@@ -836,11 +850,24 @@ namespace dcn::registry
         _format_hash_cache.name = "format-hash";
         _transformation_record_cache.name = "transformation-record";
         _condition_record_cache.name = "condition-record";
+        _runtime_code_cache.name = "runtime-code";
 
         _connector_record_cache.capacity = kHotCacheCapacity;
         _format_hash_cache.capacity = kHotCacheCapacity;
         _transformation_record_cache.capacity = kHotCacheCapacity;
         _condition_record_cache.capacity = kHotCacheCapacity;
+        _runtime_code_cache.capacity = kRuntimeCodeCacheCapacity;
+    }
+
+    asio::awaitable<bool> Registry::selectRemoteSource(std::string source_id)
+    {
+        co_await async::ensureOnStrand(_strand);
+        if(!_store->selectRemoteSource(source_id)) co_return false;
+        clearHotCache(_connector_record_cache, "source selection");
+        clearHotCache(_format_hash_cache, "source selection");
+        clearHotCache(_transformation_record_cache, "source selection");
+        clearHotCache(_condition_record_cache, "source selection");
+        co_return true;
     }
 
     asio::awaitable<bool> Registry::addConnector(chain::Address address, ConnectorRecord record,
@@ -966,14 +993,9 @@ namespace dcn::registry
             co_return false;
         }
 
-        putHotCacheEntry(
-            _connector_record_cache,
-            connector_name,
-            std::optional<ConnectorRecordHandle>(std::make_shared<ConnectorRecord>(record)));
-        putHotCacheEntry(
-            _format_hash_cache,
-            connector_name,
-            std::optional<evmc::bytes32>(format_hash));
+        // The version now visible may belong to another source; the next read resolves it.
+        eraseHotCacheEntry(_connector_record_cache, connector_name);
+        eraseHotCacheEntry(_format_hash_cache, connector_name);
 
         co_return true;
     }
@@ -1159,22 +1181,11 @@ namespace dcn::registry
             co_return false;
         }
 
+        // The versions now visible may belong to another source; the next read resolves them.
         for(const ConnectorBatchItem & item : batch_items)
         {
-            const std::string & connector_name = item.record.connector().name();
-            if(!_store->hasConnector(connector_name))
-            {
-                continue;
-            }
-
-            putHotCacheEntry(
-                _connector_record_cache,
-                connector_name,
-                std::optional<ConnectorRecordHandle>(std::make_shared<ConnectorRecord>(item.record)));
-            putHotCacheEntry(
-                _format_hash_cache,
-                connector_name,
-                std::optional<evmc::bytes32>(item.format_hash));
+            eraseHotCacheEntry(_connector_record_cache, item.record.connector().name());
+            eraseHotCacheEntry(_format_hash_cache, item.record.connector().name());
         }
 
         co_return inserted && all_valid;
@@ -1349,11 +1360,8 @@ namespace dcn::registry
         const bool inserted = _store->addTransformationVersion(source, address, record);
         if(inserted)
         {
-            putHotCacheEntry(
-                _transformation_record_cache,
-                transformation_name,
-                std::optional<TransformationRecordHandle>(
-                    std::make_shared<TransformationRecord>(record)));
+            // The version now visible may belong to another source; the next read resolves it.
+            eraseHotCacheEntry(_transformation_record_cache, transformation_name);
         }
 
         co_return inserted;
@@ -1434,17 +1442,10 @@ namespace dcn::registry
         const bool inserted = _store->addTransformationsBatch(batch_items, all_or_nothing);
         if(inserted || !all_or_nothing)
         {
+            // The versions now visible may belong to another source; the next read resolves them.
             for(const auto & item : batch_items)
             {
-                if(!_store->hasTransformation(item.record.transformation().name()))
-                {
-                    continue;
-                }
-                putHotCacheEntry(
-                    _transformation_record_cache,
-                    item.record.transformation().name(),
-                    std::optional<TransformationRecordHandle>(
-                        std::make_shared<TransformationRecord>(item.record)));
+                eraseHotCacheEntry(_transformation_record_cache, item.record.transformation().name());
             }
         }
 
@@ -1557,11 +1558,8 @@ namespace dcn::registry
         const bool inserted = _store->addConditionVersion(source, address, record);
         if(inserted)
         {
-            putHotCacheEntry(
-                _condition_record_cache,
-                condition_name,
-                std::optional<ConditionRecordHandle>(
-                    std::make_shared<ConditionRecord>(record)));
+            // The version now visible may belong to another source; the next read resolves it.
+            eraseHotCacheEntry(_condition_record_cache, condition_name);
         }
 
         co_return inserted;
@@ -1642,17 +1640,10 @@ namespace dcn::registry
         const bool inserted = _store->addConditionsBatch(batch_items, all_or_nothing);
         if(inserted || !all_or_nothing)
         {
+            // The versions now visible may belong to another source; the next read resolves them.
             for(const auto & item : batch_items)
             {
-                if(!_store->hasCondition(item.record.condition().name()))
-                {
-                    continue;
-                }
-                putHotCacheEntry(
-                    _condition_record_cache,
-                    item.record.condition().name(),
-                    std::optional<ConditionRecordHandle>(
-                        std::make_shared<ConditionRecord>(item.record)));
+                eraseHotCacheEntry(_condition_record_cache, item.record.condition().name());
             }
         }
 
@@ -1796,6 +1787,15 @@ namespace dcn::registry
         co_return _store->hasRemoteEntity(kind, name);
     }
 
+    asio::awaitable<bool> Registry::updateLocalVersionHashes(
+        const EntityKind kind,
+        std::string name,
+        EntitySource source)
+    {
+        co_await async::ensureOnStrand(_strand);
+        co_return _store->updateLocalVersionHashes(kind, name, source);
+    }
+
     asio::awaitable<bool> Registry::hasLocalEntity(const EntityKind kind, const std::string & name) const
     {
         co_await async::ensureOnStrand(_strand);
@@ -1811,10 +1811,10 @@ namespace dcn::registry
         const bool removed = _store->removeEntityVersion(kind, source_id, name);
         if(removed)
         {
-            _connector_record_cache.entries.erase(name);
-            _transformation_record_cache.entries.erase(name);
-            _condition_record_cache.entries.erase(name);
-            _format_hash_cache.entries.erase(name);
+            eraseHotCacheEntry(_connector_record_cache, name);
+            eraseHotCacheEntry(_transformation_record_cache, name);
+            eraseHotCacheEntry(_condition_record_cache, name);
+            eraseHotCacheEntry(_format_hash_cache, name);
         }
         co_return removed;
     }
@@ -1830,29 +1830,66 @@ namespace dcn::registry
         const bool changed = _store->changeEntityOwner(kind, source_id, name, old_owner, new_owner);
         if(changed)
         {
-            _connector_record_cache.entries.erase(name);
-            _transformation_record_cache.entries.erase(name);
-            _condition_record_cache.entries.erase(name);
+            eraseHotCacheEntry(_connector_record_cache, name);
+            eraseHotCacheEntry(_transformation_record_cache, name);
+            eraseHotCacheEntry(_condition_record_cache, name);
         }
         co_return changed;
     }
 
-    asio::awaitable<std::vector<ArtifactReference>> Registry::getArtifactsDue(
-        const std::int64_t now_ms,
-        const std::size_t limit) const
+    asio::awaitable<bool> Registry::putRuntimeCode(std::string code_hash, std::vector<std::uint8_t> code)
     {
         co_await async::ensureOnStrand(_strand);
-        co_return _store->getArtifactsDue(now_ms, limit);
+        if(!_store->putRuntimeCode(code_hash, code)) co_return false;
+        putHotCacheEntry(
+            _runtime_code_cache,
+            code_hash,
+            std::make_shared<const std::vector<std::uint8_t>>(std::move(code)));
+        co_return true;
     }
 
-    asio::awaitable<bool> Registry::setArtifactState(
-        const EntityKind kind,
-        std::string source_id,
-        std::string name,
-        const pt::ArtifactState state,
-        const std::int64_t retry_at_ms)
+    asio::awaitable<std::optional<std::vector<std::uint8_t>>> Registry::getRuntimeCode(std::string code_hash) const
     {
         co_await async::ensureOnStrand(_strand);
-        co_return _store->setArtifactState(kind, source_id, name, state, retry_at_ms);
+        if(const auto * cached = getHotCacheEntry(_runtime_code_cache, code_hash))
+        {
+            co_return **cached;
+        }
+
+        auto code = _store->getRuntimeCode(code_hash);
+        if(code)
+        {
+            putHotCacheEntry(_runtime_code_cache, code_hash, std::make_shared<const std::vector<std::uint8_t>>(*code));
+        }
+        co_return code;
+    }
+
+    asio::awaitable<bool> Registry::putChainCreationCode(
+        std::string source_id,
+        chain::Address entity,
+        std::vector<std::uint8_t> code)
+    {
+        co_await async::ensureOnStrand(_strand);
+        co_return _store->putChainCreationCode(source_id, entity, code);
+    }
+
+    asio::awaitable<std::optional<std::vector<std::uint8_t>>> Registry::getChainCreationCode(
+        std::string source_id,
+        chain::Address entity) const
+    {
+        co_await async::ensureOnStrand(_strand);
+        co_return _store->getChainCreationCode(source_id, entity);
+    }
+
+    asio::awaitable<bool> Registry::hasChainCreationCode(std::string source_id, chain::Address entity) const
+    {
+        co_await async::ensureOnStrand(_strand);
+        co_return _store->hasChainCreationCode(source_id, entity);
+    }
+
+    asio::awaitable<bool> Registry::hasRuntimeCode(std::string code_hash) const
+    {
+        co_await async::ensureOnStrand(_strand);
+        co_return getHotCacheEntry(_runtime_code_cache, code_hash) != nullptr || _store->hasRuntimeCode(code_hash);
     }
 }

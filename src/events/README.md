@@ -127,7 +127,12 @@ its own cursor:
   may still hold rows of a replaced fork until a later cycle rescans it. When the
   endpoint answers that it does not serve the tags, finality falls back to
   `head - --chain-confirmations` and the tags are tried again later; a transient
-  failure only skips the poll.
+  failure only skips the poll. The tags are read again at most every five
+  minutes, since they move once per epoch; a stale value only delays finality.
+- A caught-up poll costs two requests: the `latest` block and one
+  `eth_getLogs`. The `latest` header doubles as the range's end check, and the
+  finalized tag as the anchor check when they name the same block. The poll
+  interval is `--chain-poll-ms` (default 60 s).
 - The hash of the last finalized block is persisted as an anchor. If the
   provider later reports another hash for it, the source pauses instead of
   rolling back finalized rows; it needs reindexing from a trusted provider.
@@ -289,14 +294,47 @@ ingested block range, so their events are never seen. With `--chain-rpc`, the
 projector reads each such dependency from the PT registry state at the
 connector's block (`getTransformation`/`getCondition`, `getEntityOwner`,
 `getEntityContentHash`, `getEntityMetadataHash`, the entity's `getArgsCount` and
-code hash) and stores it as a chain version before the connector, so the
-artifact runtime hydrates it too. A dependency that cannot be read fails the row
-under the normal retry/dead-letter policy. Composite and binding connectors are
+code) and stores it as a chain version before the connector. A dependency that
+cannot be read fails the row under the normal retry/dead-letter policy. Before
+the dependency is stored, its publication is located for its creation code: its
+code first appears in the block it was published in, which a binary search over
+historical `eth_getCode` finds, and that block's logs name the transaction. A
+transient RPC failure (transport, timeout, throttling, quota) or a failed write
+fails the row, so the retry recovers the code again. Any other answer is final:
+on a node without historical state the publication is not found, and the
+dependency is kept without creation code. Composite and binding connectors are
 not back-filled.
 
+With `--chain-rpc`, the projector also stores, before the entity itself:
+
+- the runtime code of every chain transformation and condition (`eth_getCode`
+  at the event's block, in `runtime_code` by its hash), which `GET` serves;
+- the creation code every chain entity was deployed from (in
+  `chain_creation_code` by source and entity address). It is found in the
+  calldata of the event's transaction: the transaction's own publish call, or
+  the inner call a relay (a multisig, a smart account, a multicall) embeds
+  verbatim. A call counts only when the CREATE2 address its publication fields
+  and creation code yield, deployed by the event's registry, is the entity's
+  address; that binds the code byte for byte to the deployed one, so a decoy
+  call that never executed cannot supply it. A relay that builds the call on
+  chain leaves none to find.
+
+The code a batch needs is read up front, at most 8 transactions at a time, so a
+batch costs a few round trips rather than one per entity. Each transaction is
+read and searched once for every entity it published. Rows still materialize
+one by one in event order. The first read that fails stops the up-front reads,
+since rows stop at the first that fails; rows the up-front reads did not reach
+read their own code when they come up. A projection whose code or transaction
+cannot be read is incomplete: the row fails and is re-checked through the
+retry, dead-letter and dead-letter sweep policy.
+
 `POST /simulate` runs any registered connector: one that exists only on chain is
-first deployed into the local EVM with its dependencies from their verified
-artifacts, and answers 503 while those artifacts are unavailable.
+first deployed into the local EVM with its dependencies, each replayed from its
+stored creation code, without contacting the chain and without a compiler. The
+constructor runs as it did on chain, so state it initializes is the chain's; a
+connector's registry constructor argument is pointed at the local registry. A
+chain entity without creation code answers 503, naming the entity. State an
+entity changes after deployment is not reproduced.
 
 ## Failure Handling
 

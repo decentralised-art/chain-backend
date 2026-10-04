@@ -1,15 +1,10 @@
 #include "artifact.hpp"
 
 #include <algorithm>
-#include <format>
-#include <fstream>
 #include <ranges>
-#include <string_view>
 #include <tuple>
-#include <utility>
 
 #include "chain.hpp"
-#include "file.hpp"
 
 namespace dcn::pt
 {
@@ -26,52 +21,7 @@ namespace dcn::pt
             });
         }
 
-        std::filesystem::path artifactPath(
-            const std::filesystem::path & root,
-            const std::string & content_hash)
-        {
-            return root / (content_hash + ".json");
-        }
-
-        std::expected<std::string, std::string> readFile(const std::filesystem::path & path)
-        {
-            std::error_code ec;
-            const auto size = std::filesystem::file_size(path, ec);
-            if(ec) return std::unexpected("artifact is missing");
-            if(size == 0 || size > MAX_ARTIFACT_BYTES)
-            {
-                return std::unexpected("artifact size is invalid");
-            }
-
-            std::ifstream input(path, std::ios::binary);
-            if(!input) return std::unexpected("artifact cannot be opened");
-            std::string bytes(static_cast<std::size_t>(size), '\0');
-            if(!input.read(bytes.data(), static_cast<std::streamsize>(bytes.size())))
-            {
-                return std::unexpected("artifact cannot be read");
-            }
-            return bytes;
-        }
-
-        std::expected<void, std::string> writeVerified(
-            const std::filesystem::path & root,
-            const std::string & content_hash,
-            const std::string & bytes)
-        {
-            const auto target = artifactPath(root, content_hash);
-            if(const auto written = file::writeFileDurably(target, bytes); !written)
-            {
-                return std::unexpected(std::format("artifact cannot be written: {}", written.error()));
-            }
-
-            const auto stored = readFile(target);
-            if(!stored || artifactContentHash(*stored) != content_hash)
-            {
-                return std::unexpected("artifact read-back hash mismatch");
-            }
-            return {};
-        }
-
+        // Checks that `value` is a well-formed bundle before its bytes are hashed.
         std::expected<ArtifactBundle, std::string> parseBundleJson(const nlohmann::json & value)
         {
             try
@@ -175,17 +125,6 @@ namespace dcn::pt
         }
     }
 
-    std::string_view artifactStateName(const ArtifactState state)
-    {
-        switch(state)
-        {
-        case ArtifactState::AVAILABLE: return "available";
-        case ArtifactState::MISSING: return "missing";
-        case ArtifactState::INVALID: return "invalid";
-        }
-        return "invalid";
-    }
-
     std::expected<std::string, std::string> encodeArtifactBundle(const ArtifactBundle & bundle)
     {
         ArtifactBundle canonical = bundle;
@@ -241,133 +180,8 @@ namespace dcn::pt
         }
     }
 
-    std::expected<ArtifactBundle, std::string> decodeArtifactBundle(
-        const std::string & bytes,
-        const std::string & expected_content_hash)
-    {
-        if(bytes.empty() || bytes.size() > MAX_ARTIFACT_BYTES)
-        {
-            return std::unexpected("artifact size is invalid");
-        }
-        if(!expected_content_hash.empty()
-           && (!validHash(expected_content_hash) || artifactContentHash(bytes) != expected_content_hash))
-        {
-            return std::unexpected("artifact content hash mismatch");
-        }
-
-        try
-        {
-            const nlohmann::json value = nlohmann::json::parse(bytes);
-            if(value.dump() != bytes) return std::unexpected("artifact bytes are not canonical JSON");
-            return parseBundleJson(value);
-        }
-        catch(const std::exception & error)
-        {
-            return std::unexpected(std::string("invalid artifact JSON: ") + error.what());
-        }
-    }
-
     std::string artifactContentHash(const std::string & bytes)
     {
         return chain::bytes32ToHex(chain::keccakString(bytes));
-    }
-
-    ArtifactStore::ArtifactStore(
-        std::filesystem::path cache_root,
-        std::vector<std::filesystem::path> gateways,
-        std::vector<std::filesystem::path> replicas)
-        : _cache_root(std::move(cache_root))
-        , _gateways(std::move(gateways))
-        , _replicas(std::move(replicas))
-    {
-        for(const auto & replica : _replicas)
-        {
-            if(std::ranges::find(_gateways, replica) == _gateways.end()) _gateways.push_back(replica);
-        }
-    }
-
-    std::expected<std::string, std::string> ArtifactStore::cache(const std::string & bytes) const
-    {
-        const auto bundle = decodeArtifactBundle(bytes);
-        if(!bundle) return std::unexpected(bundle.error());
-        const std::string content_hash = artifactContentHash(bytes);
-        if(const auto write = writeVerified(_cache_root, content_hash, bytes); !write)
-        {
-            return std::unexpected(write.error());
-        }
-        return content_hash;
-    }
-
-    std::expected<std::string, std::string> ArtifactStore::publish(const std::string & bytes) const
-    {
-        if(_replicas.empty()) return std::unexpected("no durable artifact replicas configured");
-        const auto bundle = decodeArtifactBundle(bytes);
-        if(!bundle) return std::unexpected(bundle.error());
-
-        const std::string content_hash = artifactContentHash(bytes);
-        for(const auto & replica : _replicas)
-        {
-            if(const auto write = writeVerified(replica, content_hash, bytes); !write)
-            {
-                return std::unexpected(write.error());
-            }
-        }
-        if(const auto write = writeVerified(_cache_root, content_hash, bytes); !write)
-        {
-            return std::unexpected(write.error());
-        }
-        return content_hash;
-    }
-
-    ArtifactRead ArtifactStore::read(const std::string & content_hash) const
-    {
-        if(!validHash(content_hash))
-        {
-            return {.state = ArtifactState::INVALID, .error = "invalid artifact content hash"};
-        }
-
-        bool invalid_seen = false;
-        std::string last_error;
-        const auto try_root = [&](const std::filesystem::path & root) -> std::optional<std::string>
-        {
-            const auto path = artifactPath(root, content_hash);
-            std::error_code exists_ec;
-            if(!std::filesystem::exists(path, exists_ec) || exists_ec) return std::nullopt;
-            const auto bytes = readFile(path);
-            if(!bytes)
-            {
-                invalid_seen = true;
-                last_error = bytes.error();
-                return std::nullopt;
-            }
-            const auto bundle = decodeArtifactBundle(*bytes, content_hash);
-            if(!bundle)
-            {
-                invalid_seen = true;
-                last_error = bundle.error();
-                return std::nullopt;
-            }
-            return *bytes;
-        };
-
-        if(const auto bytes = try_root(_cache_root))
-        {
-            return {.state = ArtifactState::AVAILABLE, .bytes = *bytes};
-        }
-        for(const auto & gateway : _gateways)
-        {
-            if(const auto bytes = try_root(gateway))
-            {
-                if(const auto cached = writeVerified(_cache_root, content_hash, *bytes); !cached)
-                {
-                    return {.state = ArtifactState::INVALID, .error = cached.error()};
-                }
-                return {.state = ArtifactState::AVAILABLE, .bytes = *bytes};
-            }
-        }
-
-        return {
-            .state = invalid_seen ? ArtifactState::INVALID : ArtifactState::MISSING,
-            .error = invalid_seen ? last_error : "artifact is unavailable"};
     }
 }

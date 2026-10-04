@@ -1,6 +1,6 @@
 #pragma once
 
-#include "bootstrap.hpp"
+#include "deploy.hpp"
 #include "eth_tx.hpp"
 #include "manifest.hpp"
 #include "publisher.hpp"

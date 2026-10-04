@@ -381,7 +381,7 @@ namespace dcn::events
                         case EventType::ENTITY_OWNER_CHANGED:
                             break;
                         }
-                        event.decoded_json = payload.dump(-1, ' ', false, json::error_handler_t::replace);
+                        event.decoded_json = parse::dumpJsonLossy(payload);
                     }
                 }
 

@@ -110,7 +110,18 @@ namespace dcn
             co_return response;
         }
         
-        auto json_res = parse::parseToJson((*condition_record_res)->condition(), parse::use_json);
+        const auto location = co_await registry.getEntityLocation(
+            registry::EntityKind::CONDITION, condition_name_result.value());
+
+        // The deployed runtime bytecode; null in the response until the registry holds it.
+        Condition condition = (*condition_record_res)->condition();
+        if(location && !location->source.runtime_code_hash.empty())
+        {
+            const auto runtime_code = co_await registry.getRuntimeCode(location->source.runtime_code_hash);
+            if(runtime_code) condition.set_runtime_code(chain::bytesToHex(*runtime_code));
+        }
+
+        auto json_res = parse::parseToJson(std::move(condition), parse::use_json);
 
         if(!json_res)
         {
@@ -123,8 +134,6 @@ namespace dcn
         }
 
         (*json_res)["owner"] = (*condition_record_res)->owner();
-        const auto location = co_await registry.getEntityLocation(
-            registry::EntityKind::CONDITION, condition_name_result.value());
         // A local simulation entity has no chain address; the response keeps the 0x0 sentinel.
         (*json_res)["address"] = (location && location->address != chain::Address{})
             ? chain::addressToHex(location->address)
@@ -184,6 +193,16 @@ namespace dcn
         }
 
         const Condition & condition = *condition_res;
+
+        if(condition.has_runtime_code())
+        {
+            response.setCode(http::Code::BadRequest)
+                .setBodyWithContentLength(json {
+                    {"message", "runtime_code is read from the deployed contract and cannot be set"}
+                }.dump());
+
+            co_return response;
+        }
 
         if(auto refused = co_await admitLocalEntityName(registry, chain, pt::EntityKind::CONDITION, condition.name()))
         {

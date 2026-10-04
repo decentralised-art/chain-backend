@@ -78,7 +78,7 @@ namespace dcn::tests::fake_eth
     }
 
     // A JSON-RPC node good enough to drive deployment verification, publication
-    // preparation and confirmation, bootstrap and registry reads end to end, with
+    // preparation and confirmation, contract deployment and registry reads end to end, with
     // per-test control over what the chain reports.
     struct FakeNode
     {
@@ -99,10 +99,25 @@ namespace dcn::tests::fake_eth
         std::string entity_owner = wordOfAddress(hexAddress(0x42));
 
         std::string code = "0x60006000";
+        std::map<std::string, std::string> code_by_address;
+        // An address listed here has no code before this block number.
+        std::map<std::string, std::int64_t> code_created_at;
+
+        // Answers eth_getTransactionByHash; register a transaction with addTransaction.
+        std::map<std::string, json> transactions_by_hash;
+        // Answers eth_getLogs over a single block number.
+        std::map<std::int64_t, json> logs_by_block_number;
+
+        void addTransaction(const std::string & tx_hash, const std::string & block_hash, const std::vector<std::uint8_t> & input = {})
+        {
+            transactions_by_hash[chain::normalizeHex(tx_hash)] = json{
+                {"hash", tx_hash},
+                {"blockHash", block_hash},
+                {"input", chain::bytesToHex(input)}};
+        }
         std::string implementation_slot = wordOfAddress(REGISTRY_IMPL_ADDRESS);
         std::map<std::string, std::string> implementation_by_proxy;
         std::string owner_word = wordOfAddress(hexAddress(0x77));
-        std::string runner_registry_word = wordOfAddress(REGISTRY_ADDRESS);
         std::uint64_t publication_nonce = 3;
 
         // Answered for every receipt lookup unless a deployment receipt was recorded for
@@ -115,6 +130,9 @@ namespace dcn::tests::fake_eth
         bool mine_deployments = false;
         std::uint8_t next_contract_byte = 0xA0;
 
+        // Called with every accepted raw transaction, to change chain state as it would.
+        std::function<void(const std::string & raw_tx)> on_send;
+
         // Consulted first for eth_call; an empty answer falls through to the registry reads.
         std::function<std::string(const json & request)> call_override;
         // Unless set, a membership check answers from contains_entity.
@@ -125,7 +143,12 @@ namespace dcn::tests::fake_eth
 
         std::vector<std::string> sent_raw_transactions;
         std::vector<json> calls;
+        std::vector<json> code_requests;
+        std::vector<json> transaction_requests;
         std::vector<std::string> requested_blocks;
+
+        // Consulted before every request; an error fails it at the transport.
+        std::function<std::optional<rpc::RpcError>(const json & request)> transport_fault;
 
         std::string operator()(const json & request)
         {
@@ -136,7 +159,33 @@ namespace dcn::tests::fake_eth
             if(method == "eth_blockNumber") return rpcResult(request, chain::toHexQuantity(head_block));
             if(method == "eth_maxPriorityFeePerGas") return rpcResult(request, chain::toHexQuantity(static_cast<std::int64_t>(priority_fee)));
             if(method == "eth_getTransactionCount") return rpcResult(request, chain::toHexQuantity(static_cast<std::int64_t>(tx_count)));
-            if(method == "eth_getCode") return rpcResult(request, code);
+            if(method == "eth_getCode")
+            {
+                code_requests.push_back(params);
+                const std::string address = chain::normalizeHex(params.at(0).get<std::string>());
+                if(const auto created = code_created_at.find(address);
+                   created != code_created_at.end() && params.at(1).is_string())
+                {
+                    const auto block = parse::parseHexQuantity(params.at(1).get<std::string>());
+                    if(block && *block < created->second) return rpcResult(request, "0x");
+                }
+                const auto found = code_by_address.find(address);
+                return rpcResult(request, found != code_by_address.end() ? found->second : code);
+            }
+
+            if(method == "eth_getTransactionByHash")
+            {
+                transaction_requests.push_back(params);
+                const auto found = transactions_by_hash.find(chain::normalizeHex(params.at(0).get<std::string>()));
+                return rpcResult(request, found != transactions_by_hash.end() ? found->second : json{});
+            }
+
+            if(method == "eth_getLogs" && params.at(0).contains("fromBlock"))
+            {
+                const auto from = parse::parseHexQuantity(params.at(0).at("fromBlock").get<std::string>());
+                const auto found = from ? logs_by_block_number.find(*from) : logs_by_block_number.end();
+                return rpcResult(request, found != logs_by_block_number.end() ? found->second : json::array());
+            }
 
             if(method == "eth_getStorageAt")
             {
@@ -185,6 +234,7 @@ namespace dcn::tests::fake_eth
                         {"contractAddress", hexAddress(next_contract_byte++)},
                         {"logs", json::array()}};
                 }
+                if(on_send) on_send(sent_raw_transactions.back());
                 return rpcResult(request, tx_hash);
             }
 
@@ -226,7 +276,6 @@ namespace dcn::tests::fake_eth
                 if(data.starts_with(selectorOf("protocolId()"))) return rpcResult(request, rpc::ptProtocolId());
                 if(data.starts_with(selectorOf("protocolVersion()"))) return rpcResult(request, wordOfUint(rpc::PT_PROTOCOL_VERSION));
                 if(data.starts_with(selectorOf("getOwner()"))) return rpcResult(request, owner_word);
-                if(data.starts_with(selectorOf("registry()"))) return rpcResult(request, runner_registry_word);
                 return rpcError(request, 3, "unexpected eth_call");
             }
 
@@ -242,6 +291,10 @@ namespace dcn::tests::fake_eth
             asio::awaitable<std::expected<std::string, rpc::RpcError>> post(std::string body) override
             {
                 const json request = json::parse(body, nullptr, false);
+                if(_node->transport_fault)
+                {
+                    if(auto fault = _node->transport_fault(request)) co_return std::unexpected(std::move(*fault));
+                }
                 co_return (*_node)(request);
             }
 

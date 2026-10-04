@@ -4,17 +4,120 @@
 #include <vector>
 
 #include "chain.hpp"
+#include "condition.hpp"
 #include "publication.hpp"
+#include "registry_events.hpp"
+#include "transformation.hpp"
 
 namespace dcn::rpc
 {
-    namespace
+    asio::awaitable<std::expected<std::map<chain::Address, std::vector<std::uint8_t>>, RpcError>> readPublishedCreationCodes(
+        const EthClient & client,
+        const std::string_view tx_hash,
+        const std::string_view block_hash,
+        const chain::Address & registry)
     {
-        RpcError _protocolError(std::string message)
+        using Result = std::map<chain::Address, std::vector<std::uint8_t>>;
+
+        const auto transaction = co_await client.transactionByHash(tx_hash);
+        if(!transaction) co_return std::unexpected(transaction.error());
+        if(!*transaction)
         {
-            return RpcError{.kind = RpcError::Kind::PROTOCOL, .code = 0, .message = std::move(message)};
+            co_return std::unexpected(RpcError::protocol(std::format("transaction {} is unknown", tx_hash)));
+        }
+        if(chain::normalizeHex((**transaction).block_hash) != chain::normalizeHex(std::string(block_hash)))
+        {
+            co_return std::unexpected(RpcError::protocol(std::format("transaction {} is not in block {}", tx_hash, block_hash)));
         }
 
+        const auto calldata = evmc::from_hex((**transaction).input);
+        if(!calldata) co_return Result{};
+        co_return pt::findPublishedCreationCodes(*calldata, registry);
+    }
+
+    asio::awaitable<std::expected<std::optional<PublicationLocation>, RpcError>> findEntityPublication(
+        const EthClient & client,
+        const std::string_view registry_address,
+        const pt::EntityKind kind,
+        const std::string_view name,
+        const chain::Address & entity_address,
+        const std::int64_t latest_block)
+    {
+        using Result = std::optional<PublicationLocation>;
+        const std::string entity_hex = chain::addressToHex(entity_address);
+
+        const auto hasCode = [&client, &entity_hex](const std::int64_t block) -> asio::awaitable<std::expected<bool, RpcError>>
+        {
+            const auto code = co_await client.getCode(entity_hex, chain::toHexQuantity(block));
+            if(!code) co_return std::unexpected(code.error());
+            co_return *code != "0x";
+        };
+
+        // The code exists from its publication block on: the first block holding it.
+        const auto at_latest = co_await hasCode(latest_block);
+        if(!at_latest) co_return std::unexpected(at_latest.error());
+        if(!*at_latest) co_return Result{};
+        std::int64_t low = 0;
+        std::int64_t high = latest_block;
+        while(low < high)
+        {
+            const std::int64_t middle = low + (high - low) / 2;
+            const auto present = co_await hasCode(middle);
+            if(!present) co_return std::unexpected(present.error());
+            if(*present) high = middle;
+            else low = middle + 1;
+        }
+
+        // The filter is built before the co_await: GCC cannot compile an initializer_list
+        // that lives across one.
+        const LogFilter filter{
+            .from_block = low,
+            .to_block = low,
+            .address = std::string(registry_address),
+            .topic0 = {pt::eventTopic(pt::addedEventSignature(kind))}};
+        const auto logs = co_await client.getLogs(filter);
+        if(!logs) co_return std::unexpected(logs.error());
+
+        for(const json & log : *logs)
+        {
+            const auto data = log.find("data");
+            const auto topics = log.find("topics");
+            const auto tx_hash = log.find("transactionHash");
+            const auto block_hash = log.find("blockHash");
+            if(data == log.end() || topics == log.end() || tx_hash == log.end() || block_hash == log.end()
+               || !data->is_string() || !topics->is_array() || !tx_hash->is_string() || !block_hash->is_string())
+            {
+                continue;
+            }
+            std::vector<std::string> topic_list;
+            for(const json & topic : *topics)
+            {
+                if(topic.is_string()) topic_list.push_back(topic.get<std::string>());
+            }
+
+            bool matches = false;
+            if(kind == pt::EntityKind::TRANSFORMATION)
+            {
+                const auto event = pt::decodeTransformationAddedEvent(data->get<std::string>(), topic_list);
+                matches = event && event->name == name && event->transformation_address == entity_address;
+            }
+            else if(kind == pt::EntityKind::CONDITION)
+            {
+                const auto event = pt::decodeConditionAddedEvent(data->get<std::string>(), topic_list);
+                matches = event && event->name == name && event->condition_address == entity_address;
+            }
+            if(matches)
+            {
+                co_return Result{PublicationLocation{
+                    .tx_hash = tx_hash->get<std::string>(),
+                    .block_hash = block_hash->get<std::string>()}};
+            }
+        }
+        co_return Result{};
+    }
+
+    namespace
+    {
         std::string _calldata(const std::string & signature, const std::vector<pt::abi::Component> & arguments)
         {
             std::vector<std::uint8_t> out = chain::constructSelector(signature);
@@ -57,7 +160,7 @@ namespace dcn::rpc
         const auto id_bytes = evmc::from_hex(*id_result);
         if(!id_bytes || id_bytes->size() != 32)
         {
-            co_return std::unexpected(_protocolError("protocolId() did not return one word"));
+            co_return std::unexpected(RpcError::protocol("protocolId() did not return one word"));
         }
 
         auto version_result = co_await client.call(contract_address, _calldata("protocolVersion()", {}));
@@ -125,8 +228,7 @@ namespace dcn::rpc
 
     asio::awaitable<std::expected<void, std::string>> verifyPtRunner(
         const EthClient & client,
-        const std::string_view runner_address,
-        const std::string_view registry_address)
+        const std::string_view runner_address)
     {
         const auto identity = co_await readPtIdentity(client, runner_address);
         if(!identity)
@@ -137,16 +239,6 @@ namespace dcn::rpc
         if(identity->protocol_id != ptProtocolId() || identity->protocol_version != PT_PROTOCOL_VERSION)
         {
             co_return std::unexpected("runner protocol identity is not the supported PT protocol");
-        }
-
-        const auto linked = co_await readRunnerRegistry(client, runner_address);
-        if(!linked)
-        {
-            co_return std::unexpected(std::format("runner registry() is unreadable: {}", linked.error().message));
-        }
-        if(*linked != registry_address)
-        {
-            co_return std::unexpected("runner is linked to a different registry");
         }
 
         co_return std::expected<void, std::string>{};
@@ -162,16 +254,6 @@ namespace dcn::rpc
         co_return addressFromWord(*result, "getOwner()");
     }
 
-    asio::awaitable<std::expected<std::string, RpcError>> readRunnerRegistry(
-        const EthClient & client,
-        const std::string_view runner_address)
-    {
-        auto result = co_await client.call(runner_address, _calldata("registry()", {}));
-        if(!result) co_return std::unexpected(result.error());
-
-        co_return addressFromWord(*result, "registry()");
-    }
-
     asio::awaitable<std::expected<std::uint64_t, RpcError>> readPublicationNonce(
         const EthClient & client,
         const std::string_view registry_address,
@@ -180,7 +262,7 @@ namespace dcn::rpc
         const auto owner = evmc::from_hex<chain::Address>(std::string(owner_address));
         if(!owner)
         {
-            co_return std::unexpected(_protocolError("publication owner is not an address"));
+            co_return std::unexpected(RpcError::protocol("publication owner is not an address"));
         }
 
         // Calldata is built before the co_await: GCC cannot compile an initializer_list
@@ -208,7 +290,7 @@ namespace dcn::rpc
         const auto value = uint64FromWord(*result, signature);
         if(!value || *value > 1)
         {
-            co_return std::unexpected(_protocolError(std::format("{} did not return a bool", signature)));
+            co_return std::unexpected(RpcError::protocol(std::format("{} did not return a bool", signature)));
         }
 
         co_return *value == 1;
@@ -227,7 +309,7 @@ namespace dcn::rpc
         const auto bytes = evmc::from_hex(*result);
         if(!bytes || bytes->size() != 32)
         {
-            co_return std::unexpected(_protocolError("getEntityContentHash did not return one word"));
+            co_return std::unexpected(RpcError::protocol("getEntityContentHash did not return one word"));
         }
 
         co_return chain::normalizeHex(*result);

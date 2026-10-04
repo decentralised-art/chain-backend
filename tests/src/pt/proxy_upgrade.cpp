@@ -98,37 +98,19 @@ namespace
     }
 
     std::vector<std::uint8_t> makeRunnerGenInput(
+        const chain::Address & registry,
         const std::string & connector_name,
         std::uint32_t particles_count,
         const std::vector<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>> & dynamic_ri)
     {
-        std::vector<std::uint8_t> input_data;
-
-        const auto selector = chain::constructSelector("gen(string,uint32,(uint32,uint32,uint32)[])");
-        input_data.insert(input_data.end(), selector.begin(), selector.end());
-
-        std::vector<std::uint8_t> offset_to_string(32, 0);
-        offset_to_string[31] = 0x60;
-        input_data.insert(input_data.end(), offset_to_string.begin(), offset_to_string.end());
-
-        const auto particles_count_arg = evm::encodeAsArg(particles_count);
-        input_data.insert(input_data.end(), particles_count_arg.begin(), particles_count_arg.end());
-
-        const auto connector_name_arg = evm::encodeAsArg(connector_name);
-
-        std::vector<std::uint8_t> offset_to_tuple(32, 0);
-        const std::size_t tuple_offset = 0x60 + connector_name_arg.size();
-        for(std::size_t i = 0; i < sizeof(std::size_t); ++i)
-        {
-            offset_to_tuple[31 - i] = static_cast<std::uint8_t>((tuple_offset >> (8 * i)) & 0xFFu);
-        }
-        input_data.insert(input_data.end(), offset_to_tuple.begin(), offset_to_tuple.end());
-
-        input_data.insert(input_data.end(), connector_name_arg.begin(), connector_name_arg.end());
-
-        const auto dynamic_ri_arg = evm::encodeAsArg(dynamic_ri);
-        input_data.insert(input_data.end(), dynamic_ri_arg.begin(), dynamic_ri_arg.end());
-
+        std::vector<std::uint8_t> input_data =
+            chain::constructSelector("gen(address,string,uint32,(uint32,uint32,uint32)[])");
+        const std::vector<std::uint8_t> arguments = pt::abi::encodeTuple({
+            pt::abi::addressComponent(registry),
+            pt::abi::stringComponent(connector_name),
+            pt::abi::uintComponent(particles_count),
+            pt::abi::Component{.dynamic = true, .data = evm::encodeAsArg(dynamic_ri)}});
+        input_data.insert(input_data.end(), arguments.begin(), arguments.end());
         return input_data;
     }
 
@@ -212,6 +194,35 @@ namespace
 
         spdlog::level::level_enum previous_level;
     };
+
+    // A second, empty registry next to the one the EVM deployed at startup.
+    std::expected<chain::Address, std::string> deployEmptyRegistry(ProxyTestEnv & env)
+    {
+        const std::filesystem::path out_dir = env.evm_instance.getPTPath() / "out";
+        runAwaitable(env.io_context, env.evm_instance.setGas(env.genesis_address, evm::DEFAULT_GAS_LIMIT));
+
+        const auto implementation = runAwaitable(
+            env.io_context,
+            env.evm_instance.deploy(out_dir / "registry" / "RegistryBase.bin", env.genesis_address, {}, evm::DEFAULT_GAS_LIMIT, 0));
+        if(!implementation)
+        {
+            return std::unexpected(std::format("Failed to deploy a registry implementation: {}", implementation.error().kind));
+        }
+
+        const auto proxy = runAwaitable(
+            env.io_context,
+            env.evm_instance.deploy(
+                out_dir / "proxy" / "PTContractProxy.bin",
+                env.genesis_address,
+                evm::encodeAsArg(*implementation),
+                evm::DEFAULT_GAS_LIMIT,
+                0));
+        if(!proxy)
+        {
+            return std::unexpected(std::format("Failed to deploy a registry proxy: {}", proxy.error().kind));
+        }
+        return *proxy;
+    }
 
     std::filesystem::path writeRunnerV2Source()
     {
@@ -434,7 +445,7 @@ TEST_F(UnitTest, PT_ProxyUpgrade_RunnerUpgradePreservesGeneratedContext)
 
     runAwaitable(env.io_context, env.evm_instance.setGas(owner, evm::DEFAULT_GAS_LIMIT));
 
-    const auto gen_input = makeRunnerGenInput("PersistConnector", 8, {{0u, 0u, 0u}});
+    const auto gen_input = makeRunnerGenInput(env.evm_instance.getRegistryAddress(), "PersistConnector", 8, {{0u, 0u, 0u}});
     const auto generation_before_upgrade = runAwaitable(
         env.io_context,
         env.evm_instance.execute(
@@ -455,6 +466,26 @@ TEST_F(UnitTest, PT_ProxyUpgrade_RunnerUpgradePreservesGeneratedContext)
     for(int i = 0; i < particles_before_upgrade[0].data_size(); ++i)
     {
         EXPECT_EQ(particles_before_upgrade[0].data(i), i);
+    }
+
+    // The runner holds no registry: the same runner looks the connector up in whichever
+    // registry it is given, so a registry deployed later is served without a new runner.
+    const auto other_registry = deployEmptyRegistry(env);
+    ASSERT_TRUE(other_registry.has_value()) << other_registry.error();
+    {
+        // This revert is expected: the new registry does not hold the connector.
+        const ScopedLogLevel suppress_expected_revert_logs(spdlog::level::critical);
+        runAwaitable(env.io_context, env.evm_instance.setGas(owner, evm::DEFAULT_GAS_LIMIT));
+        const auto generation_in_other_registry = runAwaitable(
+            env.io_context,
+            env.evm_instance.execute(
+                owner,
+                runner_proxy,
+                makeRunnerGenInput(*other_registry, "PersistConnector", 8, {{0u, 0u, 0u}}),
+                evm::DEFAULT_GAS_LIMIT,
+                0));
+        ASSERT_FALSE(generation_in_other_registry.has_value());
+        EXPECT_EQ(chain::decodeRevertReason(generation_in_other_registry.error().result_bytes), "cannot find connector");
     }
 
     const auto runner_v2_result = deployRunnerV2(env);

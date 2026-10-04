@@ -285,6 +285,27 @@ TEST_F(UnitTest, Rpc_JsonRpcClient_ClassifiesRangeLimitsSeparatelyFromThrottling
     EXPECT_EQ(throttle_transport->requests.size(), 3u);
 }
 
+TEST_F(UnitTest, Rpc_JsonRpcClient_DoesNotRetryAnExhaustedQuota)
+{
+    asio::io_context io_context;
+
+    for(const std::string message : {
+        std::string("Monthly capacity limit exceeded. Visit the dashboard to upgrade your scaling policy"),
+        std::string("daily request count exceeded, request rate limited")})
+    {
+        auto transport = std::make_shared<FakeTransport>(
+            [&message](const json & request) { return errorBody(request, 429, message); });
+        rpc::JsonRpcClient client(
+            transport, rpc::JsonRpcConfig{.max_attempts = 3, .initial_backoff_ms = 0, .max_backoff_ms = 0});
+
+        const auto result = runAwaitable(io_context, client.call("eth_chainId", json::array()));
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().kind, rpc::RpcError::Kind::QUOTA) << message;
+        // Retrying cannot succeed before the provider's period resets.
+        EXPECT_EQ(transport->requests.size(), 1u) << message;
+    }
+}
+
 TEST_F(UnitTest, Rpc_JsonRpcClient_RejectsMismatchedResponseId)
 {
     asio::io_context io_context;
@@ -622,6 +643,90 @@ TEST_F(UnitTest, Rpc_LogSource_PausesWhenAFinalizedBlockIsReplaced)
     // A paused source stays paused: it never ingests from the replaced history.
     const events::SourcePoll later = runAwaitable(io_context, source.pollSince(45, 256));
     EXPECT_FALSE(later.scanned_range.has_value());
+}
+
+TEST_F(UnitTest, Rpc_LogSource_PausesWhenTheFinalizedTagReplacesTheAnchor)
+{
+    asio::io_context io_context;
+
+    FakeChain chain{.head = 50, .safe = 49, .finalized = 48};
+    auto transport = std::make_shared<FakeTransport>([&chain](const json & r) { return chain.respond(r); });
+
+    events::RpcLogSource source(makeClient(transport), makeSourceConfig());
+    source.restoreFinality(events::FinalityCheckpoint{.finalized_block = 48, .finalized_hash = hexBytes(0xEE, 32)});
+
+    const events::SourcePoll poll = runAwaitable(io_context, source.pollSince(49, 256));
+
+    EXPECT_TRUE(source.paused());
+    EXPECT_FALSE(poll.scanned_range.has_value());
+    // The finalized tag named block 48, so its hash was checked without reading it again.
+    EXPECT_EQ(transport->requests.size(), 3u);
+}
+
+TEST_F(UnitTest, Rpc_LogSource_CaughtUpPollReadsOnlyTheHeadAndTheLogs)
+{
+    asio::io_context io_context;
+
+    const auto methodsOf = [](const std::vector<json> & requests, const std::size_t from)
+    {
+        std::vector<std::string> methods;
+        for(std::size_t i = from; i < requests.size(); ++i)
+        {
+            const json & request = requests[i];
+            std::string method = request.at("method").get<std::string>();
+            if(method == "eth_getBlockByNumber") method += ":" + request.at("params").at(0).get<std::string>();
+            methods.push_back(std::move(method));
+        }
+        return methods;
+    };
+
+    FakeChain chain{.head = 50, .safe = 49, .finalized = 48};
+    auto transport = std::make_shared<FakeTransport>([&chain](const json & r) { return chain.respond(r); });
+
+    events::RpcLogSource source(makeClient(transport), makeSourceConfig());
+
+    const events::SourcePoll first = runAwaitable(io_context, source.pollSince(1, 256));
+    source.committed();
+    ASSERT_TRUE(first.finality.has_value());
+    EXPECT_EQ(first.finality->finalized, 48);
+    EXPECT_EQ(methodsOf(transport->requests, 0), (std::vector<std::string>{
+        "eth_getBlockByNumber:latest",
+        "eth_getBlockByNumber:safe",
+        "eth_getBlockByNumber:finalized",
+        "eth_getLogs"}));
+
+    // Within the refresh interval the finality tags are reused, the anchor is checked
+    // against the cached finalized header, and the head header ends the range.
+    chain.head = 51;
+    const std::size_t before_second = transport->requests.size();
+    const events::SourcePoll second = runAwaitable(io_context, source.pollSince(first.next_cursor, 256));
+    source.committed();
+    ASSERT_TRUE(second.scanned_range.has_value());
+    EXPECT_EQ(second.scanned_range->from_block, 49);
+    EXPECT_EQ(second.scanned_range->to_block, 51);
+    ASSERT_TRUE(second.finality.has_value());
+    EXPECT_EQ(second.finality->finalized, 48);
+    EXPECT_EQ(methodsOf(transport->requests, before_second), (std::vector<std::string>{
+        "eth_getBlockByNumber:latest",
+        "eth_getLogs"}));
+
+    // Once the interval has passed the tags are read again.
+    events::RpcLogSourceConfig config = makeSourceConfig();
+    config.finality_refresh_interval = std::chrono::milliseconds(0);
+    events::RpcLogSource refreshing(makeClient(transport), config);
+    (void)runAwaitable(io_context, refreshing.pollSince(1, 256));
+    refreshing.committed();
+    chain.finalized = 50;
+    const std::size_t before_refresh = transport->requests.size();
+    const events::SourcePoll refreshed = runAwaitable(io_context, refreshing.pollSince(52, 256));
+    ASSERT_TRUE(refreshed.finality.has_value());
+    EXPECT_EQ(refreshed.finality->finalized, 50);
+    EXPECT_EQ(methodsOf(transport->requests, before_refresh), (std::vector<std::string>{
+        "eth_getBlockByNumber:latest",
+        "eth_getBlockByNumber:safe",
+        "eth_getBlockByNumber:finalized",
+        "eth_getBlockByNumber:0x30",
+        "eth_getLogs"}));
 }
 
 TEST_F(UnitTest, Rpc_LogSource_DropsLogsTheFilterDidNotAskFor)

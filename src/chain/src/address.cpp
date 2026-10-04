@@ -8,7 +8,7 @@ namespace dcn::chain
 {
     std::optional<chain::Address> readAddressWord(const std::uint8_t* data, std::size_t data_size, std::size_t offset)
     {
-        if(data == nullptr || offset + 32 > data_size)
+        if(data == nullptr || offset > data_size || data_size - offset < 32)
         {
             return std::nullopt;
         }

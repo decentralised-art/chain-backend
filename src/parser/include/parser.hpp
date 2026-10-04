@@ -82,4 +82,11 @@ namespace dcn::parse
 
     // Parse decimal uint32 and reject malformed input.
     Result<std::uint32_t> parseUint32Decimal(std::string_view value);
+
+    // Compact dump that replaces invalid UTF-8 instead of throwing; chain-supplied
+    // strings are arbitrary bytes.
+    std::string dumpJsonLossy(const json & value);
+
+    // Parse decimal uint64 and reject malformed input.
+    Result<std::uint64_t> parseUint64Decimal(std::string_view value);
 }

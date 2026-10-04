@@ -48,24 +48,35 @@ namespace dcn::evm
             return args;
         }
 
-        std::pair<int, std::string> _runSolc(const std::filesystem::path & solc_path, std::vector<std::string> args)
+        // The exit code a child process reports when the solc executable could not be started.
+        constexpr int EXEC_FAILED_EXIT_CODE = 127;
+
+        // solc's exit code and output, or why solc could not be run at all.
+        std::expected<std::pair<int, std::string>, std::string> _runSolc(
+            const std::filesystem::path & solc_path,
+            std::vector<std::string> args)
         {
             try
             {
-                return native::runProcess(solc_path.string(), std::move(args), SOLC_TIMEOUT);
+                auto run = native::runProcess(solc_path.string(), std::move(args), SOLC_TIMEOUT);
+                if(run.first == EXEC_FAILED_EXIT_CODE)
+                {
+                    return std::unexpected(std::format("cannot start '{}': {}", solc_path.string(), run.second));
+                }
+                return run;
             }
             catch(const std::exception & error)
             {
-                return {-1, error.what()};
+                return std::unexpected(std::format("cannot run '{}': {}", solc_path.string(), error.what()));
             }
         }
 
         std::string _readSolcVersion(const std::filesystem::path & solc_path)
         {
-            const auto [exit_code, output] = _runSolc(solc_path, {"--version"});
+            const auto run = _runSolc(solc_path, {"--version"});
             static const std::regex pattern(R"((\d+\.\d+\.\d+\+commit\.[0-9a-fA-F]+))");
             std::smatch match;
-            if(exit_code == 0 && std::regex_search(output, match, pattern))
+            if(run && run->first == 0 && std::regex_search(run->second, match, pattern))
             {
                 return match[1].str();
             }
@@ -409,20 +420,26 @@ namespace dcn::evm
         std::vector<std::string> args = _solcArguments(out_dir, base_path, include_paths);
         args.push_back(code_path.string());
 
-        const auto [exit_code, compile_result] = co_await asio::co_spawn(
+        const auto run = co_await asio::co_spawn(
             _compile_pool,
-            [solc = _solc_path, args = std::move(args)]() mutable -> asio::awaitable<std::pair<int, std::string>>
+            [solc = _solc_path, args = std::move(args)]() mutable
+                -> asio::awaitable<std::expected<std::pair<int, std::string>, std::string>>
             {
                 co_return _runSolc(solc, std::move(args));
             },
             asio::use_awaitable);
+        if(!run)
+        {
+            spdlog::error("Cannot compile {}: {}", code_path.string(), run.error());
+            co_return false;
+        }
 
-        spdlog::info("Solc exited with code {},\n{}\n{}", exit_code, code_path.string(), compile_result);
+        spdlog::info("Solc exited with code {},\n{}\n{}", run->first, code_path.string(), run->second);
 
-        co_return exit_code == 0;
+        co_return run->first == 0;
     }
 
-    asio::awaitable<std::expected<CompiledContract, std::string>> EVM::compileSource(
+    asio::awaitable<std::expected<CompiledContract, CompileError>> EVM::compileSource(
         std::string unit_name,
         std::string source,
         std::string contract_name,
@@ -432,17 +449,26 @@ namespace dcn::evm
         const std::filesystem::path pt_contracts = _pt_path / "contracts";
         const std::filesystem::path pt_modules = _pt_path / "node_modules";
 
+        const auto failed = [](std::string message)
+        {
+            return std::unexpected(CompileError{.kind = CompileError::Kind::FAILED, .message = std::move(message)});
+        };
+        const auto rejected = [](std::string message)
+        {
+            return std::unexpected(CompileError{.kind = CompileError::Kind::REJECTED, .message = std::move(message)});
+        };
+
         // Everything runs on the single compile thread, so two compilations never share a
         // source file or an output file.
         co_return co_await asio::co_spawn(
             _compile_pool,
-            [=]() -> asio::awaitable<std::expected<CompiledContract, std::string>>
+            [=]() -> asio::awaitable<std::expected<CompiledContract, CompileError>>
             {
                 std::error_code ec;
                 std::filesystem::create_directories(work_dir, ec);
                 if(ec)
                 {
-                    co_return std::unexpected(std::format("cannot create '{}': {}", work_dir.string(), ec.message()));
+                    co_return failed(std::format("cannot create '{}': {}", work_dir.string(), ec.message()));
                 }
 
                 const std::filesystem::path source_path = work_dir / unit_name;
@@ -451,32 +477,39 @@ namespace dcn::evm
                     output << source;
                     if(!output)
                     {
-                        co_return std::unexpected(std::format("cannot write '{}'", source_path.string()));
+                        co_return failed(std::format("cannot write '{}'", source_path.string()));
                     }
                 }
 
                 std::vector<std::string> args = _solcArguments(work_dir, pt_contracts, {pt_modules, work_dir});
                 args.push_back(source_path.string());
-                const auto [exit_code, output] = _runSolc(solc, std::move(args));
+                const auto run = _runSolc(solc, std::move(args));
                 std::filesystem::remove(source_path, ec);
-                if(exit_code != 0)
+                if(!run)
                 {
-                    co_return std::unexpected(std::format("solc exited with {}: {}", exit_code, output));
+                    co_return failed(run.error());
                 }
+                if(run->first != 0)
+                {
+                    co_return rejected(std::format("solc exited with {}: {}", run->first, run->second));
+                }
+
+                // solc has run to completion: whatever is wrong with its output follows from
+                // the source.
 
                 auto creation_code = _readHexFile(work_dir / (contract_name + ".bin"));
                 auto runtime_code = _readHexFile(work_dir / (contract_name + ".bin-runtime"));
                 const auto metadata_text = _readFile(work_dir / (contract_name + "_meta.json"));
                 if(!creation_code || !runtime_code || runtime_code->empty() || !metadata_text)
                 {
-                    co_return std::unexpected(std::format("solc produced no output for '{}'", contract_name));
+                    co_return rejected(std::format("solc produced no output for '{}'", contract_name));
                 }
 
                 const nlohmann::json metadata = nlohmann::json::parse(*metadata_text, nullptr, false);
                 const auto sources_it = metadata.is_object() ? metadata.find("sources") : metadata.end();
                 if(metadata.is_discarded() || sources_it == metadata.end() || !sources_it->is_object())
                 {
-                    co_return std::unexpected(std::format("solc metadata for '{}' lists no sources", contract_name));
+                    co_return rejected(std::format("solc metadata for '{}' lists no sources", contract_name));
                 }
 
                 CompiledContract compiled{
@@ -487,14 +520,14 @@ namespace dcn::evm
                     const auto hash = description.is_object() ? description.find("keccak256") : description.end();
                     if(hash == description.end() || !hash->is_string())
                     {
-                        co_return std::unexpected(std::format("solc metadata has no hash for source '{}'", unit));
+                        co_return rejected(std::format("solc metadata has no hash for source '{}'", unit));
                     }
                     compiled.sources.emplace(unit, hash->get<std::string>());
                 }
 
                 if(!compiled.sources.contains(unit_name))
                 {
-                    co_return std::unexpected(std::format(
+                    co_return rejected(std::format(
                         "solc did not record '{}' under its stable source unit name", unit_name));
                 }
 
@@ -700,24 +733,25 @@ namespace dcn::evm
 
         std::filesystem::create_directories(out_dir);
         
+        // The registry and the runner sit behind the same proxy contract.
+        if(co_await compile(
+                contracts_dir / "proxy" / "PTContractProxy.sol",
+                proxy_out_dir,
+                contracts_dir,
+                node_modules) == false)
+        {
+            spdlog::error("Failed to compile contract proxy");
+            co_return false;
+        }
+
         { // deploy registry implementation + proxy
             if(co_await compile(
                     contracts_dir / "registry" / "RegistryBase.sol",
-                    out_dir / "registry", 
+                    out_dir / "registry",
                     contracts_dir,
                     node_modules) == false)
             {
                 spdlog::error("Failed to compile registry");
-                co_return false;
-            }
-
-            if(co_await compile(
-                    contracts_dir / "proxy" / "PTRegistryProxy.sol",
-                    proxy_out_dir, 
-                    contracts_dir,
-                    node_modules) == false)
-            {
-                spdlog::error("Failed to compile registry proxy");
                 co_return false;
             }
 
@@ -735,7 +769,7 @@ namespace dcn::evm
             spdlog::info("Registry implementation address: {}", evmc::hex(registry_impl_address));
 
             const auto registry_proxy_address_res = co_await deploy(
-                    proxy_out_dir / "PTRegistryProxy.bin",
+                    proxy_out_dir / "PTContractProxy.bin",
                     _genesis_address,
                     encodeAsArg(registry_impl_address),
                     DEFAULT_GAS_LIMIT,
@@ -758,16 +792,6 @@ namespace dcn::evm
                 spdlog::error("Failed to compile runner");
                 co_return false;
             }
-
-            if(co_await compile(
-                    contracts_dir / "proxy" / "PTContractProxy.sol",
-                    proxy_out_dir, 
-                    contracts_dir,
-                    node_modules) == false)
-            {
-                spdlog::error("Failed to compile contract proxy");
-                co_return false;
-            }
             
             spdlog::debug("Deploy runner implementation");
             const auto runner_impl_address_res = co_await deploy(
@@ -783,15 +807,11 @@ namespace dcn::evm
             const auto runner_impl_address = runner_impl_address_res.value();
             spdlog::info("Runner implementation address: {}", evmc::hex(runner_impl_address));
 
-            std::vector<std::uint8_t> runner_proxy_ctor_args = encodeAsArg(runner_impl_address);
-            const auto registry_arg = encodeAsArg(_registry_address);
-            runner_proxy_ctor_args.insert(runner_proxy_ctor_args.end(), registry_arg.begin(), registry_arg.end());
-
             spdlog::debug("Deploy runner proxy");
             const auto runner_proxy_address_res = co_await deploy(
                     proxy_out_dir / "PTContractProxy.bin",
                     _genesis_address,
-                    std::move(runner_proxy_ctor_args),
+                    encodeAsArg(runner_impl_address),
                     DEFAULT_GAS_LIMIT,
                     0);
 

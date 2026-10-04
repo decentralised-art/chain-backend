@@ -51,6 +51,9 @@ namespace dcn::loader
             absl::flat_hash_set<std::string> visiting;
 
             std::vector<std::string> connector_deploy_stack;
+
+            // The first reason a chain entity could not be deployed.
+            std::string failure;
         };
 
         struct StackPushGuard
@@ -236,11 +239,10 @@ namespace dcn::loader
         ConnectorRecord connector_record,
         const std::filesystem::path & storage_path,
         bool persist_json,
-        ConnectorEnsureContext & ensure_context,
-        std::string expected_content_hash);
+        ConnectorEnsureContext & ensure_context);
 
     // A connector is compiled and registered against the local EVM's registry, so each
-    // dependency's content hash is read from there: it names the exact artifact the
+    // dependency's content hash is read from there: it names the exact content the
     // connector was built against, and it exists as soon as the dependency is deployed,
     // before any event about it has been projected.
     static asio::awaitable<std::expected<std::vector<pt::ArtifactDependency>, pt::PTDeployError>>
@@ -303,8 +305,7 @@ namespace dcn::loader
         co_return dependencies;
     }
 
-    // Loads the retained local definition. Remote definitions are hydrated from their
-    // verified content-addressed bundles by the helpers below.
+    // Loads the retained local definition of an entity created on this server.
     template<class T>
     static std::optional<T> _loadSingleJSONRecord(const std::filesystem::path & file_path)
     {
@@ -334,114 +335,21 @@ namespace dcn::loader
         return std::move(*loaded_result);
     }
 
-    // A chain entity's definition comes from its verified content-addressed artifact; the
-    // artifact must name the entity and carry the hashes of its registry event.
-    static std::optional<pt::ArtifactBundle> _verifiedBundle(
-        const registry::EntityLocation & location,
-        const pt::EntityKind kind,
-        const std::string & name,
-        const std::filesystem::path & storage_path)
-    {
-        const pt::ArtifactRead artifact = pt::ArtifactStore(storage_path / "artifacts" / "cache")
-            .read(location.source.content_hash);
-        if(!artifact.bytes) return std::nullopt;
-
-        auto bundle = pt::decodeArtifactBundle(*artifact.bytes, location.source.content_hash);
-        if(!bundle || bundle->kind != kind || bundle->name != name
-           || bundle->metadata_hash != location.source.metadata_hash
-           || bundle->runtime_code_hash != location.source.runtime_code_hash)
-        {
-            return std::nullopt;
-        }
-        return std::move(*bundle);
-    }
-
-    static asio::awaitable<std::optional<TransformationRecord>> _loadTransformationForExecution(
+    // The definition of a local connector: its retained JSON, or its registry record.
+    static asio::awaitable<std::optional<ConnectorRecord>> _loadLocalConnector(
         registry::Registry & registry,
         const std::string & name,
         const std::filesystem::path & storage_path)
     {
         if(!pt::isValidEntityName(name)) co_return std::nullopt;
-
-        const auto location = co_await registry.getEntityLocation(registry::EntityKind::TRANSFORMATION, name);
-        if(!location || location->source.source_id == registry::LOCAL_SOURCE_ID)
+        if(auto stored = _loadSingleJSONRecord<ConnectorRecord>(storage_path / "connectors" / (name + ".json")))
         {
-            co_return _loadSingleJSONRecord<TransformationRecord>(
-                storage_path / "transformations" / (name + ".json"));
+            co_return stored;
         }
 
-        const auto bundle = _verifiedBundle(*location, pt::EntityKind::TRANSFORMATION, name, storage_path);
-        if(!bundle) co_return std::nullopt;
-
-        auto record = parse::parseFromJson<TransformationRecord>(bundle->definition.dump(), parse::use_protobuf);
-        if(!record || record->transformation().name() != name) co_return std::nullopt;
-        record->mutable_transformation()->set_sol_src(bundle->sol_src);
-        const auto projected = co_await registry.getTransformationRecordHandle(name);
-        if(!projected || (**projected).transformation().args_count() != record->transformation().args_count()
-           || chain::normalizeHex((**projected).owner()) != chain::normalizeHex(record->owner()))
-        {
-            co_return std::nullopt;
-        }
-        co_return std::move(*record);
-    }
-
-    static asio::awaitable<std::optional<ConditionRecord>> _loadConditionForExecution(
-        registry::Registry & registry,
-        const std::string & name,
-        const std::filesystem::path & storage_path)
-    {
-        if(!pt::isValidEntityName(name)) co_return std::nullopt;
-
-        const auto location = co_await registry.getEntityLocation(registry::EntityKind::CONDITION, name);
-        if(!location || location->source.source_id == registry::LOCAL_SOURCE_ID)
-        {
-            co_return _loadSingleJSONRecord<ConditionRecord>(
-                storage_path / "conditions" / (name + ".json"));
-        }
-
-        const auto bundle = _verifiedBundle(*location, pt::EntityKind::CONDITION, name, storage_path);
-        if(!bundle) co_return std::nullopt;
-
-        auto record = parse::parseFromJson<ConditionRecord>(bundle->definition.dump(), parse::use_protobuf);
-        if(!record || record->condition().name() != name) co_return std::nullopt;
-        record->mutable_condition()->set_sol_src(bundle->sol_src);
-        const auto projected = co_await registry.getConditionRecordHandle(name);
-        if(!projected || (**projected).condition().args_count() != record->condition().args_count()
-           || chain::normalizeHex((**projected).owner()) != chain::normalizeHex(record->owner()))
-        {
-            co_return std::nullopt;
-        }
-        co_return std::move(*record);
-    }
-
-    // A chain connector is rebuilt from its verified artifact, never from the arrays of
-    // its registry event: only the artifact is bound to the bytecode that was deployed.
-    static asio::awaitable<std::optional<ConnectorRecord>> _loadConnectorForExecution(
-        registry::Registry & registry,
-        const std::string & name,
-        const std::filesystem::path & storage_path)
-    {
-        if(!pt::isValidEntityName(name)) co_return std::nullopt;
-
-        const auto location = co_await registry.getEntityLocation(registry::EntityKind::CONNECTOR, name);
-        if(!location || location->source.source_id == registry::LOCAL_SOURCE_ID)
-        {
-            if(auto stored = _loadSingleJSONRecord<ConnectorRecord>(storage_path / "connectors" / (name + ".json")))
-            {
-                co_return stored;
-            }
-
-            const auto handle = co_await registry.getConnectorRecordHandle(name);
-            if(!handle || !*handle) co_return std::nullopt;
-            co_return ConnectorRecord(**handle);
-        }
-
-        const auto bundle = _verifiedBundle(*location, pt::EntityKind::CONNECTOR, name, storage_path);
-        if(!bundle) co_return std::nullopt;
-
-        auto record = parse::parseFromJson<ConnectorRecord>(bundle->definition.dump(), parse::use_protobuf);
-        if(!record || record->connector().name() != name) co_return std::nullopt;
-        co_return std::move(*record);
+        const auto handle = co_await registry.getConnectorRecordHandle(name);
+        if(!handle || !*handle) co_return std::nullopt;
+        co_return ConnectorRecord(**handle);
     }
 
     template<class T>
@@ -658,8 +566,7 @@ namespace dcn::loader
         pt::EntityKind entity_kind,
         std::vector<std::uint8_t> ctor_prefix_args,
         std::optional<pt::ConnectorRegistration> registration,
-        std::vector<pt::ArtifactDependency> dependencies,
-        std::string expected_content_hash = {}
+        std::vector<pt::ArtifactDependency> dependencies
     )
     {
         using Internal_t = std::invoke_result_t<InternalGetter, T>;
@@ -681,7 +588,7 @@ namespace dcn::loader
             co_return std::unexpected(pt::PTDeployError{pt::PTDeployError::Kind::INVALID_INPUT});
         }
 
-        // Generated source is part of the exact artifact bytes bound into the publication.
+        // Generated source is part of the bundle whose hash the publication carries.
         using SolidityCodeResult_t = std::decay_t<std::invoke_result_t<SolidityCodeCtor, Internal_t>>;
         const auto solidity_code_result = std::invoke(std::forward<SolidityCodeCtor>(solidity_code_ctor), internal);
 
@@ -719,8 +626,10 @@ namespace dcn::loader
         const auto compiled = co_await evm.compileSource(unit_name, solidity_code, name, out_dir / "build");
         if(!compiled)
         {
-            spdlog::error("Failed to compile `{}`: {}", name, compiled.error());
-            co_return std::unexpected(pt::PTDeployError{pt::PTDeployError::Kind::INVALID_INPUT});
+            spdlog::error("Failed to compile `{}`: {}", name, compiled.error().message);
+            co_return std::unexpected(compiled.error().kind == evm::CompileError::Kind::REJECTED
+                ? pt::PTDeployError{.kind = pt::PTDeployError::Kind::INVALID_INPUT}
+                : pt::PTDeployError{});
         }
 
         pt::Publication publication;
@@ -781,21 +690,10 @@ namespace dcn::loader
             co_return std::unexpected(pt::PTDeployError{});
         }
 
-        const std::string content_hash = pt::artifactContentHash(*bundle_bytes);
-        if(!expected_content_hash.empty() && content_hash != expected_content_hash)
-        {
-            spdlog::error("Rebuilt artifact for `{}` does not match its verified source bundle", name);
-            co_return std::unexpected(pt::PTDeployError{pt::PTDeployError::Kind::INVALID_INPUT});
-        }
-
-        const auto cached_hash = pt::ArtifactStore(out_dir.parent_path() / "artifacts" / "cache")
-            .cache(*bundle_bytes);
-        if(!cached_hash)
-        {
-            spdlog::error("Failed to cache artifact bundle for `{}`: {}", name, cached_hash.error());
-            co_return std::unexpected(pt::PTDeployError{});
-        }
+        // The content hash is the protocol's commitment to the bundle; the bundle itself is
+        // not kept.
         publication.content_hash = pt::computeContentHash(*bundle_bytes);
+        const std::string content_hash = chain::bytes32ToHex(publication.content_hash);
 
         // Publication is one transaction: the registry deploys with CREATE2, validates the
         // deployed runtime against these hashes, then registers and emits the event.
@@ -813,6 +711,7 @@ namespace dcn::loader
         co_return PreparedPublication{
             .publication = std::move(publication),
             .creation_code = std::move(creation_code),
+            .runtime_code = compiled->runtime_code,
             .artifact_bytes = *bundle_bytes,
             .content_hash = content_hash,
             .registration = std::move(registration),
@@ -836,40 +735,14 @@ namespace dcn::loader
         return {};
     }
 
-    // Deploys through the registry factory on the in-process EVM. The owner sends the
-    // publication itself, so the registry accepts an empty owner signature.
-    template<class T, class InternalGetter, class SolidityCodeCtor>
-    static asio::awaitable<std::expected<chain::Address, pt::PTDeployError>> _deployObjectLocally(
+    // Registers `prepared` with the in-process EVM's registry and returns the entity's
+    // address. The owner sends the publication itself, so the registry accepts an empty
+    // owner signature; the nonce is the local registry's.
+    static asio::awaitable<std::expected<chain::Address, pt::PTDeployError>> _publishLocally(
         evm::EVM & evm,
-        T object,
-        InternalGetter getter,
-        const std::filesystem::path out_dir,
-        SolidityCodeCtor solidity_code_ctor,
-        pt::EntityKind entity_kind,
-        std::vector<std::uint8_t> ctor_prefix_args,
-        std::optional<pt::ConnectorRegistration> registration,
-        std::vector<pt::ArtifactDependency> dependencies,
-        bool persist_json = true,
-        std::string expected_content_hash = {}
-    )
+        PreparedPublication & prepared)
     {
-        auto prepared = co_await _preparePublication(
-            evm,
-            object,
-            getter,
-            out_dir,
-            std::forward<SolidityCodeCtor>(solidity_code_ctor),
-            entity_kind,
-            std::move(ctor_prefix_args),
-            std::move(registration),
-            std::move(dependencies),
-            std::move(expected_content_hash));
-        if(!prepared)
-        {
-            co_return std::unexpected(prepared.error());
-        }
-
-        pt::Publication & publication = prepared->publication;
+        pt::Publication & publication = prepared.publication;
         const chain::Address address = publication.owner;
         const std::string name = publication.name;
 
@@ -882,17 +755,18 @@ namespace dcn::loader
             pt::encodePublicationNonceCall(address),
             evm::DEFAULT_GAS_LIMIT,
             0);
-        if(!nonce_result || nonce_result->size() < 32)
+        const auto nonce = nonce_result ? chain::readUint64Word(*nonce_result) : std::nullopt;
+        if(!nonce)
         {
             spdlog::error("Failed to read publication nonce for `{}`", name);
             co_return std::unexpected(pt::PTDeployError{});
         }
-        publication.nonce = chain::readUint256(*nonce_result, 0);
+        publication.nonce = *nonce;
 
         const auto publish_result = co_await evm.execute(
             address,
             evm.getRegistryAddress(),
-            _encodePublishCall(*prepared),
+            _encodePublishCall(prepared),
             evm::DEFAULT_GAS_LIMIT,
             0);
 
@@ -928,8 +802,57 @@ namespace dcn::loader
             co_return std::unexpected(pt::PTDeployError{pt::PTDeployError::Kind::INVALID_INPUT});
         }
 
-        const chain::Address object_address = *object_address_res;
-        spdlog::info("Object address '{}': {}", name, evmc::hex(object_address));
+        spdlog::info("Object address '{}': {}", name, evmc::hex(*object_address_res));
+        co_return *object_address_res;
+    }
+
+    // Deploys through the registry factory on the in-process EVM.
+    template<class T, class InternalGetter, class SolidityCodeCtor>
+    static asio::awaitable<std::expected<chain::Address, pt::PTDeployError>> _deployObjectLocally(
+        evm::EVM & evm,
+        registry::Registry & registry,
+        T object,
+        InternalGetter getter,
+        const std::filesystem::path out_dir,
+        SolidityCodeCtor solidity_code_ctor,
+        pt::EntityKind entity_kind,
+        std::vector<std::uint8_t> ctor_prefix_args,
+        std::optional<pt::ConnectorRegistration> registration,
+        std::vector<pt::ArtifactDependency> dependencies,
+        bool persist_json = true
+    )
+    {
+        auto prepared = co_await _preparePublication(
+            evm,
+            object,
+            getter,
+            out_dir,
+            std::forward<SolidityCodeCtor>(solidity_code_ctor),
+            entity_kind,
+            std::move(ctor_prefix_args),
+            std::move(registration),
+            std::move(dependencies));
+        if(!prepared)
+        {
+            co_return std::unexpected(prepared.error());
+        }
+
+        const std::string name = prepared->publication.name;
+
+        // The runtime code of a transformation or condition is kept with the registry, as
+        // for chain entities. It is stored by its hash before the publication, so the
+        // entity is never registered without it.
+        if(entity_kind != pt::EntityKind::CONNECTOR
+           && !co_await registry.putRuntimeCode(
+               chain::bytes32ToHex(prepared->publication.runtime_code_hash), prepared->runtime_code))
+        {
+            spdlog::error("Failed to store the runtime code of `{}`", name);
+            co_return std::unexpected(pt::PTDeployError{});
+        }
+
+        const auto published = co_await _publishLocally(evm, *prepared);
+        if(!published) co_return std::unexpected(published.error());
+        const chain::Address object_address = *published;
 
         if(persist_json && !co_await _saveJsonRecord(name, std::move(object), out_dir))
         {
@@ -942,14 +865,102 @@ namespace dcn::loader
     }
 
 
+    // Keeps the first reason a chain entity could not be deployed: the deepest dependency
+    // fails first, and it is the one to fix.
+    static void _noteFailure(std::string * failure, std::string reason)
+    {
+        spdlog::error("{}", reason);
+        if(failure && failure->empty()) *failure = std::move(reason);
+    }
+
+    // Deploys the chain entity at `location` on the in-process EVM by running the creation
+    // code the chain deployed it from, so it starts from exactly the constructor state the
+    // chain has. A connector's registry constructor argument is pointed at the local
+    // registry, where its dependencies are deployed the same way. The local registry checks
+    // the result against the entity's registry event as the chain registry did.
+    static asio::awaitable<std::expected<chain::Address, std::string>> _replayChainEntity(
+        evm::EVM & evm,
+        registry::Registry & registry,
+        const pt::EntityKind kind,
+        const std::string & name,
+        const registry::EntityLocation & location,
+        const std::string & owner,
+        std::optional<pt::ConnectorRegistration> registration = std::nullopt)
+    {
+        const registry::EntitySource & source = location.source;
+        const std::string label = std::format("{} '{}'", pt::entityKindName(kind), name);
+
+        auto creation_code = co_await registry.getChainCreationCode(source.source_id, location.address);
+        if(!creation_code)
+        {
+            co_return std::unexpected(source.log_index < 0
+                ? std::format("{} was read from registry state and its publication could not be located, "
+                    "so its constructor state cannot be reproduced", label)
+                : std::format("{}: its creation code could not be recovered from its publication transaction "
+                    "(a relay that builds the call on chain), so its constructor state cannot be reproduced", label));
+        }
+
+        const auto owner_address = evmc::from_hex<chain::Address>(owner);
+        const auto content_hash = evmc::from_hex<evmc::bytes32>(source.content_hash);
+        const auto metadata_hash = evmc::from_hex<evmc::bytes32>(source.metadata_hash);
+        const auto runtime_code_hash = evmc::from_hex<evmc::bytes32>(source.runtime_code_hash);
+        if(!owner_address || !content_hash || !metadata_hash || !runtime_code_hash)
+        {
+            co_return std::unexpected(std::format("{}: its registry record is malformed", label));
+        }
+
+        if(kind == pt::EntityKind::CONNECTOR)
+        {
+            // A PT connector's constructor arguments end with its registry, content hash and
+            // metadata hash words.
+            constexpr std::size_t TRAILING_ARGUMENT_BYTES = 3 * 32;
+            const auto chain_registry = evmc::from_hex<chain::Address>(source.registry_address);
+            const auto registry_word = creation_code->size() >= TRAILING_ARGUMENT_BYTES
+                ? creation_code->end() - TRAILING_ARGUMENT_BYTES
+                : creation_code->end();
+            const std::vector<std::uint8_t> chain_registry_word =
+                chain_registry ? evm::encodeAsArg(*chain_registry) : std::vector<std::uint8_t>{};
+            if(!registration || registry_word == creation_code->end() || chain_registry_word.empty()
+               || !std::equal(chain_registry_word.begin(), chain_registry_word.end(), registry_word))
+            {
+                co_return std::unexpected(std::format(
+                    "{} does not take its registry as a PT connector constructor does", label));
+            }
+            std::ranges::copy(evm::encodeAsArg(evm.getRegistryAddress()), registry_word);
+        }
+
+        PreparedPublication prepared{
+            .publication = pt::Publication{
+                .kind = kind,
+                .name = name,
+                .owner = *owner_address,
+                .content_hash = *content_hash,
+                .metadata_hash = *metadata_hash,
+                .creation_code_hash = chain::keccakBytes(*creation_code),
+                .runtime_code_hash = *runtime_code_hash,
+                .registration_hash = registration ? pt::computeRegistrationHash(*registration) : evmc::bytes32{},
+                .deadline = std::numeric_limits<std::uint64_t>::max()},
+            .creation_code = std::move(*creation_code),
+            .registration = std::move(registration)};
+
+        const auto published = co_await _publishLocally(evm, prepared);
+        if(!published)
+        {
+            co_return std::unexpected(std::format(
+                "{}: replaying its creation code on the local EVM failed (local registry error {})",
+                label, static_cast<int>(published.error().kind)));
+        }
+        spdlog::info("Replayed chain {} on the local EVM", label);
+        co_return *published;
+    }
+
     static asio::awaitable<std::expected<chain::Address, pt::PTDeployError>> deployConnectorWithContext(
         evm::EVM & evm,
         registry::Registry & registry,
         ConnectorRecord connector_record,
         const std::filesystem::path & storage_path,
         bool persist_json,
-        ConnectorEnsureContext & ensure_context,
-        std::string expected_content_hash)
+        ConnectorEnsureContext & ensure_context)
     {
         const Connector & connector = connector_record.connector();
 
@@ -1041,6 +1052,7 @@ namespace dcn::loader
 
         co_return co_await _deployObjectLocally(
             evm,
+            registry,
             std::move(connector_record),
             &ConnectorRecord::connector,
             storage_path / "connectors",
@@ -1049,8 +1061,7 @@ namespace dcn::loader
             evm::encodeAsArg(evm.getRegistryAddress()),
             std::move(registration),
             std::move(*dependencies),
-            persist_json,
-            std::move(expected_content_hash));
+            persist_json);
     }
 
     asio::awaitable<std::expected<chain::Address, pt::PTDeployError>> deployConnector(
@@ -1068,8 +1079,7 @@ namespace dcn::loader
             std::move(connector_record),
             storage_path,
             persist_json,
-            ensure_context,
-            {});
+            ensure_context);
     }
 
     asio::awaitable<std::expected<chain::Address, pt::PTDeployError>> deployTransformation(
@@ -1077,11 +1087,10 @@ namespace dcn::loader
         registry::Registry & registry,
         TransformationRecord transformation_record,
         const std::filesystem::path & storage_path,
-        bool persist_json,
-        std::string expected_content_hash)
+        bool persist_json)
     {
-        (void)registry;
         return _deployObjectLocally(evm,
+            registry,
             std::move(transformation_record),
             &TransformationRecord::transformation,
             storage_path / "transformations",
@@ -1090,8 +1099,7 @@ namespace dcn::loader
             std::vector<std::uint8_t>{},
             std::nullopt,
             {},
-            persist_json,
-            std::move(expected_content_hash));
+            persist_json);
     }
 
 
@@ -1100,11 +1108,10 @@ namespace dcn::loader
         registry::Registry & registry,
         ConditionRecord condition_record,
         const std::filesystem::path & storage_path,
-        bool persist_json,
-        std::string expected_content_hash)
+        bool persist_json)
     {
-        (void)registry;
         return _deployObjectLocally(evm,
+            registry,
             std::move(condition_record),
             &ConditionRecord::condition,
             storage_path / "conditions",
@@ -1113,16 +1120,14 @@ namespace dcn::loader
             std::vector<std::uint8_t>{},
             std::nullopt,
             {},
-            persist_json,
-            std::move(expected_content_hash));
+            persist_json);
     }
 
 
     asio::awaitable<std::expected<PreparedPublication, pt::PTDeployError>> prepareTransformationPublication(
         evm::EVM & evm,
         TransformationRecord transformation_record,
-        const std::filesystem::path & storage_path,
-        std::string expected_content_hash)
+        const std::filesystem::path & storage_path)
     {
         co_return co_await _preparePublication(
             evm,
@@ -1133,15 +1138,13 @@ namespace dcn::loader
             pt::EntityKind::TRANSFORMATION,
             std::vector<std::uint8_t>{},
             std::nullopt,
-            {},
-            std::move(expected_content_hash));
+            {});
     }
 
     asio::awaitable<std::expected<PreparedPublication, pt::PTDeployError>> prepareConditionPublication(
         evm::EVM & evm,
         ConditionRecord condition_record,
-        const std::filesystem::path & storage_path,
-        std::string expected_content_hash)
+        const std::filesystem::path & storage_path)
     {
         co_return co_await _preparePublication(
             evm,
@@ -1152,16 +1155,14 @@ namespace dcn::loader
             pt::EntityKind::CONDITION,
             std::vector<std::uint8_t>{},
             std::nullopt,
-            {},
-            std::move(expected_content_hash));
+            {});
     }
 
     asio::awaitable<std::expected<PreparedPublication, pt::PTDeployError>> prepareConnectorPublication(
         evm::EVM & evm,
         ConnectorRecord connector_record,
         const std::filesystem::path & storage_path,
-        const chain::Address & target_registry,
-        std::string expected_content_hash)
+        const chain::Address & target_registry)
     {
         auto registration = pt::buildConnectorRegistration(connector_record.connector());
         if(!registration)
@@ -1181,8 +1182,7 @@ namespace dcn::loader
             pt::EntityKind::CONNECTOR,
             evm::encodeAsArg(target_registry),
             std::move(registration),
-            std::move(*dependencies),
-            std::move(expected_content_hash));
+            std::move(*dependencies));
     }
 
     std::optional<TransformationRecord> loadLocalTransformation(
@@ -1368,7 +1368,8 @@ namespace dcn::loader
         evm::EVM & evm,
         registry::Registry & registry,
         const std::string & name,
-        const std::filesystem::path & storage_path)
+        const std::filesystem::path & storage_path,
+        std::string * failure)
     {
         if(name.empty())
         {
@@ -1386,25 +1387,34 @@ namespace dcn::loader
             co_return true;
         }
 
-        auto record_opt = co_await _loadTransformationForExecution(registry, name, storage_path);
-        if(!record_opt.has_value())
+        // A chain transformation is replayed from the creation code the chain deployed it from.
+        const auto location = co_await registry.getEntityLocation(registry::EntityKind::TRANSFORMATION, name);
+        if(location && location->source.source_id != registry::LOCAL_SOURCE_ID)
         {
-            spdlog::error("Transformation '{}' has no verified executable artifact", name);
+            const auto projected = co_await registry.getTransformationRecordHandle(name);
+            if(!projected || !*projected)
+            {
+                _noteFailure(failure, std::format("transformation '{}' has no registry record", name));
+                co_return false;
+            }
+            const auto replayed = co_await _replayChainEntity(
+                evm, registry, pt::EntityKind::TRANSFORMATION, name, *location, (**projected).owner());
+            if(!replayed)
+            {
+                _noteFailure(failure, replayed.error());
+                co_return false;
+            }
+            co_return true;
+        }
+
+        auto record = loadLocalTransformation(storage_path, name);
+        if(!record)
+        {
+            spdlog::error("Transformation '{}' has no stored definition", name);
             co_return false;
         }
 
-        const auto location = co_await registry.getEntityLocation(
-            registry::EntityKind::TRANSFORMATION, name);
-        const std::string expected_content_hash = location && location->source.source_id != registry::LOCAL_SOURCE_ID
-            ? location->source.content_hash
-            : std::string{};
-        const auto deploy_result = co_await deployTransformation(
-            evm,
-            registry,
-            std::move(*record_opt),
-            storage_path,
-            false,
-            expected_content_hash);
+        const auto deploy_result = co_await deployTransformation(evm, registry, std::move(*record), storage_path, false);
         if(!deploy_result &&
             deploy_result.error().kind != pt::PTDeployError::Kind::TRANSFORMATION_ALREADY_REGISTERED)
         {
@@ -1422,7 +1432,8 @@ namespace dcn::loader
         evm::EVM & evm,
         registry::Registry & registry,
         const std::string & name,
-        const std::filesystem::path & storage_path)
+        const std::filesystem::path & storage_path,
+        std::string * failure)
     {
         if(name.empty())
         {
@@ -1439,25 +1450,34 @@ namespace dcn::loader
             co_return true;
         }
 
-        auto record_opt = co_await _loadConditionForExecution(registry, name, storage_path);
-        if(!record_opt.has_value())
+        // A chain condition is replayed from the creation code the chain deployed it from.
+        const auto location = co_await registry.getEntityLocation(registry::EntityKind::CONDITION, name);
+        if(location && location->source.source_id != registry::LOCAL_SOURCE_ID)
         {
-            spdlog::error("Condition '{}' has no verified executable artifact", name);
+            const auto projected = co_await registry.getConditionRecordHandle(name);
+            if(!projected || !*projected)
+            {
+                _noteFailure(failure, std::format("condition '{}' has no registry record", name));
+                co_return false;
+            }
+            const auto replayed = co_await _replayChainEntity(
+                evm, registry, pt::EntityKind::CONDITION, name, *location, (**projected).owner());
+            if(!replayed)
+            {
+                _noteFailure(failure, replayed.error());
+                co_return false;
+            }
+            co_return true;
+        }
+
+        auto record = loadLocalCondition(storage_path, name);
+        if(!record)
+        {
+            spdlog::error("Condition '{}' has no stored definition", name);
             co_return false;
         }
 
-        const auto location = co_await registry.getEntityLocation(
-            registry::EntityKind::CONDITION, name);
-        const std::string expected_content_hash = location && location->source.source_id != registry::LOCAL_SOURCE_ID
-            ? location->source.content_hash
-            : std::string{};
-        const auto deploy_result = co_await deployCondition(
-            evm,
-            registry,
-            std::move(*record_opt),
-            storage_path,
-            false,
-            expected_content_hash);
+        const auto deploy_result = co_await deployCondition(evm, registry, std::move(*record), storage_path, false);
         if(!deploy_result &&
             deploy_result.error().kind != pt::PTDeployError::Kind::CONDITION_ALREADY_REGISTERED)
         {
@@ -1475,11 +1495,14 @@ namespace dcn::loader
         evm::EVM & evm,
         registry::Registry & registry,
         const std::string & name,
-        const std::filesystem::path & storage_path)
+        const std::filesystem::path & storage_path,
+        std::string * failure)
     {
         ConnectorEnsureContext context;
         context.connector_deploy_stack.reserve(64);
-        co_return co_await ensureConnectorDeployedImpl(evm, registry, name, storage_path, context);
+        const bool deployed = co_await ensureConnectorDeployedImpl(evm, registry, name, storage_path, context);
+        if(failure) *failure = std::move(context.failure);
+        co_return deployed;
     }
 
     asio::awaitable<bool> importJsonStorageToDatabase(
@@ -2042,17 +2065,30 @@ namespace dcn::loader
             co_return true;
         }
 
-        const auto record = co_await _loadConnectorForExecution(registry, name, storage_path);
+        // A chain connector's registry event describes its dependencies and registration; the
+        // connector itself is replayed from the creation code the chain deployed it from.
+        const auto location = co_await registry.getEntityLocation(registry::EntityKind::CONNECTOR, name);
+        const bool chain_entity = location && location->source.source_id != registry::LOCAL_SOURCE_ID;
+        std::optional<ConnectorRecord> record;
+        if(chain_entity)
+        {
+            const auto projected = co_await registry.getConnectorRecordHandle(name);
+            if(!projected || !*projected)
+            {
+                _noteFailure(&context.failure, std::format("connector '{}' has no registry record", name));
+                co_return false;
+            }
+            record = ConnectorRecord(**projected);
+        }
+        else
+        {
+            record = co_await _loadLocalConnector(registry, name, storage_path);
+        }
         if(!record)
         {
-            spdlog::error("Connector '{}' has no verified executable definition", name);
+            spdlog::error("Connector '{}' has no stored definition", name);
             co_return false;
         }
-
-        const auto location = co_await registry.getEntityLocation(registry::EntityKind::CONNECTOR, name);
-        const std::string expected_content_hash = location && location->source.source_id != registry::LOCAL_SOURCE_ID
-            ? location->source.content_hash
-            : std::string{};
 
         context.visiting.insert(name);
 
@@ -2078,7 +2114,8 @@ namespace dcn::loader
                     evm,
                     registry,
                     transformation_name,
-                    storage_path))
+                    storage_path,
+                    &context.failure))
                 {
                     ok = false;
                     break;
@@ -2150,13 +2187,25 @@ namespace dcn::loader
                 evm,
                 registry,
                 connector.condition_name(),
-                storage_path))
+                storage_path,
+                &context.failure))
             {
                 ok = false;
             }
         }
 
-        if(ok)
+        if(ok && chain_entity)
+        {
+            const auto replayed = co_await _replayChainEntity(
+                evm, registry, pt::EntityKind::CONNECTOR, name, *location, record->owner(),
+                pt::buildConnectorRegistration(record->connector()));
+            if(!replayed)
+            {
+                _noteFailure(&context.failure, replayed.error());
+                ok = false;
+            }
+        }
+        else if(ok)
         {
             spdlog::debug("JSON import deploy connector '{}': deploying from DB record", name);
 
@@ -2166,8 +2215,7 @@ namespace dcn::loader
                 *record,
                 storage_path,
                 false,
-                context,
-                expected_content_hash);
+                context);
             if(!deploy_result &&
                 deploy_result.error().kind != pt::PTDeployError::Kind::CONNECTOR_ALREADY_REGISTERED)
             {

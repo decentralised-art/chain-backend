@@ -31,7 +31,7 @@ namespace dcn::publish
     {
         enum class Kind : std::uint8_t
         {
-            INVALID,    // the request or artifact cannot produce a valid publication
+            INVALID,    // the request cannot produce a valid publication
             CONFLICT,   // the target registry holds something else under this name or a dependency's
             REVERTED,   // the transaction reverts, before or after it was mined
             FORBIDDEN,  // the transaction is signed by an account other than the entity owner
@@ -59,14 +59,13 @@ namespace dcn::publish
         bool already_published = false;
     };
 
-    /// Everything the registry factory needs for one entity, built from a verified
-    /// artifact bundle by the loader. Nonce and deadline are filled in by prepare().
+    /// Everything the registry factory needs for one entity, built by the loader from the
+    /// entity's local definition. Nonce and deadline are filled in by prepare().
     struct PublicationRequest
     {
         pt::Publication publication;
         std::vector<std::uint8_t> creation_code;
         std::optional<pt::ConnectorRegistration> registration;  // connectors only
-        std::string artifact_bytes;
         std::vector<pt::ArtifactDependency> dependencies;       // connectors only
     };
 
@@ -117,7 +116,6 @@ namespace dcn::publish
             Publisher(
                 std::shared_ptr<rpc::EthClient> client,
                 DeploymentManifest manifest,
-                const pt::ArtifactStore & artifacts,
                 PublisherConfig config = {});
 
             const DeploymentManifest & manifest() const;
@@ -128,9 +126,9 @@ namespace dcn::publish
             asio::awaitable<std::expected<std::optional<PublishResult>, PublishError>> findPublished(
                 const pt::Publication & publication) const;
 
-            /// Checks dependencies, uploads the artifact durably, binds the owner's current
-            /// publication nonce and a deadline, and returns the transaction to send. With
-            /// `relay`, also returns the account nonce and fees an offline signer needs.
+            /// Checks dependencies, binds the owner's current publication nonce and a
+            /// deadline, and returns the transaction to send. With `relay`, also returns the
+            /// account nonce and fees an offline signer needs.
             asio::awaitable<std::expected<PreparedTransaction, PublishError>> prepare(
                 PublicationRequest request,
                 bool relay = false) const;
@@ -158,7 +156,6 @@ namespace dcn::publish
 
             std::shared_ptr<rpc::EthClient> _client;
             DeploymentManifest _manifest;
-            const pt::ArtifactStore & _artifacts;
             PublisherConfig _config;
             events::PTEventDecoder _decoder;
             chain::Address _registry_address{};

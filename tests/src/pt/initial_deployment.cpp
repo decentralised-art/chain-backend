@@ -45,7 +45,7 @@ namespace
         chain::Address runner_address{};
         chain::Address registry_owner{};
         chain::Address runner_owner{};
-        chain::Address runner_registry{};
+        bool runner_exposes_registry = true;
         std::vector<std::uint8_t> registry_protocol_id;
         std::vector<std::uint8_t> runner_protocol_id;
         std::uint64_t registry_protocol_version = 0;
@@ -164,32 +164,24 @@ namespace
             const auto runner_id = call(snapshot.runner_address, "protocolId()");
             const auto registry_version = call(snapshot.registry_address, "protocolVersion()");
             const auto runner_version = call(snapshot.runner_address, "protocolVersion()");
-            const auto runner_registry = call(snapshot.runner_address, "registry()");
-            if(!registry_id || !runner_id || !registry_version || !runner_version || !runner_registry)
+            if(!registry_id || !runner_id || !registry_version || !runner_version)
             {
                 snapshot.error_message = "Failed to read PT protocol identity";
                 return snapshot;
             }
             if(registry_id->size() != 32 || runner_id->size() != 32 ||
-                registry_version->size() != 32 || runner_version->size() != 32 ||
-                runner_registry->size() != 32)
+                registry_version->size() != 32 || runner_version->size() != 32)
             {
                 snapshot.error_message = "Invalid PT protocol identity response";
                 return snapshot;
             }
 
-            const auto runner_registry_address = chain::readAddressWord(*runner_registry);
-            if(!runner_registry_address)
-            {
-                snapshot.error_message = "Failed to decode runner registry address";
-                return snapshot;
-            }
-
             snapshot.registry_protocol_id = *registry_id;
             snapshot.runner_protocol_id = *runner_id;
-            snapshot.registry_protocol_version = chain::readUint256(*registry_version, 0);
-            snapshot.runner_protocol_version = chain::readUint256(*runner_version, 0);
-            snapshot.runner_registry = *runner_registry_address;
+            snapshot.registry_protocol_version = chain::readUint64Word(*registry_version).value_or(0);
+            snapshot.runner_protocol_version = chain::readUint64Word(*runner_version).value_or(0);
+            // The runner is not bound to a registry; Runner.gen is given one per call.
+            snapshot.runner_exposes_registry = call(snapshot.runner_address, "registry()").has_value();
 
             std::vector<std::uint8_t> change_owner_input = chain::constructSelector("changeOwner(address)");
             change_owner_input.resize(change_owner_input.size() + 32, 0);
@@ -271,7 +263,7 @@ TEST_F(UnitTest, PT_InitialDeployment_ExposesMatchingProtocolIdentity)
         expected_id.bytes));
     EXPECT_EQ(snapshot.registry_protocol_version, 1u);
     EXPECT_EQ(snapshot.registry_protocol_version, snapshot.runner_protocol_version);
-    EXPECT_EQ(snapshot.runner_registry, snapshot.registry_address);
+    EXPECT_FALSE(snapshot.runner_exposes_registry);
 }
 
 TEST_F(UnitTest, PT_OwnableBase_RejectsZeroOwner)
