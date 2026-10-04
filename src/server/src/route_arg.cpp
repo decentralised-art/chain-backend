@@ -203,11 +203,11 @@ namespace dcn::parse
 
             return val;
         }
-        catch(const std::out_of_range & e)
+        catch(const std::out_of_range &)
         {
             return std::unexpected(ParseError{ParseError::Kind::OUT_OF_RANGE});
         }
-        catch(const std::invalid_argument & e)
+        catch(const std::invalid_argument &)
         {
             return std::unexpected(ParseError{ParseError::Kind::INVALID_VALUE});
         }
@@ -215,7 +215,6 @@ namespace dcn::parse
         {
             return std::unexpected(ParseError{ParseError::Kind::UNKNOWN});
         }
-        return std::unexpected(ParseError{ParseError::Kind::UNKNOWN});
     }
 
 
@@ -238,11 +237,11 @@ namespace dcn::parse
 
             return static_cast<std::uint32_t>(val);
         } 
-        catch (const std::out_of_range & e) 
+        catch(const std::out_of_range &) 
         {
             return std::unexpected(ParseError{ParseError::Kind::OUT_OF_RANGE});
         }
-        catch (const std::invalid_argument & e)
+        catch(const std::invalid_argument &)
         {
             return std::unexpected(ParseError{ParseError::Kind::INVALID_VALUE});
         }
@@ -250,7 +249,6 @@ namespace dcn::parse
         {
             return std::unexpected(ParseError{ParseError::Kind::UNKNOWN});
         }
-        return std::unexpected(ParseError{ParseError::Kind::UNKNOWN});
     }
 
     template<>

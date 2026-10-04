@@ -296,9 +296,9 @@ namespace dcn::evm
     }
 
     EVM::EVM(asio::io_context & io_context, evmc_revision rev, std::filesystem::path solc_path, std::filesystem::path pt_path)
-    :   _vm(evmc_create_evmone()),
+    :   _strand(asio::make_strand(io_context)),
+        _vm(evmc_create_evmone()),
         _rev(rev),
-        _strand(asio::make_strand(io_context)),
         _solc_path(std::move(solc_path)),
         _pt_path(std::move(pt_path)),
         _pt_out_path(_makePTOutPath()),
@@ -313,14 +313,16 @@ namespace dcn::evm
 
         _vm.set_option("O", "0"); // disable optimizations
 
-        // Initialize the genesis account
+        // Nothing else can reach _storage before the constructor returns, so the
+        // built-in accounts are created directly instead of through the strand.
         std::memcpy(_genesis_address.bytes + (20 - 7), "genesis", 7);
-        addAccount(_genesis_address, DEFAULT_GAS_LIMIT);
+        _storage.add_account(_genesis_address);
+        _storage.set_balance(_genesis_address, DEFAULT_GAS_LIMIT);
         spdlog::info(std::format("Genesis address: {}", _genesis_address));
 
-        // Initialize console log account
         std::memcpy(_console_log_address.bytes + (20 - 11), "console.log", 11);
-        addAccount(_console_log_address, DEFAULT_GAS_LIMIT);
+        _storage.add_account(_console_log_address);
+        _storage.set_balance(_console_log_address, DEFAULT_GAS_LIMIT);
 
         co_spawn(
             io_context,

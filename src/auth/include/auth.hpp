@@ -69,7 +69,7 @@ namespace dcn::auth
         /// Key for sign-in nonces and access tokens, at least MIN_SECRET_SIZE bytes. Instances
         /// that share it redeem each other's nonces and accept each other's tokens. Empty: a
         /// random key per instance, so nothing it issues outlives it or works on another.
-        std::string secret;
+        std::string secret{};
     };
 
     struct LoginChallenge
@@ -77,7 +77,7 @@ namespace dcn::auth
         std::string nonce;
 
         /// The EIP-4361 sign-in message the wallet signs; /auth takes its nonce and the signature.
-        std::string message;
+        std::string message{};
     };
 
     /**
@@ -182,8 +182,8 @@ struct std::formatter<dcn::auth::AuthError::Kind> : std::formatter<std::string> 
             case dcn::auth::AuthError::Kind::INVALID_NONCE : return formatter<string>::format("Invalid nonce", ctx);
             case dcn::auth::AuthError::Kind::INVALID_ADDRESS : return formatter<string>::format("Invalid address", ctx);
 
-            default:  return formatter<string>::format("Unknown", ctx);
+            case dcn::auth::AuthError::Kind::UNKNOWN : return formatter<string>::format("Unknown", ctx);
         }
-        return formatter<string>::format("", ctx);
+        return formatter<string>::format("Unknown", ctx);
     }
 };

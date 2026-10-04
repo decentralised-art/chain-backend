@@ -40,7 +40,15 @@ if(MSVC)
         /EHsc
         /W4 # Enables aggressive compiler warnings
         /w14062 # Warns on an enumerator a switch does not handle, as -Wswitch does
+        /wd4100 # Unreferenced parameters are allowed, as -Wno-unused-parameter does
+        /WX # Treat warnings as errors
     )
+    add_compile_definitions(
+        _WIN32_WINNT=0x0A00 # Windows 10; set before any header (asio included) picks a default
+        _CRT_SECURE_NO_WARNINGS # Standard getenv/localtime instead of the MSVC-only _s variants
+    )
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-Werror)
 endif()
 
 add_subdirectory(src)

@@ -14,9 +14,8 @@ namespace dcn::storage::sqlite
                 return "FULL";
             case storage::sqlite::WalCheckpointMode::TRUNCATE:
                 return "TRUNCATE";
-            default:
-                return "UNKNOWN";
         }
+        return "UNKNOWN";
     }
 
     int toSqliteCheckpointMode(const storage::sqlite::WalCheckpointMode mode)
@@ -29,8 +28,7 @@ namespace dcn::storage::sqlite
                 return SQLITE_CHECKPOINT_FULL;
             case storage::sqlite::WalCheckpointMode::TRUNCATE:
                 return SQLITE_CHECKPOINT_TRUNCATE;
-            default:
-                return SQLITE_CHECKPOINT_PASSIVE;
         }
+        return SQLITE_CHECKPOINT_PASSIVE;
     }
 }

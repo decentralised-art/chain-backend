@@ -679,15 +679,17 @@ namespace dcn::registry
 
                 return lhs_bytes == rhs_bytes;
             }
-
-            std::string lhs_bytes;
-            std::string rhs_bytes;
-            if(!lhs.SerializeToString(&lhs_bytes) || !rhs.SerializeToString(&rhs_bytes))
+            else
             {
-                return false;
-            }
+                std::string lhs_bytes;
+                std::string rhs_bytes;
+                if(!lhs.SerializeToString(&lhs_bytes) || !rhs.SerializeToString(&rhs_bytes))
+                {
+                    return false;
+                }
 
-            return lhs_bytes == rhs_bytes;
+                return lhs_bytes == rhs_bytes;
+            }
         }
 
         // The registry mirrors only chain-derivable state: a local entity's source stays in

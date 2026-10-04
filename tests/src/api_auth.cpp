@@ -318,7 +318,10 @@ TEST_F(UnitTest, API_Auth_RefusesSignaturesOfAnythingButTheMessageIssuedToTheSig
     const auto upper = issue(wallet->address());
     std::string upper_nonce = upper.nonce;
     std::ranges::transform(upper_nonce, upper_nonce.begin(), [](const char c) { return static_cast<char>(std::toupper(static_cast<unsigned char>(c))); });
-    if(upper_nonce != upper.nonce) EXPECT_TRUE(refused(WALLET_ADDRESS, upper_nonce, upper.message));
+    if(upper_nonce != upper.nonce)
+    {
+        EXPECT_TRUE(refused(WALLET_ADDRESS, upper_nonce, upper.message));
+    }
 
     const auto missing = runAwaitable(io_context, POST_auth(authRequest(json{{"address", WALLET_ADDRESS}}), {}, {}, auth_manager));
     EXPECT_EQ(missing.getCode(), http::Code::BadRequest);

@@ -176,7 +176,7 @@ namespace dcn::cmd
                                     _values[arg_name] = std::stoi(value_str);
                                     ++parsed_values;
                                 }
-                                catch(const std::exception& e)
+                                catch(const std::exception&)
                                 {
                                     spdlog::error("Parsing arg \"{}\", of type int, with value \"{}\" failed",arg_name, value_str);
                                     std::exit(1);
@@ -189,7 +189,7 @@ namespace dcn::cmd
                                     _values[arg_name] = (unsigned int)(std::stoul(value_str));
                                     ++parsed_values;
                                 }
-                                catch(const std::exception& e)
+                                catch(const std::exception&)
                                 {
                                     spdlog::error("Parsing arg \"{}\", of type unsigned int, with value \"{}\" failed",arg_name, value_str);
                                     std::exit(1);
@@ -207,7 +207,7 @@ namespace dcn::cmd
                                     _values[arg_name] = std::stof(value_str);
                                     ++parsed_values;
                                 }
-                                catch(const std::exception& e)
+                                catch(const std::exception&)
                                 {
                                     spdlog::error("Parsing arg \"{}\", of type float, with value \"{}\" failed",arg_name, value_str);
                                     std::exit(1);
@@ -243,7 +243,7 @@ namespace dcn::cmd
                                     std::get<std::vector<int>>(_values.at(arg_name)).emplace_back(std::stoi(value_str));
                                     ++parsed_values;
                                 }
-                                catch(const std::exception& e)
+                                catch(const std::exception&)
                                 {
                                     spdlog::error("Parsing of arg \"{}\" with value \"{}\" failed",arg_name, value_str);
                                     std::exit(1);
@@ -260,7 +260,7 @@ namespace dcn::cmd
                                     std::get<std::vector<unsigned int>>(_values.at(arg_name)).emplace_back((unsigned int)(std::stoul(value_str)));
                                     ++parsed_values;
                                 }
-                                catch(const std::exception& e)
+                                catch(const std::exception&)
                                 {
                                     spdlog::error("Parsing of arg \"{}\" with value \"{}\" failed",arg_name, value_str);
                                     std::exit(1);
@@ -286,7 +286,7 @@ namespace dcn::cmd
                                     std::get<std::vector<float>>(_values.at(arg_name)).emplace_back(std::stof(value_str));
                                     ++parsed_values;
                                 }
-                                catch(const std::exception& e)
+                                catch(const std::exception&)
                                 {
                                     spdlog::error("Parsing of arg \"{}\" with value \"{}\" failed",arg_name, value_str);
                                     std::exit(1);
@@ -359,7 +359,7 @@ namespace dcn::cmd
                 msgs.emplace_back(arg.name + " <value>", arg.desc);
             }
         }
-        int max_len = std::ranges::max(msgs, [](auto& a, auto& b){return a.first.length() < b.first.length();}).first.length();
+        const int max_len = static_cast<int>(std::ranges::max(msgs, [](auto& a, auto& b){return a.first.length() < b.first.length();}).first.length());
         help_message += "\n";
         for(const auto& msg : msgs)
         {

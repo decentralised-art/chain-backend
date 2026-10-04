@@ -31,8 +31,8 @@ namespace dcn::chain
             TIMEOUT
         } kind = Kind::UNKNOWN;
 
-        std::string message;
-        std::vector<std::uint8_t> result_bytes;
+        std::string message{};
+        std::vector<std::uint8_t> result_bytes{};
     };
 
     struct ExecuteReceipt
@@ -62,8 +62,9 @@ struct std::formatter<dcn::chain::ExecuteError::Kind> : std::formatter<std::stri
                 return formatter<string>::format("Transaction reverted", ctx);
             case dcn::chain::ExecuteError::Kind::TIMEOUT:
                 return formatter<string>::format("Timeout", ctx);
-            default:
+            case dcn::chain::ExecuteError::Kind::UNKNOWN:
                 return formatter<string>::format("Unknown", ctx);
         }
+        return formatter<string>::format("Unknown", ctx);
     }
 };

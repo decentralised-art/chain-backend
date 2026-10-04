@@ -85,7 +85,7 @@ namespace dcn::evm
 
         // Every source unit the compilation read, by stable unit name, with the keccak256
         // solc recorded for it in the contract metadata.
-        std::map<std::string, std::string> sources;
+        std::map<std::string, std::string> sources{};
     };
 
     class EVM

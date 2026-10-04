@@ -133,7 +133,7 @@ namespace
         std::int64_t finalized = 0;
         std::vector<json> logs{};
         int forced_limit_errors = 0;
-        std::vector<std::pair<std::int64_t, std::int64_t>> log_queries;
+        std::vector<std::pair<std::int64_t, std::int64_t>> log_queries{};
         std::function<std::string(const json &)> call_responder{};
 
         std::string respond(const json & request)

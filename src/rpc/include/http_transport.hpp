@@ -38,8 +38,8 @@ namespace dcn::rpc
         std::size_t max_idle_connections = 4;
 
         // Overrides the system trust store when set. Empty means "use the platform roots".
-        std::string ca_file;
-        std::string ca_path;
+        std::string ca_file{};
+        std::string ca_path{};
     };
 
     struct HttpResponse

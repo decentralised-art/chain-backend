@@ -42,7 +42,9 @@ function(protobuf_generate)
     # create target from generated files
     add_library(${protobuf_generate_NAME} OBJECT ${PROTO_GEN_SRCS} ${PROTO_GEN_HDRS})
 
-    target_include_directories(${protobuf_generate_NAME} PUBLIC 
+    # Generated code is third-party: no warnings from building it or including its headers.
+    silence_warnings(TARGETS ${protobuf_generate_NAME})
+    target_include_directories(${protobuf_generate_NAME} SYSTEM PUBLIC 
         "$<BUILD_INTERFACE:${protobuf_generate_PROTO_DST_DIR}>"
         "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/generated>"
     )

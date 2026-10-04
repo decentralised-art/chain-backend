@@ -1,4 +1,5 @@
 #include <string_view>
+#include <utility>
 
 #include "decoded_event.hpp"
 #include "chain.hpp"
@@ -19,7 +20,7 @@ namespace dcn::events
             return std::string(REMOVED_STATE);
         }
 
-        assert(false);
+        std::unreachable();
     }
 
     std::string toString(const EventType type)
@@ -42,7 +43,7 @@ namespace dcn::events
             return std::string(ENTITY_OWNER_CHANGED_TYPE);
         }
 
-        assert(false);
+        std::unreachable();
     }
 }
 

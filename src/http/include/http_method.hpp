@@ -69,6 +69,6 @@ struct std::formatter<dcn::http::Method> : std::formatter<std::string> {
         // Unknown
         case dcn::http::Method::Unknown:    return formatter<string>::format("Unknown", ctx);
     }
-    return formatter<string>::format("", ctx);
+    return formatter<string>::format("Unknown", ctx);
   }
 };
