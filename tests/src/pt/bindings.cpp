@@ -7,9 +7,7 @@
 #include <filesystem>
 #include <format>
 #include <future>
-#include <optional>
 #include <string>
-#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -32,9 +30,6 @@ namespace
 {
     constexpr const char * kIdentityTransformationName = "IdentityTx";
     constexpr const char * kIncrementTransformationName = "IncrementTx";
-    // Bump cache key whenever generated Solidity or imported PT runtime contracts change.
-    constexpr const char * kBindingBuildCacheVersion = "constructors-v7-runs-9999";
-
     const std::array<std::filesystem::path, 3> kBindingBuildDirs{
         std::filesystem::path("connectors") / "build",
         std::filesystem::path("transformations") / "build",
@@ -85,164 +80,7 @@ namespace
     std::filesystem::path makeBindingStoragePath()
     {
         return buildPath() / "tests" / "pt_binding_storage" /
-            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
-    }
-
-    std::filesystem::path bindingBuildCachePath()
-    {
-        return buildPath() / "tests" / "pt_binding_build_cache" / kBindingBuildCacheVersion;
-    }
-
-    bool ensureBindingBuildDirectories(const std::filesystem::path & root_path)
-    {
-        std::error_code ec;
-        for(const auto & build_dir : kBindingBuildDirs)
-        {
-            ec.clear();
-            std::filesystem::create_directories(root_path / build_dir, ec);
-            if(ec)
-            {
-                spdlog::error("Failed to create binding build directory '{}': {}", (root_path / build_dir).string(), ec.message());
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    std::uint64_t fnv1a64(std::string_view input)
-    {
-        std::uint64_t hash = 14695981039346656037ULL;
-        for(const unsigned char byte : input)
-        {
-            hash ^= byte;
-            hash *= 1099511628211ULL;
-        }
-        return hash;
-    }
-
-    std::string hashHex(std::uint64_t hash)
-    {
-        return std::format("{:016x}", hash);
-    }
-
-    std::optional<std::string> makeConnectorBuildCacheKey(const Connector & connector)
-    {
-        const auto solidity_result = constructConnectorSolidityCode(connector);
-        if(!solidity_result)
-        {
-            spdlog::debug(
-                "Skipping connector cache key for '{}': parse error kind={} ({})",
-                connector.name(),
-                static_cast<int>(solidity_result.error().kind),
-                solidity_result.error().message);
-            return std::nullopt;
-        }
-
-        return hashHex(fnv1a64(*solidity_result));
-    }
-
-    std::optional<std::string> makeTransformationBuildCacheKey(const Transformation & transformation)
-    {
-        const auto solidity_result = constructTransformationSolidityCode(transformation);
-        if(!solidity_result)
-        {
-            spdlog::debug(
-                "Skipping transformation cache key for '{}': parse error kind={} ({})",
-                transformation.name(),
-                static_cast<int>(solidity_result.error().kind),
-                solidity_result.error().message);
-            return std::nullopt;
-        }
-
-        return hashHex(fnv1a64(*solidity_result));
-    }
-
-    std::filesystem::path makeCachedArtifactPath(
-        const std::filesystem::path & cache_root,
-        const char * entity_dir,
-        const std::string & name,
-        const std::string & cache_key,
-        const char * extension)
-    {
-        return cache_root / entity_dir / "build" / std::format("{}__{}{}", name, cache_key, extension);
-    }
-
-    void restoreCachedBuildArtifacts(
-        const std::filesystem::path & storage_path,
-        const char * entity_dir,
-        const std::string & name,
-        const std::string & cache_key)
-    {
-        const auto cache_root = bindingBuildCachePath();
-        if(!ensureBindingBuildDirectories(cache_root))
-        {
-            return;
-        }
-
-        const auto cached_bin = makeCachedArtifactPath(cache_root, entity_dir, name, cache_key, ".bin");
-        const auto cached_abi = makeCachedArtifactPath(cache_root, entity_dir, name, cache_key, ".abi");
-        if(!std::filesystem::exists(cached_bin) || !std::filesystem::exists(cached_abi))
-        {
-            return;
-        }
-
-        const auto local_build_dir = storage_path / entity_dir / "build";
-        std::error_code ec;
-
-        std::filesystem::copy_file(cached_bin, local_build_dir / (name + ".bin"), std::filesystem::copy_options::overwrite_existing, ec);
-        if(ec)
-        {
-            spdlog::warn("Failed to restore cached bin '{}' -> '{}': {}", cached_bin.string(), (local_build_dir / (name + ".bin")).string(), ec.message());
-            return;
-        }
-
-        ec.clear();
-        std::filesystem::copy_file(cached_abi, local_build_dir / (name + ".abi"), std::filesystem::copy_options::overwrite_existing, ec);
-        if(ec)
-        {
-            spdlog::warn("Failed to restore cached abi '{}' -> '{}': {}", cached_abi.string(), (local_build_dir / (name + ".abi")).string(), ec.message());
-            return;
-        }
-    }
-
-    void storeCachedBuildArtifacts(
-        const std::filesystem::path & storage_path,
-        const char * entity_dir,
-        const std::string & name,
-        const std::string & cache_key)
-    {
-        const auto local_build_dir = storage_path / entity_dir / "build";
-        const auto local_bin = local_build_dir / (name + ".bin");
-        const auto local_abi = local_build_dir / (name + ".abi");
-        if(!std::filesystem::exists(local_bin) || !std::filesystem::exists(local_abi))
-        {
-            return;
-        }
-
-        const auto cache_root = bindingBuildCachePath();
-        if(!ensureBindingBuildDirectories(cache_root))
-        {
-            return;
-        }
-
-        const auto cached_bin = makeCachedArtifactPath(cache_root, entity_dir, name, cache_key, ".bin");
-        const auto cached_abi = makeCachedArtifactPath(cache_root, entity_dir, name, cache_key, ".abi");
-        std::error_code ec;
-
-        std::filesystem::copy_file(local_bin, cached_bin, std::filesystem::copy_options::overwrite_existing, ec);
-        if(ec)
-        {
-            spdlog::warn("Failed to cache bin '{}' -> '{}': {}", local_bin.string(), cached_bin.string(), ec.message());
-            return;
-        }
-
-        ec.clear();
-        std::filesystem::copy_file(local_abi, cached_abi, std::filesystem::copy_options::overwrite_existing, ec);
-        if(ec)
-        {
-            spdlog::warn("Failed to cache abi '{}' -> '{}': {}", local_abi.string(), cached_abi.string(), ec.message());
-        }
+            std::format("{}_{}", currentTestName(), std::chrono::steady_clock::now().time_since_epoch().count());
     }
 
     struct BindingStorageScope
@@ -407,13 +245,6 @@ namespace
         TransformationRecord record,
         const std::filesystem::path & storage_path)
     {
-        const std::string transformation_name = record.transformation().name();
-        const auto cache_key = makeTransformationBuildCacheKey(record.transformation());
-        if(cache_key)
-        {
-            restoreCachedBuildArtifacts(storage_path, "transformations", record.transformation().name(), *cache_key);
-        }
-
         auto deploy_result = runAwaitable(
             io_context,
             loader::deployTransformation(
@@ -427,10 +258,6 @@ namespace
             return std::unexpected(std::format("deployTransformation failed: {}", deploy_result.error().kind));
         }
 
-        if(cache_key)
-        {
-            storeCachedBuildArtifacts(storage_path, "transformations", transformation_name, *cache_key);
-        }
         return deploy_result.value();
     }
 
@@ -456,13 +283,6 @@ namespace
         ConnectorRecord record,
         const std::filesystem::path & storage_path)
     {
-        const std::string name = record.connector().name();
-        const auto cache_key = makeConnectorBuildCacheKey(record.connector());
-        if(cache_key)
-        {
-            restoreCachedBuildArtifacts(storage_path, "connectors", name, *cache_key);
-        }
-
         auto deploy_result = runAwaitable(
             io_context,
             loader::deployConnector(
@@ -474,11 +294,6 @@ namespace
         if(!deploy_result)
         {
             return std::unexpected(std::format("deployConnector failed: {}", deploy_result.error().kind));
-        }
-
-        if(cache_key)
-        {
-            storeCachedBuildArtifacts(storage_path, "connectors", name, *cache_key);
         }
 
         return deploy_result.value();

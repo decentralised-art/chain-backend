@@ -20,9 +20,16 @@ jobs:
     - name: Install dependencies
       run: sudo apt update && sudo apt install -y cmake build-essential libssl-dev npm
 
+    - name: Set up compiler cache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        variant: sccache
+        key: ${{ github.job }}
+        max-size: 2G
+
     - name: Configure and build (RelWithDebInfo)
       run: |
-        cmake -S . -B build-linux-release -DCMAKE_INSTALL_PREFIX=install -DCMAKE_BUILD_TYPE=RelWithDebInfo 
+        cmake -S . -B build-linux-release -DCMAKE_C_FLAGS=-m64 -DCMAKE_CXX_FLAGS=-m64 -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_INSTALL_PREFIX=install -DCMAKE_BUILD_TYPE=RelWithDebInfo 
         cmake --build build-linux-release --config RelWithDebInfo --target install -j 4
 
     - name: Pack install directory into tarball

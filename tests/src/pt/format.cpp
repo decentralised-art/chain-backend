@@ -79,7 +79,7 @@ namespace
     std::filesystem::path makeFormatStoragePath()
     {
         return buildPath() / "tests" / "pt_format_storage" /
-            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            std::format("{}_{}", currentTestName(), std::chrono::steady_clock::now().time_since_epoch().count());
     }
 
     struct FormatStorageScope

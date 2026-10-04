@@ -28,7 +28,7 @@ namespace
 
     std::shared_ptr<publish::Signer> makeSigner()
     {
-        const std::filesystem::path key_path = buildPath() / "publish_tests_operator.key";
+        const std::filesystem::path key_path = buildPath() / std::format("publish_tests_operator_{}.key", currentTestName());
         std::ofstream out(key_path, std::ios::trunc);
         out << OPERATOR_KEY;
         out.close();

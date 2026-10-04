@@ -32,8 +32,10 @@ namespace dcn::native
      *
      * @param command The command to execute in the new process
      * @param args The arguments to pass to the command
-     * @param timeout When set, a process still running after this long is killed; the
-     *                call then returns exit code -1 with whatever output was captured.
+     * @param timeout When set, a process still running after this long is killed together
+     *                with every process it started; the call then returns exit code -1
+     *                with whatever output was captured. Without a timeout the process stays
+     *                in the caller's process tree, so a deadline set further up covers it.
      */
     std::pair<int, std::string> runProcess(
         const std::string & command,

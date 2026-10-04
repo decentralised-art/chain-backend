@@ -70,7 +70,7 @@ namespace
     std::filesystem::path makeDeployStoragePath()
     {
         return buildPath() / "tests" / "pt_deploy_storage" /
-            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            std::format("{}_{}", currentTestName(), std::chrono::steady_clock::now().time_since_epoch().count());
     }
 
     bool prepareDeployStorageDirectories(const std::filesystem::path & storage_path)

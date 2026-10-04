@@ -1,11 +1,17 @@
 #include "unit-tests.hpp"
+#include "fake_solc.hpp"
 
 #include <chrono>
+#include <filesystem>
 #include <string>
 #include <vector>
 
 using namespace dcn;
 using namespace dcn::tests;
+
+#ifndef DECENTRALISED_ART_TEST_BINARY_DIR
+    #error "DECENTRALISED_ART_TEST_BINARY_DIR is not defined"
+#endif
 
 TEST_F(UnitTest, Native_RunProcess_KillsAProcessThatOutlivesItsTimeout)
 {
@@ -33,4 +39,24 @@ TEST_F(UnitTest, Native_RunProcess_ReturnsTheExitCodeOfAProcessThatFinishesInTim
 #endif
 
     EXPECT_EQ(exit_code, 3);
+}
+
+TEST_F(UnitTest, Native_RunProcess_KillsEverythingAProcessStartedAtItsTimeout)
+{
+    const std::filesystem::path dir =
+        std::filesystem::path(DECENTRALISED_ART_TEST_BINARY_DIR) / "tests" / "native_process" / currentTestName();
+    std::filesystem::remove_all(dir);
+    // The script stalls in a grandchild that holds the output pipe: only killing that too
+    // ends the run before the stall does.
+    const auto script = writeFakeSolc(dir, dir / "started", std::chrono::seconds(30));
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto [exit_code, output] = native::runProcess(script.string(), {"compile"}, std::chrono::seconds(2));
+
+    EXPECT_EQ(exit_code, -1) << output;
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(15));
+    EXPECT_TRUE(std::filesystem::exists(dir / "started"));
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }

@@ -13,13 +13,25 @@ jobs:
       with:
         submodules: recursive
 
+    - name: Set up MSVC environment
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
+    - name: Set up compiler cache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        variant: sccache
+        key: ${{ github.job }}
+        max-size: 2G
+
     - name: Configure and build tests (Debug)
       run: |
-        cmake -S . -B build-windows-debug -DDECENTRALISED_ART_BUILD_TESTS=ON -DDECENTRALISED_ART_USE_SUBMODULE_PT=ON -DCMAKE_INSTALL_PREFIX=install-windows-debug -DCMAKE_BUILD_TYPE=Debug
+        cmake -S . -B build-windows-debug -G Ninja -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DDECENTRALISED_ART_BUILD_TESTS=ON -DDECENTRALISED_ART_USE_SUBMODULE_PT=ON -DCMAKE_INSTALL_PREFIX=install-windows-debug -DCMAKE_BUILD_TYPE=Debug
         cmake --build build-windows-debug --config Debug --target DecentralisedArtServerTests -j 4
 
     - name: Build executable (Debug)
-      run: cmake --build build-windows-debug --config Debug --target DecentralisedArtServer
+      run: cmake --build build-windows-debug --config Debug --target DecentralisedArtServer -j 4
 
     - name: Run tests
-      run: ctest --test-dir build-windows-debug/tests -C Debug --output-on-failure
+      run: ctest --test-dir build-windows-debug/tests -C Debug -j 4 --output-on-failure
