@@ -11,7 +11,7 @@ TEST_F(UnitTest, Events_Finality_ObservedToFinalized_TransitionsDurably)
 {
     const auto paths = makeTempEventsPaths("finality_transition");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     const events::DecodedEvent event = makeDecodedEvent(70, 1, 1, 0xC0, 0xE0, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'000'600);
     const events::ChainBlockInfo block = makeBlockInfo(70, event.raw.block_hash, hexBytes(0x8A, 32), 1'700'000'600, 1'700'000'601'000);
@@ -36,7 +36,7 @@ TEST_F(UnitTest, Events_Finality_HeightBelowEvent_DoesNotAdvanceState)
 {
     const auto paths = makeTempEventsPaths("finality_no_advance");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     const events::DecodedEvent event = makeDecodedEvent(71, 0, 2, 0xC1, 0xE1, events::EventType::CONDITION_ADDED, events::EventState::OBSERVED, 1'700'000'610);
     const events::ChainBlockInfo block = makeBlockInfo(71, event.raw.block_hash, hexBytes(0x89, 32), 1'700'000'610, 1'700'000'611'000);
@@ -58,7 +58,7 @@ TEST_F(UnitTest, Events_Finality_PrunesReorgWindowByHeadMinusWindow)
 {
     const auto paths = makeTempEventsPaths("finality_reorg_prune");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     const auto block_80 = makeBlockInfo(80, hexBytes(0x80, 32), hexBytes(0x79, 32), 1'700'000'620, 1'700'000'620'000);
     const auto block_95 = makeBlockInfo(95, hexBytes(0x95, 32), hexBytes(0x94, 32), 1'700'000'621, 1'700'000'621'000);
@@ -80,7 +80,7 @@ TEST_F(UnitTest, Events_Reorg_RemovedState_PropagatesToFeedAndOutbox)
 {
     const auto paths = makeTempEventsPaths("reorg_removed_feed");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     events::DecodedEvent inserted = makeDecodedEvent(72, 1, 1, 0xC2, 0xE2, events::EventType::TRANSFORMATION_ADDED, events::EventState::OBSERVED, 1'700'000'630);
@@ -106,7 +106,7 @@ TEST_F(UnitTest, Events_IngestLookback_UnchangedCanonicalRows_DoNotRegressOrEmit
 {
     const auto paths = makeTempEventsPaths("finality_lookback_no_churn");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
@@ -155,7 +155,7 @@ TEST_F(UnitTest, Events_Finality_Invariants_AreClampedBeforePersistence)
 {
     const auto paths = makeTempEventsPaths("finality_clamp_invariants");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     const events::FinalityHeights invalid{
         .head = 100,
@@ -174,7 +174,7 @@ TEST_F(UnitTest, Events_Finality_StatePersistence_IsMonotonicAcrossProviderRegre
 {
     const auto paths = makeTempEventsPaths("finality_monotonic_persistence");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     const events::FinalityHeights first{
         .head = 500,

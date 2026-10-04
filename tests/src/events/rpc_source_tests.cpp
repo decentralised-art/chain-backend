@@ -871,7 +871,7 @@ TEST_F(UnitTest, Rpc_HotStore_ScannedRangeRemovesLogWhoseReplacementRangeIsEmpty
     asio::io_context io_context;
     const auto paths = makeTempEventsPaths("rpc_scan_removes_missing_log");
 
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     const events::DecodedEvent event = makeRemoteEvent(10, 0x10);
     const events::ChainBlockInfo block =
@@ -906,7 +906,7 @@ TEST_F(UnitTest, Rpc_HotStore_ScannedRangeNeverRollsBackFinalizedRows)
     asio::io_context io_context;
     const auto paths = makeTempEventsPaths("rpc_scan_keeps_finalized");
 
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     const events::DecodedEvent event = makeRemoteEvent(10, 0x10);
     const events::ChainBlockInfo block =
@@ -932,7 +932,7 @@ TEST_F(UnitTest, Rpc_HotStore_ScannedRangeKeepsLogsOutsideTheRange)
     asio::io_context io_context;
     const auto paths = makeTempEventsPaths("rpc_scan_bounded_by_range");
 
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     const events::DecodedEvent kept = makeRemoteEvent(5, 0x05);
     const events::DecodedEvent removed = makeRemoteEvent(10, 0x10);
@@ -957,7 +957,7 @@ TEST_F(UnitTest, Rpc_HotStore_LocalAndRpcSourcesKeepIndependentCursorsAndShareCh
     asio::io_context io_context;
     const auto paths = makeTempEventsPaths("rpc_local_source_isolation");
 
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     const events::DecodedEvent local_event = makeRemoteEvent(3, 0x33);
     const events::DecodedEvent remote_event = makeRemoteEvent(7, 0x77);
@@ -987,7 +987,7 @@ TEST_F(UnitTest, Rpc_HotStore_RescanRestoresALogItWronglyRemoved)
     asio::io_context io_context;
     const auto paths = makeTempEventsPaths("rpc_scan_resurrects_log");
 
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     const events::DecodedEvent event = makeRemoteEvent(10, 0x10);
     const events::ChainBlockInfo block =

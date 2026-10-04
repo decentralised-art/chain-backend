@@ -76,7 +76,7 @@ TEST(RegistrySourcePrecedence, RemoteVersion_TakesPrecedence_AndRemovalRestoresL
 {
     const auto paths = makeTempEventsPaths("reg_src_precedence");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
 
     const std::string name = "shared_tf";
@@ -166,7 +166,7 @@ TEST(RegistrySourcePrecedence, EntityOwnerChanged_UpdatesOwnerOfThatSourceVersio
 {
     const auto paths = makeTempEventsPaths("reg_src_owner_changed");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
 
     const std::string name = "owned_tf";
@@ -234,7 +234,7 @@ TEST(RegistrySourcePrecedence, RemoteAdd_IsIdempotentAcrossRepeatedProjection)
 {
     const auto paths = makeTempEventsPaths("reg_src_idempotent");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
 
     const std::string name = "idempotent_tf";

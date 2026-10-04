@@ -19,9 +19,7 @@ namespace dcn::events
     class SQLiteHotStore final : public IHotEventStore
     {
         public:
-            SQLiteHotStore(
-                const std::filesystem::path & hot_db_path,
-                const std::uint64_t default_chain_id);
+            explicit SQLiteHotStore(const std::filesystem::path & hot_db_path);
 
             ~SQLiteHotStore() override;
 
@@ -100,7 +98,5 @@ namespace dcn::events
 
             sqlite3 * _write_db = nullptr;
             sqlite3 * _read_db = nullptr;
-
-            std::uint64_t _default_chain_id = 1;
     };
 }

@@ -53,7 +53,7 @@ TEST_F(UnitTest, Events_History_HotFeedRead_PrefersHotRows)
 {
     const auto paths = makeTempEventsPaths("history_hot_first");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent first = makeDecodedEvent(90, 0, 1, 0xE0, 0x20, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'000'800);
@@ -84,7 +84,7 @@ TEST_F(UnitTest, Events_History_HotFeedRead_ServesEverySourceInOnePage)
 {
     const auto paths = makeTempEventsPaths("history_chain_filter");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent chain_one_event = makeDecodedEvent(
@@ -173,7 +173,7 @@ TEST_F(UnitTest, Events_History_DedupesAcrossHotAndArchive_ByFeedId)
 {
     const auto paths = makeTempEventsPaths("history_dedupe_hot_archive");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent finalized = makeDecodedEvent(92, 0, 1, 0xE2, 0x22, events::EventType::CONDITION_ADDED, events::EventState::OBSERVED, 1'700'000'802);
@@ -201,7 +201,7 @@ TEST_F(UnitTest, Events_History_ArchiveServesEveryChainAcrossCursorPages)
 {
     const auto paths = makeTempEventsPaths("history_archive_every_chain");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent chain_one = makeDecodedEvent(
@@ -242,7 +242,7 @@ TEST_F(UnitTest, Events_History_OrderingAcrossHotArchiveBoundary_IsCanonical)
 {
     const auto paths = makeTempEventsPaths("history_boundary_order");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent older = makeDecodedEvent(93, 0, 1, 0xE3, 0x23, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'000'803);
@@ -275,7 +275,7 @@ TEST_F(UnitTest, Events_History_OrderingUsesCreatedAtMsAndCursorPaginatesByIt)
 {
     const auto paths = makeTempEventsPaths("history_updated_at_order");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent high_block_first = makeDecodedEvent(
@@ -351,7 +351,7 @@ TEST_F(UnitTest, Events_History_OrderingReadsArchiveEvenWhenHotExceedsLimit)
 {
     const auto paths = makeTempEventsPaths("history_archive_scan_with_hot_limit");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const std::int64_t archived_projected_at_ms = 1'700'400'000'200;

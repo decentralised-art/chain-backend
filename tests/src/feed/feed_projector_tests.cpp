@@ -15,7 +15,7 @@ TEST_F(UnitTest, Feed_EventsDb_HasNoFeedTables)
     // Regression guard: feed tables must live in the feed DB, not the events hot DB.
     const auto paths = makeTempEventsPaths("feed_decoupling");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     SqliteReadonly db(paths.hot_db);
     const auto no_table = [&](const std::string & table_name)
@@ -37,7 +37,7 @@ TEST_F(UnitTest, Feed_Projector_ConsumesEventsChangelogIntoFeedDb)
     const auto fpaths = makeTempEventsPaths("feed_proj_feed");
     asio::io_context io;
 
-    events::SQLiteHotStore store(epaths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(epaths.hot_db);
     dcn::feed::Feed feed_obj(io, fpaths.feed_db, fpaths.feed_archive_root, 7LL*24*60*60*1000);
     auto strand = asio::make_strand(io);
     dcn::feed::FeedProjector proj(store, feed_obj, strand);
@@ -62,7 +62,7 @@ TEST_F(UnitTest, Feed_Projector_DeadLetteredRow_IsRecoveredBySweep)
     const auto fpaths = makeTempEventsPaths("feed_proj_dl_feed");
     asio::io_context io;
 
-    events::SQLiteHotStore store(epaths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(epaths.hot_db);
     dcn::feed::Feed feed_obj(io, fpaths.feed_db, fpaths.feed_archive_root, 7LL*24*60*60*1000);
     auto strand = asio::make_strand(io);
 
@@ -101,7 +101,7 @@ TEST_F(UnitTest, Feed_Projector_DeadLetterSweepInterval_IsConfigurable)
     const auto fpaths = makeTempEventsPaths("feed_proj_sweep_interval_feed");
     asio::io_context io;
 
-    events::SQLiteHotStore store(epaths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(epaths.hot_db);
     dcn::feed::Feed feed_obj(io, fpaths.feed_db, fpaths.feed_archive_root, 7LL*24*60*60*1000);
     auto strand = asio::make_strand(io);
 
