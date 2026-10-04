@@ -24,6 +24,10 @@ This workspace contains two primary repositories with different ownership:
 
 When protocol behavior is unclear, agents should treat `submodule/pt` as authoritative and ensure server-side behavior aligns with it.
 
+## API Compatibility
+
+Do not preserve backward compatibility for API clients. Design every API change on its own merits and keep `submodule/api-spec` in step with the server. Clients such as the SDK and frontends are updated to match the API; they are not a reason to bend a request or response shape, and agents should not search sibling repositories to constrain a design.
+
 ## Build Directory Policy
 
 Agents must use a build directory for all work:
@@ -86,6 +90,19 @@ When rebuild is needed, prefer incremental verification:
 All documentation, plans, tasks descriptions, etc. should be placed in the `.agent/docs` directory.
 All temporary files, logs, etc. should be placed in the `.agent/tmp` directory.
 All temporary scripts, agents, etc. should be placed in the `.agent/bin` directory.
+
+## Helper Placement
+
+Before writing a helper function or type, check whether the standard library or an existing module already provides it, and reuse that. A new general-purpose helper belongs in the shared module that matches what it does, not in the feature module that first needs it:
+
+- `src/utils` - strings, time and timestamps, filesystem, generic algorithms
+- `src/chain` - addresses, hex encoding, EVM and chain values
+- `src/crypto` - hashing, byte order, cryptographic primitives
+- `src/parser` - parsing and parse errors
+- `src/async` - coroutine and strand utilities
+- `src/native` - platform-specific code; keep `#if defined(_WIN32)`-style branches here, not in feature modules
+
+Keep a helper local (in an anonymous namespace) only when it encodes logic specific to its module. Do not add a type that only renames or wraps a standard one (for example an alias for a `std::function` signature, or a wrapper class around a `std::chrono` clock).
 
 ## Comments
 

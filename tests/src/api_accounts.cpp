@@ -222,15 +222,10 @@ TEST_F(UnitTest, API_Accounts_Get_InvalidAfterCursorReturnsBadRequest)
     EXPECT_EQ(body["message"], "Invalid after cursor");
 }
 
-TEST_F(UnitTest, API_Accounts_Get_ZeroLimitReturnsEmptyPageWithTotals)
+TEST_F(UnitTest, API_Accounts_Get_ZeroLimitReturnsBadRequest)
 {
     asio::io_context io_context;
     registry::Registry registry(io_context);
-
-    const std::string owner_hex = evmc::hex(makeAddressFromByte(0xF1));
-    ASSERT_TRUE(runAwaitable(
-        io_context,
-        registry.addTransformation(makeAddressFromByte(0x41), makeTransformationRecord("ACCT_TX_ONLY", owner_hex))));
 
     http::Request request;
     request.setMethod(http::Method::GET)
@@ -241,15 +236,9 @@ TEST_F(UnitTest, API_Accounts_Get_ZeroLimitReturnsEmptyPageWithTotals)
     query_args.emplace("limit", makeUintRouteArg(0));
 
     const auto response = runAwaitable(io_context, GET_accounts(request, {}, std::move(query_args), registry));
-    ASSERT_EQ(response.getCode(), http::Code::OK);
+    ASSERT_EQ(response.getCode(), http::Code::BadRequest);
     const auto body = nlohmann::json::parse(response.getBody());
-    EXPECT_EQ(body["limit"], 0);
-    EXPECT_EQ(body["total_accounts"], 1);
-    ASSERT_TRUE(body["accounts"].is_array());
-    EXPECT_TRUE(body["accounts"].empty());
-    ASSERT_TRUE(body["cursor"].is_object());
-    EXPECT_EQ(body["cursor"]["has_more"], false);
-    EXPECT_EQ(body["cursor"]["next_after"], nullptr);
+    EXPECT_EQ(body["message"], "Invalid argument limit. limit error: Out of range.");
 }
 
 TEST_F(UnitTest, API_Accounts_Head_MirrorsValidationAndReturnsNoBody)
@@ -278,6 +267,20 @@ TEST_F(UnitTest, API_Accounts_Head_MirrorsValidationAndReturnsNoBody)
                .setVersion("HTTP/1.1");
 
         const auto response = runAwaitable(io_context, HEAD_accounts(request, {}, {}, registry));
+        ASSERT_EQ(response.getCode(), http::Code::BadRequest);
+        EXPECT_TRUE(response.getBody().empty());
+    }
+
+    {
+        http::Request request;
+        request.setMethod(http::Method::HEAD)
+               .setPath(http::URL("/accounts?limit=0"))
+               .setVersion("HTTP/1.1");
+
+        server::QueryArgsList query_args;
+        query_args.emplace("limit", makeUintRouteArg(0));
+
+        const auto response = runAwaitable(io_context, HEAD_accounts(request, {}, std::move(query_args), registry));
         ASSERT_EQ(response.getCode(), http::Code::BadRequest);
         EXPECT_TRUE(response.getBody().empty());
     }

@@ -24,11 +24,11 @@ namespace dcn::events
     {
         // Stable logical identity of this source. Excludes the provider URL so that
         // switching providers resumes the same cursor instead of forking the chain.
-        std::string source_id;
-        std::string chain_namespace;
+        std::string source_id{};
+        std::string chain_namespace{};
 
         std::uint64_t chain_id = 1;
-        std::string registry_address;
+        std::string registry_address{};
 
         // First block that can contain registry events.
         std::int64_t deployment_block = 0;
@@ -45,7 +45,7 @@ namespace dcn::events
 
         // Code hash the registry implementation must have after a proxy upgrade. Empty
         // accepts any implementation that reports the supported protocol version.
-        std::string expected_implementation_code_hash;
+        std::string expected_implementation_code_hash{};
 
         std::chrono::milliseconds metrics_log_interval{60'000};
     };
@@ -95,10 +95,10 @@ namespace dcn::events
         private:
             struct Heights
             {
-                rpc::BlockHeader head;
+                rpc::BlockHeader head{};
                 std::int64_t safe = 0;
                 std::int64_t finalized = 0;
-                std::string finalized_hash;   // empty when the finalized height came from confirmations
+                std::string finalized_hash{};   // empty when the finalized height came from confirmations
             };
 
             asio::awaitable<std::optional<Heights>> _readHeights();

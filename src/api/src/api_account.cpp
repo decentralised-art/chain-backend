@@ -99,7 +99,7 @@ namespace dcn
         }
 
         auto limit_res = parse::parseRouteArgAs<std::size_t>(query_args.at("limit"));
-        if(limit_res && limit_res.value() > MAX_LIMIT)
+        if(limit_res && (limit_res.value() == 0 || limit_res.value() > MAX_LIMIT))
         {
             limit_res = std::unexpected(parse::ParseError{parse::ParseError::Kind::OUT_OF_RANGE});
         }
@@ -161,7 +161,7 @@ namespace dcn
         }
 
         auto limit_res = parse::parseRouteArgAs<std::size_t>(query_args.at("limit"));
-        if(limit_res && limit_res.value() > MAX_LIMIT)
+        if(limit_res && (limit_res.value() == 0 || limit_res.value() > MAX_LIMIT))
         {
             limit_res = std::unexpected(parse::ParseError{parse::ParseError::Kind::OUT_OF_RANGE});
         }
@@ -274,7 +274,7 @@ namespace dcn
             co_return response;
         }
 
-        std::optional<chain::Address> address_res = evmc::from_hex<chain::Address>(address_arg.value());
+        std::optional<chain::Address> address_res = chain::addressFromHex(address_arg.value());
         if(!address_res)
         {
             response.setCode(http::Code::BadRequest)
@@ -287,7 +287,7 @@ namespace dcn
         const auto & address = address_res.value();
 
         auto limit_res = parse::parseRouteArgAs<std::size_t>(query_args.at("limit"));
-        if(limit_res && limit_res.value() > MAX_LIMIT)
+        if(limit_res && (limit_res.value() == 0 || limit_res.value() > MAX_LIMIT))
         {
             limit_res = std::unexpected(parse::ParseError{parse::ParseError::Kind::OUT_OF_RANGE});
         }

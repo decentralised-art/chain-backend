@@ -6,7 +6,6 @@ using namespace std::placeholders;
 #include <chrono>
 #include <memory>
 #include <utility>
-#include <regex>
 #include <vector>
 #include <cassert>
 

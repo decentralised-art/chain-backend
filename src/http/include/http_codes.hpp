@@ -95,6 +95,6 @@ struct std::formatter<dcn::http::Code> : std::formatter<std::string> {
         // Unknown
         case dcn::http::Code::Unknown:      return formatter<string>::format("Unknown", ctx);
     }
-    return formatter<string>::format("", ctx);
+    return formatter<string>::format("Unknown", ctx);
   }
 };

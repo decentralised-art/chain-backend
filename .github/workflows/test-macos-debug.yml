@@ -32,4 +32,4 @@ jobs:
       run: cmake --build build-macos-debug --config Debug --target DecentralisedArtServer -j 4
 
     - name: Run tests
-      run: ctest --test-dir build-macos-debug -C Debug -j 4 --output-on-failure
+      run: ctest --test-dir build-macos-debug/tests -C Debug -j 4 --output-on-failure

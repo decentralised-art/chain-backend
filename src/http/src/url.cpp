@@ -1,7 +1,58 @@
 #include "url.hpp"
+#include "utils.hpp"
+
+#include <algorithm>
+#include <charconv>
 
 namespace dcn::http
 {
+    std::optional<std::string> canonicalOrigin(const std::string_view origin)
+    {
+        const std::size_t scheme_end = origin.find("://");
+        if(scheme_end == std::string_view::npos) return std::nullopt;
+        const std::string scheme = utils::toLower(std::string(origin.substr(0, scheme_end)));
+        if(scheme != "http" && scheme != "https") return std::nullopt;
+
+        std::string_view authority = origin.substr(scheme_end + 3);
+        std::optional<std::string_view> port_text;
+        if(const std::size_t colon = authority.find(':'); colon != std::string_view::npos)
+        {
+            port_text = authority.substr(colon + 1);
+            authority = authority.substr(0, colon);
+        }
+
+        // Dot-separated labels of letters, digits and inner hyphens: a DNS name or an IPv4 address.
+        const std::string host = utils::toLower(std::string(authority));
+        if(host.empty() || host.size() > 253) return std::nullopt;
+        for(std::size_t begin = 0; begin <= host.size();)
+        {
+            const std::size_t end = std::min(host.find('.', begin), host.size());
+            const std::string_view label = std::string_view(host).substr(begin, end - begin);
+            if(label.empty() || label.size() > 63 || label.front() == '-' || label.back() == '-') return std::nullopt;
+            if(!std::ranges::all_of(label, [](const char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'; }))
+            {
+                return std::nullopt;
+            }
+            begin = end + 1;
+        }
+
+        std::string canonical = scheme + "://" + host;
+        if(port_text)
+        {
+            unsigned port = 0;
+            const char * const first = port_text->data();
+            const char * const last = first + port_text->size();
+            const auto [parsed_end, error] = std::from_chars(first, last, port);
+            if(port_text->empty() || port_text->size() > 5 || error != std::errc{} || parsed_end != last
+                || port == 0 || port > 65535)
+            {
+                return std::nullopt;
+            }
+            if(port != (scheme == "https" ? 443u : 80u)) canonical += std::format(":{}", port);
+        }
+        return canonical;
+    }
+
     URL::URL(const std::string & url) 
     : _url(url)
     {
@@ -84,6 +135,40 @@ namespace dcn::http
         return path_parts;
     }
 
+    std::optional<std::string> decodeQueryComponent(const std::string_view component)
+    {
+        const auto hex_value = [](const char c) -> int
+        {
+            if(c >= '0' && c <= '9') return c - '0';
+            if(c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if(c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+
+        std::string decoded;
+        decoded.reserve(component.size());
+        for(std::size_t i = 0; i < component.size(); ++i)
+        {
+            if(component[i] == '+')
+            {
+                decoded += ' ';
+                continue;
+            }
+            if(component[i] != '%')
+            {
+                decoded += component[i];
+                continue;
+            }
+            if(i + 2 >= component.size()) return std::nullopt;
+            const int high = hex_value(component[i + 1]);
+            const int low = hex_value(component[i + 2]);
+            if(high < 0 || low < 0) return std::nullopt;
+            decoded += static_cast<char>(high * 16 + low);
+            i += 2;
+        }
+        return decoded;
+    }
+
     absl::flat_hash_map<std::string, std::string> splitQuerySegments(const std::string& query)
     {
         absl::flat_hash_map<std::string, std::string> query_map;
@@ -98,14 +183,14 @@ namespace dcn::http
             auto pos = segment.find('=');
             if (pos == std::string::npos) continue; // skip invalid segments
 
-            std::string key = segment.substr(0, pos);
-            std::string value = segment.substr(pos + 1);
+            auto key = decodeQueryComponent(std::string_view(segment).substr(0, pos));
+            auto value = decodeQueryComponent(std::string_view(segment).substr(pos + 1));
+            if (!key || !value) continue; // skip malformed percent-encoding
 
-            if (!key.empty())
-                query_map[std::move(key)] = std::move(value);
+            if (!key->empty())
+                query_map[std::move(*key)] = std::move(*value);
         }
 
         return query_map;
     }
 }
-

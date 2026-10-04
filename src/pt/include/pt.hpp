@@ -1,6 +1,5 @@
 #pragma once
 
-#include <regex>
 #include <cstdlib>
 
 #include <spdlog/spdlog.h>

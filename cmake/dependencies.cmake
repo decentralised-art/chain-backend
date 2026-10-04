@@ -22,20 +22,23 @@ function(silence_warnings)
             message(FATAL_ERROR "Target ${real_target} not found, cannot silence warnings.")
         endif()
 
+        # Header-only targets are already silenced through SYSTEM include directories;
+        # an INTERFACE flag here would disable warnings in every consumer.
         get_target_property(type ${real_target} TYPE)
+        if("${type}" STREQUAL "INTERFACE_LIBRARY")
+            continue()
+        endif()
 
         if(MSVC)
-            if("${type}" STREQUAL "INTERFACE_LIBRARY")
-                target_compile_options(${real_target} INTERFACE /W0)
-            else()
-                target_compile_options(${real_target} PRIVATE /W0)
+            # Drop the target's own warning level so /W0 does not override it (D9025).
+            get_target_property(opts ${real_target} COMPILE_OPTIONS)
+            if(opts)
+                list(FILTER opts EXCLUDE REGEX "^[/-]W[0-4]$")
+                set_target_properties(${real_target} PROPERTIES COMPILE_OPTIONS "${opts}")
             endif()
-        elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-            if("${type}" STREQUAL "INTERFACE_LIBRARY")
-                target_compile_options(${real_target} INTERFACE -w)
-            else()
-                target_compile_options(${real_target} PRIVATE -w)
-            endif()
+            target_compile_options(${real_target} PRIVATE /W0)
+        elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(${real_target} PRIVATE -w)
         endif()
     endforeach()
 endfunction()
@@ -81,7 +84,7 @@ add_library(asio INTERFACE)
 if(WIN32)
     target_compile_options(asio INTERFACE /wd4459)
 endif()
-target_include_directories(asio INTERFACE "${asio_SOURCE_DIR}/asio/include")
+target_include_directories(asio SYSTEM INTERFACE "${asio_SOURCE_DIR}/asio/include")
 install(DIRECTORY ${asio_SOURCE_DIR}/asio/include/asio DESTINATION include)
 
 # ---------------------------------------------------------
@@ -172,7 +175,6 @@ FetchContent_Declare(
 )
 set(JSON_BuildTests OFF)
 FetchContent_MakeAvailable(json)
-silence_warnings(TARGETS nlohmann_json)
 
 # ---------------------------------------------------------
 # sqlite3
@@ -239,7 +241,6 @@ FetchContent_Declare(
 set(JWT_BUILD_EXAMPLES OFF)
 set(JWT_BUILD_TESTS OFF)
 FetchContent_MakeAvailable(jwt-cpp)
-silence_warnings(TARGETS jwt-cpp::jwt-cpp)
 
 # ---------------------------------------------------------
 # secp256k1
@@ -350,7 +351,6 @@ FetchContent_Declare(
 set(EVMC_INSTALL ON)
 set(EVMC_TESTING OFF)
 FetchContent_MakeAvailable(evmc)
-silence_warnings(TARGETS evmc::evmc)
 
 # ---------------------------------------------------------
 # evmone
@@ -606,4 +606,5 @@ if(DECENTRALISED_ART_BUILD_TESTS)
         SYSTEM
     )
     FetchContent_MakeAvailable(googletest)
+    silence_warnings(TARGETS gtest gtest_main gmock gmock_main)
 endif()

@@ -1610,10 +1610,10 @@ TEST_F(UnitTest, PT_Bindings_RunnerUsesBoundCompositeRootStaticRiForScalarSlotRe
 
     EXPECT_EQ(particles[0].path(), "/ROOT_BIND:0/HOST_BIND:0/BASE_SLOT:0/BOUND_TARGET:0");
     ASSERT_EQ(particles[0].data_size(), 4);
-    EXPECT_EQ(particles[0].data(0), 5);
-    EXPECT_EQ(particles[0].data(1), 6);
-    EXPECT_EQ(particles[0].data(2), 7);
-    EXPECT_EQ(particles[0].data(3), 8);
+    EXPECT_EQ(particles[0].data(0), 5u);
+    EXPECT_EQ(particles[0].data(1), 6u);
+    EXPECT_EQ(particles[0].data(2), 7u);
+    EXPECT_EQ(particles[0].data(3), 8u);
 }
 
 TEST_F(UnitTest, PT_Bindings_RunnerAppliesHostStaticRiToBindingExpandedDescendantPositions)
@@ -1669,10 +1669,10 @@ TEST_F(UnitTest, PT_Bindings_RunnerAppliesHostStaticRiToBindingExpandedDescendan
     ASSERT_EQ(particles.size(), 1u);
     EXPECT_EQ(particles[0].path(), "/HOST:0/CHILD:0/LEAF:0/TARGET:0");
     ASSERT_EQ(particles[0].data_size(), 4);
-    EXPECT_EQ(particles[0].data(0), 7);
-    EXPECT_EQ(particles[0].data(1), 8);
-    EXPECT_EQ(particles[0].data(2), 9);
-    EXPECT_EQ(particles[0].data(3), 10);
+    EXPECT_EQ(particles[0].data(0), 7u);
+    EXPECT_EQ(particles[0].data(1), 8u);
+    EXPECT_EQ(particles[0].data(2), 9u);
+    EXPECT_EQ(particles[0].data(3), 10u);
 }
 
 TEST_F(UnitTest, PT_Bindings_RunnerSupportsNestedBindingDescendantStaticRiOverride)
@@ -1758,24 +1758,24 @@ TEST_F(UnitTest, PT_Bindings_RunnerSupportsNestedBindingDescendantStaticRiOverri
 
     EXPECT_EQ(particles[0].path(), "/T1:0/PITCH:0");
     ASSERT_EQ(particles[0].data_size(), 4);
-    EXPECT_EQ(particles[0].data(0), 0);
-    EXPECT_EQ(particles[0].data(1), 3);
-    EXPECT_EQ(particles[0].data(2), 6);
-    EXPECT_EQ(particles[0].data(3), 9);
+    EXPECT_EQ(particles[0].data(0), 0u);
+    EXPECT_EQ(particles[0].data(1), 3u);
+    EXPECT_EQ(particles[0].data(2), 6u);
+    EXPECT_EQ(particles[0].data(3), 9u);
 
     EXPECT_EQ(particles[1].path(), "/T1:1/T0:0/PITCH:0/TIME:0");
     ASSERT_EQ(particles[1].data_size(), 4);
-    EXPECT_EQ(particles[1].data(0), 15);
-    EXPECT_EQ(particles[1].data(1), 19);
-    EXPECT_EQ(particles[1].data(2), 23);
-    EXPECT_EQ(particles[1].data(3), 27);
+    EXPECT_EQ(particles[1].data(0), 15u);
+    EXPECT_EQ(particles[1].data(1), 19u);
+    EXPECT_EQ(particles[1].data(2), 23u);
+    EXPECT_EQ(particles[1].data(3), 27u);
 
     EXPECT_EQ(particles[2].path(), "/T1:1/T0:1/TIME:0");
     ASSERT_EQ(particles[2].data_size(), 4);
-    EXPECT_EQ(particles[2].data(0), 0);
-    EXPECT_EQ(particles[2].data(1), 20);
-    EXPECT_EQ(particles[2].data(2), 40);
-    EXPECT_EQ(particles[2].data(3), 60);
+    EXPECT_EQ(particles[2].data(0), 0u);
+    EXPECT_EQ(particles[2].data(1), 20u);
+    EXPECT_EQ(particles[2].data(2), 40u);
+    EXPECT_EQ(particles[2].data(3), 60u);
 }
 
 TEST_F(UnitTest, PT_Bindings_RunnerAllowsBindingToSealedCompositeTarget)

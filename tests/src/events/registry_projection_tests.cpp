@@ -77,7 +77,7 @@ TEST(RegistryProjection, Transformation_IsMaterializedAndJobDeleted)
 {
     const auto paths = makeTempEventsPaths("reg_proj_tf");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
 
     // Build real ABI payload for TransformationAdded(address,string,address,address,uint32,bytes32,bytes32,bytes32)
@@ -123,7 +123,7 @@ TEST(RegistryProjection, Connector_IsMaterializedWithTransformationDepAndFormatH
 {
     const auto paths = makeTempEventsPaths("reg_proj_conn");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
 
     // ---- TransformationAdded at block 100 ----
@@ -215,7 +215,7 @@ TEST_F(UnitTest, Events_RegistryProjector_ChangelogCursor_MaterializesOnFinalize
 {
     const auto paths = makeTempEventsPaths("reg_proj_changelog_cursor");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
 
     const chain::Address caller  = makeAddressFromByte(0x41);
@@ -272,7 +272,7 @@ TEST(RegistryProjection, ChainConnector_BackfillsMissingDependenciesFromRegistry
 
     const auto paths = makeTempEventsPaths("reg_proj_backfill");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
     const std::string source_id = std::format("eip155:{}:{}", CHAIN_ID, REGISTRY_ADDRESS);
 
@@ -344,7 +344,7 @@ TEST(RegistryProjection, ChainConnector_BackfillsMissingDependenciesFromRegistry
     // A dependency the chain cannot answer for leaves the connector unmaterialized.
     registry::Registry other_registry(io);
     const auto other_paths = makeTempEventsPaths("reg_proj_backfill_fail");
-    events::SQLiteHotStore other_store(other_paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore other_store(other_paths.hot_db);
     ASSERT_TRUE(awaitIngestBatchForSource(io, other_store, source_id, {conn_event}, {conn_block}, 102, 1'700'000'511'100));
     ASSERT_TRUE(awaitApplyFinalityForSource(io, other_store, source_id, 200, 101, 101, 1'700'000'512'000));
     auto silent_node = std::make_shared<FakeNode>();
@@ -372,7 +372,7 @@ TEST(RegistryProjection, ChainTransformation_StoresItsRuntimeCodeReadFromTheChai
     const auto project = [&](const std::string & label, registry::Registry & registry, const std::string & runtime_code_hash)
     {
         const auto paths = makeTempEventsPaths(label);
-        events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+        events::SQLiteHotStore store(paths.hot_db);
 
         events::DecodedEvent event = makeDecodedEvent(100, 0, 1, 0xAA, 0xBB, events::EventType::TRANSFORMATION_ADDED);
         event.raw.source_id = source_id;
@@ -467,7 +467,7 @@ TEST(RegistryProjection, ChainTransformation_StoresTheCreationCodeItsTransaction
         if(input) node->addTransaction(event.raw.tx_hash, event.raw.block_hash, *input);
 
         const auto paths = makeTempEventsPaths(label);
-        events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+        events::SQLiteHotStore store(paths.hot_db);
         const events::ChainBlockInfo block =
             makeBlockInfo(100, event.raw.block_hash, hexBytes(0x91, 32), 1'700'000'500, 1'700'000'501'000);
         EXPECT_TRUE(awaitIngestBatchForSource(io, store, source_id, {event}, {block}, 101, 1'700'000'501'100));
@@ -509,7 +509,7 @@ TEST(RegistryProjection, ChainTransformations_ReadEachRuntimeCodeOncePerBatch)
 
     const auto paths = makeTempEventsPaths("reg_proj_runtime_code_prefetch");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
     const std::string source_id = std::format("eip155:{}:{}", CHAIN_ID, REGISTRY_ADDRESS);
     auto node = std::make_shared<FakeNode>();
@@ -562,7 +562,7 @@ TEST(RegistryProjection, ChainTransformation_WithUnreadableRuntimeCode_IsComplet
 
     const auto paths = makeTempEventsPaths("reg_proj_runtime_code_sweep");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
     const std::string source_id = std::format("eip155:{}:{}", CHAIN_ID, REGISTRY_ADDRESS);
 
@@ -623,7 +623,7 @@ TEST(RegistryProjection, LocalTransformation_RebuiltWithOtherCodeTakesTheNewHash
         event.runtime_code_hash = chain::bytes32ToHex(chain::keccakString(seed + " runtime"));
 
         const auto paths = makeTempEventsPaths(label);
-        events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+        events::SQLiteHotStore store(paths.hot_db);
         const events::ChainBlockInfo block =
             makeBlockInfo(100, event.raw.block_hash, hexBytes(0x91, 32), 1'700'000'500, 1'700'000'501'000);
         EXPECT_TRUE(awaitIngestBatch(io, store, CHAIN_ID, {event}, {block}, 101, 1'700'000'501'100));
@@ -660,7 +660,7 @@ TEST(RegistryProjection, PoisonRow_IsRetriedThenDeadLettered_AndDoesNotWedgePipe
 {
     const auto paths = makeTempEventsPaths("reg_proj_poison");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
 
     // Poison event: makeDecodedEvent's default data_hex ("0x00") is not a valid
@@ -744,7 +744,7 @@ TEST(RegistryProjection, DeadLetteredRow_IsRecoveredBySweep_AndBecomesPrunable)
 {
     const auto paths = makeTempEventsPaths("reg_proj_dead_letter_recover");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
 
     const chain::Address owner   = makeAddressFromByte(0x42);
@@ -799,7 +799,7 @@ TEST(RegistryProjection, RetryBudget_IsConfigurable)
 {
     const auto paths = makeTempEventsPaths("reg_proj_retry_budget");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
 
     // makeDecodedEvent's default data_hex ("0x00") is not a valid ABI payload,
@@ -839,7 +839,7 @@ TEST(RegistryProjection, DeadLetterSweepInterval_IsConfigurable)
 {
     const auto paths = makeTempEventsPaths("reg_proj_sweep_interval");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
 
     const chain::Address owner   = makeAddressFromByte(0x42);
@@ -896,7 +896,7 @@ TEST(RegistryProjection, ChainTransformations_ReadTheirSharedPublicationTransact
 
     const auto paths = makeTempEventsPaths("reg_proj_creation_multicall");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
     const std::string source_id = std::format("eip155:{}:{}", CHAIN_ID, REGISTRY_ADDRESS);
     const std::vector<std::uint8_t> runtime_code{0x60, 0x00, 0x60, 0x00};
@@ -956,7 +956,7 @@ TEST(RegistryProjection, ChainTransformations_StopPrefetchingAfterAFailedRead)
 
     const auto paths = makeTempEventsPaths("reg_proj_prefetch_stop");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
     const std::string source_id = std::format("eip155:{}:{}", CHAIN_ID, REGISTRY_ADDRESS);
     const std::vector<std::uint8_t> runtime_code{0x60, 0x00, 0x60, 0x00};
@@ -1005,7 +1005,7 @@ TEST(RegistryProjection, ChainConnector_RetriesABackfilledCreationCodeAfterATran
 
     const auto paths = makeTempEventsPaths("reg_proj_backfill_retry");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     registry::Registry registry(io);
     const std::string source_id = std::format("eip155:{}:{}", CHAIN_ID, REGISTRY_ADDRESS);
 

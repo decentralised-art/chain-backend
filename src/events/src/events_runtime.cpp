@@ -25,9 +25,7 @@ namespace dcn::events
         : _io_context(io_context)
         , _config(std::move(cfg))
         , _write_strand(asio::make_strand(io_context))
-        , _store(std::make_shared<SQLiteHotStore>(
-            _config.hot_db_path,
-            _config.chain_id))
+        , _store(std::make_shared<SQLiteHotStore>(_config.hot_db_path))
         , _decoder(std::make_unique<PTEventDecoder>())
     {
     }

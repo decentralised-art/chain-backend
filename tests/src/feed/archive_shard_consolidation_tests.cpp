@@ -66,7 +66,7 @@ TEST_F(UnitTest, Feed_ArchiveShard_ExportProducesSingleFileNoWalShm)
 {
     const auto paths = makeTempEventsPaths("archive_shard_single_file");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
@@ -88,7 +88,7 @@ TEST_F(UnitTest, Feed_ArchiveShard_ReExportKeepsSingleFile)
 {
     const auto paths = makeTempEventsPaths("archive_shard_reexport");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
@@ -121,7 +121,7 @@ TEST_F(UnitTest, Feed_ArchiveShard_ReadAsSoleSourceLeavesNoSidecars)
 {
     const auto paths = makeTempEventsPaths("archive_shard_read_sole_source");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(

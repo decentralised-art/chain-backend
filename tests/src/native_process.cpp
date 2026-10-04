@@ -60,3 +60,28 @@ TEST_F(UnitTest, Native_RunProcess_KillsEverythingAProcessStartedAtItsTimeout)
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 }
+
+#if defined(_WIN32)
+TEST_F(UnitTest, Native_AppendQuotedArgument_FollowsTheCrtArgvRules)
+{
+    const auto quoted = [](const std::string & arg)
+    {
+        std::string command_line;
+        native::appendQuotedArgument(command_line, arg);
+        return command_line;
+    };
+
+    EXPECT_EQ(quoted("plain"), "plain");
+    EXPECT_EQ(quoted(R"(back\slash)"), R"(back\slash)");
+    EXPECT_EQ(quoted(""), R"("")");
+    EXPECT_EQ(quoted("a b"), R"("a b")");
+    EXPECT_EQ(quoted("tab\there"), "\"tab\there\"");
+    // Kept out of the macro arguments: MSVC's traditional preprocessor mis-lexes raw strings holding \".
+    const std::string quoted_say_hi = R"("say \"hi\"")";
+    const std::string backslash_quote = R"(a\"b)";
+    const std::string quoted_backslash_quote = R"("a\\\"b")";
+    EXPECT_EQ(quoted(R"(say "hi")"), quoted_say_hi);
+    EXPECT_EQ(quoted(backslash_quote), quoted_backslash_quote);
+    EXPECT_EQ(quoted(R"(C:\my dir\)"), R"("C:\my dir\\")");
+}
+#endif

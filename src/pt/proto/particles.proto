@@ -5,5 +5,5 @@ package dcn;
 message Particles
 {
     string path = 1;
-    repeated int32 data = 2;
+    repeated uint32 data = 2;
 }

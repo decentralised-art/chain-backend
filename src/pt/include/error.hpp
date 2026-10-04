@@ -85,9 +85,9 @@ struct std::formatter<dcn::pt::PTDeployError::Kind> : std::formatter<std::string
             case dcn::pt::PTDeployError::Kind::CONDITION_MISSING : return formatter<string>::format("Condition missing", ctx);
             case dcn::pt::PTDeployError::Kind::REGISTRY_ERROR : return formatter<string>::format("Registry error", ctx);
 
-            default:  return formatter<string>::format("Unknown", ctx);
+            case dcn::pt::PTDeployError::Kind::UNKNOWN : return formatter<string>::format("Unknown", ctx);
         }
-        return formatter<string>::format("", ctx);
+        return formatter<string>::format("Unknown", ctx);
     }
 };
 
@@ -101,8 +101,8 @@ struct std::formatter<dcn::pt::PTExecuteError::Kind> : std::formatter<std::strin
             case dcn::pt::PTExecuteError::Kind::RUNNING_INSTANCE_NOT_SORTED : return formatter<string>::format("Running instance not sorted", ctx);
             case dcn::pt::PTExecuteError::Kind::RUNNING_INSTANCE_STATIC_OVERRIDE : return formatter<string>::format("Running instance static override", ctx);
 
-            default:  return formatter<string>::format("Unknown", ctx);
+            case dcn::pt::PTExecuteError::Kind::UNKNOWN : return formatter<string>::format("Unknown", ctx);
         }
-        return formatter<string>::format("", ctx);
+        return formatter<string>::format("Unknown", ctx);
     }
 };

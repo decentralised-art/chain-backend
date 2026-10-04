@@ -30,8 +30,8 @@ namespace dcn::rpc
 
         Kind kind = Kind::TRANSPORT;
         int code = 0;
-        std::string message;
-        std::string data;
+        std::string message{};
+        std::string data{};
 
         // TRANSPORT/TIMEOUT/THROTTLED are worth retrying unchanged. LIMIT needs a
         // smaller request, so the caller decides. QUOTA lasts until the provider's

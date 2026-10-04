@@ -72,11 +72,6 @@ namespace
         return genesis_address;
     }
 
-    std::filesystem::path buildPath()
-    {
-        return std::filesystem::path(DECENTRALISED_ART_TEST_BINARY_DIR);
-    }
-
     std::filesystem::path solcPath()
     {
         return std::filesystem::path(DECENTRALISED_ART_TEST_SOLC_PATH);

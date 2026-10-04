@@ -35,8 +35,8 @@ struct std::formatter<dcn::parse::ParseError::Kind> : std::formatter<std::string
             case dcn::parse::ParseError::Kind::OUT_OF_RANGE : return formatter<string>::format("Out of range", ctx);
             case dcn::parse::ParseError::Kind::TYPE_MISMATCH : return formatter<string>::format("Type mismatch", ctx);
 
-            default:  return formatter<string>::format("Unknown", ctx);
+            case dcn::parse::ParseError::Kind::UNKNOWN : return formatter<string>::format("Unknown", ctx);
         }
-        return formatter<string>::format("", ctx);
+        return formatter<string>::format("Unknown", ctx);
     }
 };

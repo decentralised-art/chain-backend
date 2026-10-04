@@ -5,6 +5,7 @@
 #include "rpc.hpp"
 #include <array>
 #include <exception>
+#include <sstream>
 #include <string_view>
 
 #ifndef Solidity_SOLC_EXECUTABLE
@@ -648,6 +649,8 @@ int main(int argc, char* argv[])
     arg_parser.addArg<bool>("--verbose", "Enable verbose logging");
     arg_parser.addArg<unsigned int>("--port", "Port to listen on");
     arg_parser.addArg<unsigned int>("--max-request-body", "Largest HTTP request body accepted, in bytes; larger requests are answered with 413");
+    arg_parser.addArg<std::string>("--auth-origin", "Comma-separated origins of the sites users sign in through, e.g. https://decentralised.art; sign-in messages name only these (default http://localhost:<port>)");
+    arg_parser.addArg<std::string>("--auth-secret-env", "Environment variable holding the key (at least 32 bytes) that signs sign-in nonces and access tokens; instances sharing it accept each other's (default: a random key per process)");
     arg_parser.addArg<std::string>("--chain-rpc", "Ethereum JSON-RPC endpoint URL used for event sync, execution and publication");
     arg_parser.addArg<std::string>("--chain-rpc-env", "Environment variable holding the JSON-RPC endpoint URL; keeps a provider API key out of the process table");
     arg_parser.addArg<std::string>("--chain-registry", "PT registry proxy address, when no deployment manifest is used");
@@ -710,6 +713,38 @@ int main(int argc, char* argv[])
     {
         spdlog::error("--max-request-body must be a positive number of bytes");
         return 1;
+    }
+
+    if(const auto auth_origin_arg = arg_parser.getArg<std::string>("--auth-origin"))
+    {
+        // Validated and canonicalized by AuthManager.
+        std::istringstream origins(*auth_origin_arg);
+        for(std::string origin; std::getline(origins, origin, ',');)
+        {
+            cfg.auth_origins.emplace_back(dcn::utils::trimView(origin));
+        }
+    }
+    if(cfg.auth_origins.empty())
+    {
+        cfg.auth_origins.push_back(std::format("http://localhost:{}", cfg.port));
+        spdlog::warn("No --auth-origin given: sign-in messages name {}, so wallets warn users signing in from any other site",
+            cfg.auth_origins.front());
+    }
+
+    if(const auto auth_secret_env_arg = arg_parser.getArg<std::string>("--auth-secret-env"))
+    {
+        const char * auth_secret = std::getenv(auth_secret_env_arg->c_str());
+        if(auth_secret == nullptr || *auth_secret == '\0')
+        {
+            spdlog::error("The environment variable named by --auth-secret-env is not set");
+            return 1;
+        }
+        cfg.auth_secret = auth_secret;
+    }
+    else
+    {
+        spdlog::warn("No --auth-secret-env given: access tokens and sign-in nonces are signed with a per-process key, "
+            "so they do not survive a restart and are not accepted by another instance");
     }
 
     const auto events_chain_id = dcn::parse::parseUint64Decimal(arg_parser.getArg<std::string>("--events-chain-id").value_or("1"));
@@ -867,7 +902,21 @@ int main(int argc, char* argv[])
 
     dcn::evm::EVM evm(io_context, EVMC_SHANGHAI, solc_path, pt_path);
 
-    dcn::auth::AuthManager auth_manager(io_context);
+    // AuthManager is neither copyable nor movable, so it is built in place to report a bad setting.
+    std::optional<dcn::auth::AuthManager> auth_manager_storage;
+    try
+    {
+        auth_manager_storage.emplace(io_context, dcn::auth::LoginSettings{
+            .origins = cfg.auth_origins,
+            .chain_id = cfg.events_chain_id,
+            .secret = cfg.auth_secret});
+    }
+    catch(const std::invalid_argument & error)
+    {
+        spdlog::error("Invalid sign-in settings (--auth-origin, --auth-secret-env): {}", error.what());
+        return 1;
+    }
+    dcn::auth::AuthManager & auth_manager = *auth_manager_storage;
 
     dcn::server::Server server(io_context, {asio::ip::tcp::v4(), asio::ip::port_type(cfg.port)});
 
@@ -1097,7 +1146,7 @@ int main(int argc, char* argv[])
     
     server.addRoute({dcn::http::Method::GET, "/version"},   dcn::GET_version, std::cref(build_timestamp));
 
-    server.addRoute({dcn::http::Method::GET, "/nonce/<string>"},    dcn::GET_nonce, std::ref(auth_manager));
+    server.addRoute({dcn::http::Method::GET, "/nonce/<string>?origin=<~string>"},    dcn::GET_nonce, std::ref(auth_manager));
 
     server.addRoute({dcn::http::Method::OPTIONS, "/auth"},  dcn::OPTIONS_auth);
     server.addRoute({dcn::http::Method::POST, "/auth"},     dcn::POST_auth, std::ref(auth_manager));

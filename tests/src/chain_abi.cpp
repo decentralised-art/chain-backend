@@ -62,6 +62,17 @@ TEST_F(UnitTest, Pt_DecodeParticles_RoundTripsRunnerOutput)
     EXPECT_EQ(particles->at(2).data(0), 4294967295u);
 }
 
+TEST_F(UnitTest, Pt_ParticlesJson_KeepsTheFullUint32Range)
+{
+    const auto particles = parse::decodeBytes<std::vector<Particles>>(bytesOf(encodeParticlesResult({
+        {"/Root:0", {0u, 2147483647u, 2147483648u, 4294967295u}}})));
+    ASSERT_TRUE(particles.has_value());
+
+    const auto body = parse::parseToJson(*particles, parse::use_json);
+    ASSERT_TRUE(body.has_value());
+    EXPECT_EQ(body->dump(), R"([{"data":[0,2147483647,2147483648,4294967295],"path":"/Root:0"}])");
+}
+
 TEST_F(UnitTest, Pt_DecodeParticles_RefusesMalformedRunnerOutputWithoutReadingPastIt)
 {
     const auto valid = bytesOf(encodeParticlesResult({{"/Root:0", {1, 2, 3}}}));

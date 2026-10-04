@@ -31,20 +31,20 @@ namespace dcn::publish
     struct DeploymentManifest
     {
         std::uint64_t chain_id = 0;
-        std::string registry;
-        std::string runner;
-        std::string registry_impl;
-        std::string runner_impl;
-        std::string registry_impl_code_hash;
-        std::string runner_impl_code_hash;
-        std::string registry_tx;
-        std::string runner_tx;
+        std::string registry{};
+        std::string runner{};
+        std::string registry_impl{};
+        std::string runner_impl{};
+        std::string registry_impl_code_hash{};
+        std::string runner_impl_code_hash{};
+        std::string registry_tx{};
+        std::string runner_tx{};
         std::int64_t deployment_block = 0;
-        std::string protocol_id;
+        std::string protocol_id{};
         std::uint64_t protocol_version = 0;
-        std::string solc_version;
-        std::string pt_revision;
-        std::string owner;
+        std::string solc_version{};
+        std::string pt_revision{};
+        std::string owner{};
     };
 
     std::expected<DeploymentManifest, std::string> readManifest(const std::filesystem::path & path);

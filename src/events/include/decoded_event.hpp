@@ -71,14 +71,14 @@ namespace dcn::events
 
     struct DecodedEvent
     {
-        RawChainLog raw;
+        RawChainLog raw{};
         EventType event_type = EventType::CONNECTOR_ADDED;
         EventState state = EventState::OBSERVED;
 
-        std::string name;
-        std::string caller;
-        std::string owner;
-        std::string entity_address;
+        std::string name{};
+        std::string caller{};
+        std::string owner{};
+        std::string entity_address{};
         std::optional<std::uint32_t> args_count = std::nullopt;
         std::optional<std::string> format_hash = std::nullopt;
         std::optional<std::string> content_hash = std::nullopt;
@@ -87,7 +87,7 @@ namespace dcn::events
         std::optional<pt::EntityKind> entity_kind = std::nullopt;
         std::optional<std::string> old_owner = std::nullopt;
 
-        std::string decoded_json;
+        std::string decoded_json{};
     };
 
     std::string toString(EventState state);

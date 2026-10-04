@@ -32,9 +32,6 @@ if (MSVC)
 
     add_compile_options(
         /nologo # Suppress compiler startup banner
-        /EHa # Enables standard C++ exception handling plus SEH (Structured Exception Handling)
-        /W4 # Enables aggressive compiler warnings
-        /w14062 # Warns on an enumerator a switch does not handle, as -Wswitch does
         /utf-8 # Set source and execution character set to UTF-8
         /permissive- # Enforce standard compliance
 
@@ -101,13 +98,9 @@ if (MSVC)
 endif()
 
 # ------------------------------------------------------------
-# GCC compiler
+# GCC and Clang (including AppleClang) warnings
 # ------------------------------------------------------------
-if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    message(STATUS "Configuring for GCC compiler")
-    message(STATUS "GCC version: ${CMAKE_CXX_COMPILER_VERSION}")
-
-    # Common GCC warnings and options
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(
         -Wall
         -Wextra
@@ -115,7 +108,17 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         -Wno-unused-parameter
         -Wno-unknown-pragmas
         -fdiagnostics-color=always
+    )
+endif()
 
+# ------------------------------------------------------------
+# GCC compiler
+# ------------------------------------------------------------
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    message(STATUS "Configuring for GCC compiler")
+    message(STATUS "GCC version: ${CMAKE_CXX_COMPILER_VERSION}")
+
+    add_compile_options(
         # Debug config
         "$<$<CONFIG:Debug>:-O0>"
         "$<$<CONFIG:Debug>:-g3>"

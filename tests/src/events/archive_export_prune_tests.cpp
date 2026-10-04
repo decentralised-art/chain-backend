@@ -2,6 +2,9 @@
 
 #include "events_sql_assertions.hpp"
 #include "events_test_harness.hpp"
+#include "events_shard.hpp"
+
+#include <chrono>
 
 using namespace dcn;
 using namespace dcn::tests;
@@ -46,7 +49,7 @@ TEST_F(UnitTest, Events_Archive_ExportsOnlyFinalizedUnexportedRows)
 {
     const auto paths = makeTempEventsPaths("archive_export_predicate");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent finalized = makeDecodedEvent(100, 0, 1, 0xF0, 0x30, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'001'000);
@@ -86,7 +89,7 @@ TEST_F(UnitTest, Events_Archive_ReExportCycle_IsIdempotent)
 {
     const auto paths = makeTempEventsPaths("archive_idempotent");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(102, 0, 1, 0xF2, 0x32, events::EventType::TRANSFORMATION_ADDED, events::EventState::OBSERVED, 1'700'001'002);
@@ -106,7 +109,7 @@ TEST_F(UnitTest, Events_Archive_PrunesOnlyAfterExportedRowsExist)
 {
     const auto paths = makeTempEventsPaths("archive_prune_gate");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(103, 0, 1, 0xF3, 0x33, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'600'000'000);
@@ -126,7 +129,7 @@ TEST_F(UnitTest, Events_Archive_IsNotReplayAuthority_GlobalOutboxRemainsSource)
 {
     const auto paths = makeTempEventsPaths("archive_not_replay_authority");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(104, 0, 1, 0xF4, 0x34, events::EventType::CONDITION_ADDED, events::EventState::OBSERVED, 1'600'000'001);
@@ -146,7 +149,7 @@ TEST_F(UnitTest, Events_Archive_MonthSelection_IncludesPendingFinalizedFeedRows)
 {
     const auto paths = makeTempEventsPaths("archive_feed_month_candidate");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
@@ -180,7 +183,7 @@ TEST_F(UnitTest, Events_Archive_DoesNotExportOrPruneRowsWithUnconsumedChanges)
 {
     const auto paths = makeTempEventsPaths("archive_respects_projection_backlog");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
@@ -221,7 +224,7 @@ TEST_F(UnitTest, Events_Archive_NormalizedRowsRequireFeedProjectionEvidence)
 {
     const auto paths = makeTempEventsPaths("archive_requires_feed_projection_evidence");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
@@ -250,7 +253,7 @@ TEST_F(UnitTest, Events_Archive_FinalizationRejectsFeedRowsWithDivergedSnapshot)
 {
     const auto paths = makeTempEventsPaths("archive_snapshot_mismatch_feed");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
@@ -298,7 +301,7 @@ TEST_F(UnitTest, Events_Archive_PruneRetainsBothRowsWhenFeedPairIsUnexported)
 {
     const auto paths = makeTempEventsPaths("archive_prune_keeps_pair_when_feed_unexported");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 60*60*1000);
 
     const events::DecodedEvent event = makeDecodedEvent(
@@ -344,4 +347,22 @@ TEST_F(UnitTest, Events_Archive_PruneRetainsBothRowsWhenFeedPairIsUnexported)
         EXPECT_EQ(edb.scalarInt64("SELECT COUNT(1) FROM normalized_events_hot;"), 1);
         EXPECT_EQ(edb.scalarInt64("SELECT COUNT(1) FROM raw_events_hot;"), 1);
     }
+}
+
+TEST_F(UnitTest, Events_ShardRouter_PicksTheUtcMonthOfTheBlockTime)
+{
+    using namespace std::chrono;
+    const events::MonthlyEventShardRouter router("archive");
+    const auto month_of = [&](const sys_seconds time)
+    {
+        const events::EventShardId shard = router.shardForFinalizedBlockTime(CHAIN_ID, time.time_since_epoch().count());
+        EXPECT_EQ(shard.chain_id, CHAIN_ID);
+        return std::pair{shard.year, shard.month};
+    };
+
+    EXPECT_EQ(month_of(sys_seconds{}), std::pair(1970, 1));
+    EXPECT_EQ(month_of(sys_seconds{} - 1s), std::pair(1969, 12));
+    EXPECT_EQ(month_of(sys_days{2024y / March / 1} - 1s), std::pair(2024, 2));
+    EXPECT_EQ(month_of(sys_days{2024y / March / 1}), std::pair(2024, 3));
+    EXPECT_EQ(month_of(sys_days{2026y / October / 4} + 12h), std::pair(2026, 10));
 }

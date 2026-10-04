@@ -66,9 +66,9 @@ namespace dcn
         struct PublishTarget
         {
             pt::EntityKind kind = pt::EntityKind::TRANSFORMATION;
-            std::string name;
+            std::string name{};
             chain::Address owner{};
-            json body;
+            json body{};
         };
 
         /// The route kind, the authenticated owner and the entity name every /publish

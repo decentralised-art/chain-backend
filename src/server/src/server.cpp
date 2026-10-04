@@ -198,7 +198,11 @@ namespace dcn::server
                 request.setBody(full_request_data.substr(actual_body_start, content_length));
             }
 
-            spdlog::debug("Received request:\n{}", full_request_data);
+            // The request line only: headers and body carry access tokens and signatures.
+            if(spdlog::should_log(spdlog::level::debug))
+            {
+                spdlog::debug(std::format("Received request: {} {}", request.getMethod(), request.getPath()));
+            }
 
             auto [handler, route_args, query_args] = _router.findRoute(request);
 
@@ -248,7 +252,11 @@ namespace dcn::server
                 response.setBodyWithContentLength("404 Not Found");
             }
 
-            spdlog::debug("Send response\n{}\n", std::format("{}", response));
+            // The status only: a response body can carry a freshly issued access token.
+            if(spdlog::should_log(spdlog::level::debug))
+            {
+                spdlog::debug(std::format("Send response: {}", response.getCode()));
+            }
 
             co_await writeData(sock, std::format("{}", response));
 

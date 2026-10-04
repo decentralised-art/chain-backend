@@ -139,7 +139,7 @@ TEST_F(UnitTest, Events_Concurrency_StrandSerializedIngestAndProject_AreDetermin
     const auto paths = makeTempEventsPaths("concurrency_bound_strand_marshal");
     asio::io_context io_context;
     auto hot_write_strand = asio::make_strand(io_context);
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     const events::DecodedEvent event = makeDecodedEvent(
         1'000,
@@ -181,7 +181,7 @@ TEST_F(UnitTest, Events_Concurrency_IngestAndProjectSerializeOnSameHotWriteStran
 {
     const auto paths = makeTempEventsPaths("concurrency_ingest_project_same_strand");
     asio::io_context io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     auto work_guard = asio::make_work_guard(io_context);
     std::vector<std::thread> io_workers;
@@ -321,7 +321,7 @@ TEST_F(UnitTest, Events_Concurrency_ReadersDuringWriter_DoNotCorruptState)
 {
     const auto paths = makeTempEventsPaths("concurrency_read_write");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     std::atomic<bool> done{false};

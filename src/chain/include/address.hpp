@@ -2,6 +2,8 @@
 
 #include <optional>
 #include <cstdint>
+#include <string>
+#include <string_view>
 #include <vector>
 
 
@@ -26,5 +28,12 @@ namespace dcn::chain
     chain::Address ethAddressFromPublicKey(const std::uint8_t* pubkey, std::size_t len);
 
     std::string addressToHex(const chain::Address & address);
+
+    /// Exactly 40 hex digits, optionally `0x`-prefixed. Unlike evmc::from_hex, a shorter
+    /// value is refused rather than left-padded with zeros.
+    std::optional<chain::Address> addressFromHex(std::string_view hex);
+
+    /// `0x`-prefixed hex with the EIP-55 mixed-case checksum.
+    std::string addressToChecksumHex(const chain::Address & address);
 
 }

@@ -63,10 +63,8 @@ struct std::formatter<evmc_status_code> : std::formatter<std::string> {
             case EVMC_INTERNAL_ERROR : return formatter<string>::format("Internal Error", ctx);
             case EVMC_REJECTED : return formatter<string>::format("Rejected", ctx);
             case EVMC_OUT_OF_MEMORY : return formatter<string>::format("Out of Memory", ctx);
-
-            default:  return formatter<string>::format("Unknown", ctx);
         }
-        return formatter<string>::format("", ctx);
+        return formatter<string>::format("Unknown", ctx);
     }
 };
 
@@ -81,10 +79,8 @@ struct std::formatter<evmc_call_kind> : std::formatter<std::string> {
             case EVMC_CREATE : return formatter<string>::format("Create", ctx);
             case EVMC_CREATE2 : return formatter<string>::format("Create2", ctx);
             case EVMC_EOFCREATE : return formatter<string>::format("EOF Create", ctx);
-
-            default:  return formatter<string>::format("Unknown", ctx);
         }
-        return formatter<string>::format("", ctx);
+        return formatter<string>::format("Unknown", ctx);
     }
 };
 
@@ -95,9 +91,8 @@ struct std::formatter<evmc_flags> : std::formatter<std::string> {
         {
             case EVMC_STATIC : return formatter<string>::format("Static", ctx);
             case EVMC_DELEGATED : return formatter<string>::format("Delegated", ctx);
-            default:  return formatter<string>::format("Unknown", ctx);
         }
-        return formatter<string>::format("", ctx);
+        return formatter<string>::format("Unknown", ctx);
     }
 };
 

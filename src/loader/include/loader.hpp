@@ -26,14 +26,14 @@ namespace dcn::loader
     /// hash. The bundle is only hashed, never stored.
     struct PreparedPublication
     {
-        pt::Publication publication;
-        std::vector<std::uint8_t> creation_code;
+        pt::Publication publication{};
+        std::vector<std::uint8_t> creation_code{};
         // Code the entity runs once deployed; its hash is publication.runtime_code_hash.
-        std::vector<std::uint8_t> runtime_code;
-        std::string artifact_bytes;
-        std::string content_hash;   // publication.content_hash as hex
-        std::optional<pt::ConnectorRegistration> registration;   // connectors only
-        std::vector<pt::ArtifactDependency> dependencies;         // connectors only
+        std::vector<std::uint8_t> runtime_code{};
+        std::string artifact_bytes{};
+        std::string content_hash{};   // publication.content_hash as hex
+        std::optional<pt::ConnectorRegistration> registration{};   // connectors only
+        std::vector<pt::ArtifactDependency> dependencies{};         // connectors only
     };
 
     /// The definition an entity was created with on this server, including its Solidity

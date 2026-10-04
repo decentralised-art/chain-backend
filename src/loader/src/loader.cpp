@@ -195,13 +195,30 @@ namespace dcn::loader
             return source.empty() ? std::string{} : chain::bytes32ToHex(chain::keccakString(source));
         }
 
-        static std::vector<std::string> solidityImports(const std::string & source)
+        // The paths of every `import "path";` directive. A plain scan: the source carries user
+        // code, and std::regex recurses per character.
+        static std::vector<std::string> solidityImports(const std::string_view source)
         {
-            static const std::regex pattern(R"(import\s+["']([^"']+)["']\s*;)");
+            constexpr std::string_view keyword = "import";
+            constexpr std::string_view whitespace = " \t\n\v\f\r";
+            constexpr std::string_view quotes = "\"'";
+            constexpr auto npos = std::string_view::npos;
+
             std::vector<std::string> imports;
-            for(std::sregex_iterator it(source.begin(), source.end(), pattern), end; it != end; ++it)
+            for(std::size_t pos = source.find(keyword); pos != npos; pos = source.find(keyword, pos))
             {
-                imports.push_back((*it)[1].str());
+                pos += keyword.size();
+                const std::size_t open = source.find_first_not_of(whitespace, pos);
+                if(open == pos || open == npos || quotes.find(source[open]) == npos) continue;
+
+                const std::size_t close = source.find_first_of(quotes, open + 1);
+                if(close == npos || close == open + 1) continue;
+
+                const std::size_t semicolon = source.find_first_not_of(whitespace, close + 1);
+                if(semicolon == npos || source[semicolon] != ';') continue;
+
+                imports.emplace_back(source.substr(open + 1, close - open - 1));
+                pos = semicolon + 1;
             }
             std::ranges::sort(imports);
             imports.erase(std::ranges::unique(imports).begin(), imports.end());
@@ -1575,11 +1592,6 @@ namespace dcn::loader
                 spdlog::error("Unhandled exception while importing transformation '{}': {}", name, e.what());
                 success = false;
             }
-            catch(...)
-            {
-                spdlog::error("Unhandled unknown exception while importing transformation '{}'", name);
-                success = false;
-            }
         }
 
         for(std::size_t i = 0; i < condition_names.size(); ++i)
@@ -1604,11 +1616,6 @@ namespace dcn::loader
                 spdlog::error("Unhandled exception while importing condition '{}': {}", name, e.what());
                 success = false;
             }
-            catch(...)
-            {
-                spdlog::error("Unhandled unknown exception while importing condition '{}'", name);
-                success = false;
-            }
         }
 
         for(std::size_t i = 0; i < connector_names.size(); ++i)
@@ -1631,11 +1638,6 @@ namespace dcn::loader
             catch(const std::exception & e)
             {
                 spdlog::error("Unhandled exception while importing connector '{}': {}", name, e.what());
-                success = false;
-            }
-            catch(...)
-            {
-                spdlog::error("Unhandled unknown exception while importing connector '{}'", name);
                 success = false;
             }
         }

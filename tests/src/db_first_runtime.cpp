@@ -728,7 +728,7 @@ TEST_F(UnitTest, API_PostConnector_DeploysMissingTransformationDependencyFromDb)
     const std::string caller_hex = evmc::hex(caller);
     (void)runAwaitable(io_context, evm_instance.addAccount(caller, evm::DEFAULT_GAS_LIMIT));
     (void)runAwaitable(io_context, evm_instance.setGas(caller, evm::DEFAULT_GAS_LIMIT));
-    const std::string access_token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
+    const std::string access_token = auth_manager.generateAccessToken(caller);
 
     const auto transformation_record = makeTransformationRecord("mul", caller_hex, "return x * 2;");
     ASSERT_TRUE(runAwaitable(io_context, registry.addTransformation(makeAddressFromByte(0x4A), transformation_record)));
@@ -810,7 +810,7 @@ TEST_F(UnitTest, API_PostConnector_MissingTransformationDependencyReturnsBadRequ
     const std::string caller_hex = evmc::hex(caller);
     (void)runAwaitable(io_context, evm_instance.addAccount(caller, evm::DEFAULT_GAS_LIMIT));
     (void)runAwaitable(io_context, evm_instance.setGas(caller, evm::DEFAULT_GAS_LIMIT));
-    const std::string access_token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
+    const std::string access_token = auth_manager.generateAccessToken(caller);
 
     Connector connector;
     connector.set_name("connector_missing_tx");
@@ -886,7 +886,7 @@ TEST_F(UnitTest, API_PostConnector_DuplicateAfterRestartReturnsAlreadyRegistered
 
         (void)runAwaitable(io_context, evm_instance.addAccount(caller, evm::DEFAULT_GAS_LIMIT));
         (void)runAwaitable(io_context, evm_instance.setGas(caller, evm::DEFAULT_GAS_LIMIT));
-        const std::string access_token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
+        const std::string access_token = auth_manager.generateAccessToken(caller);
 
         http::Request request;
         request.setMethod(http::Method::POST)
@@ -926,7 +926,7 @@ TEST_F(UnitTest, API_PostConnector_DuplicateAfterRestartReturnsAlreadyRegistered
 
         (void)runAwaitable(io_context, evm_instance.addAccount(caller, evm::DEFAULT_GAS_LIMIT));
         (void)runAwaitable(io_context, evm_instance.setGas(caller, evm::DEFAULT_GAS_LIMIT));
-        const std::string access_token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
+        const std::string access_token = auth_manager.generateAccessToken(caller);
 
         const auto contains_before = containsConnector(io_context, evm_instance, "connector_dup_restart");
         ASSERT_TRUE(contains_before.has_value());
@@ -997,7 +997,7 @@ TEST_F(UnitTest, API_PostTransformation_DuplicateAfterRestartReturnsAlreadyRegis
 
         (void)runAwaitable(io_context, evm_instance.addAccount(caller, evm::DEFAULT_GAS_LIMIT));
         (void)runAwaitable(io_context, evm_instance.setGas(caller, evm::DEFAULT_GAS_LIMIT));
-        const std::string access_token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
+        const std::string access_token = auth_manager.generateAccessToken(caller);
 
         http::Request request;
         request.setMethod(http::Method::POST)
@@ -1037,7 +1037,7 @@ TEST_F(UnitTest, API_PostTransformation_DuplicateAfterRestartReturnsAlreadyRegis
 
         (void)runAwaitable(io_context, evm_instance.addAccount(caller, evm::DEFAULT_GAS_LIMIT));
         (void)runAwaitable(io_context, evm_instance.setGas(caller, evm::DEFAULT_GAS_LIMIT));
-        const std::string access_token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
+        const std::string access_token = auth_manager.generateAccessToken(caller);
 
         const auto contains_before = containsTransformation(io_context, evm_instance, "tx_dup_restart");
         ASSERT_TRUE(contains_before.has_value());
@@ -1108,7 +1108,7 @@ TEST_F(UnitTest, API_PostCondition_DuplicateAfterRestartReturnsAlreadyRegistered
 
         (void)runAwaitable(io_context, evm_instance.addAccount(caller, evm::DEFAULT_GAS_LIMIT));
         (void)runAwaitable(io_context, evm_instance.setGas(caller, evm::DEFAULT_GAS_LIMIT));
-        const std::string access_token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
+        const std::string access_token = auth_manager.generateAccessToken(caller);
 
         http::Request request;
         request.setMethod(http::Method::POST)
@@ -1148,7 +1148,7 @@ TEST_F(UnitTest, API_PostCondition_DuplicateAfterRestartReturnsAlreadyRegistered
 
         (void)runAwaitable(io_context, evm_instance.addAccount(caller, evm::DEFAULT_GAS_LIMIT));
         (void)runAwaitable(io_context, evm_instance.setGas(caller, evm::DEFAULT_GAS_LIMIT));
-        const std::string access_token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
+        const std::string access_token = auth_manager.generateAccessToken(caller);
 
         const auto contains_before = containsCondition(io_context, evm_instance, "cond_dup_restart");
         ASSERT_TRUE(contains_before.has_value());

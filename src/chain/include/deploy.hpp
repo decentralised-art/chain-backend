@@ -26,8 +26,8 @@ namespace dcn::chain
             TRANSACTION_REVERTED
         } kind = Kind::UNKNOWN;
 
-        std::string message;
-        std::vector<std::uint8_t> result_bytes;
+        std::string message{};
+        std::vector<std::uint8_t> result_bytes{};
     };
 }
 
@@ -42,8 +42,9 @@ struct std::formatter<dcn::chain::DeployError::Kind> : std::formatter<std::strin
                 return formatter<string>::format("Invalid input", ctx);
             case dcn::chain::DeployError::Kind::TRANSACTION_REVERTED:
                 return formatter<string>::format("Transaction reverted", ctx);
-            default:
+            case dcn::chain::DeployError::Kind::UNKNOWN:
                 return formatter<string>::format("Unknown", ctx);
         }
+        return formatter<string>::format("Unknown", ctx);
     }
 };

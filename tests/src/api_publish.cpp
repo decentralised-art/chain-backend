@@ -160,7 +160,7 @@ TEST_F(UnitTest, API_PublishConfirm_ValidatesRouteAuthenticationAndBody)
     const publish::Publisher publisher(makeClient(node), makeManifest());
 
     const chain::Address owner = makeAddressFromByte(0x42);
-    const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(owner));
+    const std::string token = auth_manager.generateAccessToken(owner);
     const json body{{"name", "PubTx"}, {"content_hash", hexBytes(0xAA, 32)}, {"tx_hash", hexBytes(0x99, 32)}};
 
     const auto confirm = [&](const std::string & kind, const std::string & request_token, const json & request_body,
@@ -195,7 +195,7 @@ TEST_F(UnitTest, API_PublishConfirm_AnswersPendingUntilTheRegistryEventIsMined)
     const publish::Publisher publisher(makeClient(node), makeManifest());
 
     const chain::Address owner = makeAddressFromByte(0x42);
-    const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(owner));
+    const std::string token = auth_manager.generateAccessToken(owner);
     const std::string tx_hash = hexBytes(0x99, 32);
     const evmc::bytes32 content_hash = bytes32OfFill(0xAA);
     const json body{{"name", "PubTx"}, {"content_hash", chain::bytes32ToHex(content_hash)}, {"tx_hash", tx_hash}};
@@ -232,7 +232,7 @@ TEST_F(UnitTest, API_PublishSend_ValidatesRouteAuthenticationAndBody)
 
     const auto owner = makeOwnerSigner();
     const pt::Publication publication = makeRelayedPublication(owner->address(), "PubTx");
-    const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(owner->address()));
+    const std::string token = auth_manager.generateAccessToken(owner->address());
     const json body{
         {"name", "PubTx"},
         {"content_hash", chain::bytes32ToHex(publication.content_hash)},
@@ -282,7 +282,7 @@ TEST_F(UnitTest, API_PublishSend_ForwardsOnlyTheOwnersSignedPublication)
 
     const auto send = [&](const chain::Address & caller)
     {
-        const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
+        const std::string token = auth_manager.generateAccessToken(caller);
         return runAwaitable(io_context, POST_publishSend(
             postRequest("/publish/transformation/send", token, body),
             {kindArg("transformation")}, {}, auth_manager, &publisher));
@@ -332,7 +332,7 @@ TEST_F(UnitTest, API_PublishPrepare_RebuildsTheCallersLocalEntityIntoAnOwnerPaid
 
     const auto prepareWith = [&](const chain::Address & caller, const json & request_body)
     {
-        const std::string token = runAwaitable(io_context, auth_manager.generateAccessToken(caller));
+        const std::string token = auth_manager.generateAccessToken(caller);
         return runAwaitable(io_context, POST_publishPrepare(
             postRequest("/publish/transformation/prepare", token, request_body),
             {kindArg("transformation")}, {}, auth_manager, evm_instance, &publisher, cfg));

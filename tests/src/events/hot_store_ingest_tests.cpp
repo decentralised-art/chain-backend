@@ -13,7 +13,7 @@ TEST_F(UnitTest, Events_HotStore_IngestSingleEvent_WritesDurableRows)
 {
     const auto paths = makeTempEventsPaths("ingest_single");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     events::DecodedEvent event = makeDecodedEvent(11, 1, 2, 0xA0, 0xB0, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'000'000);
     const events::ChainBlockInfo block_info = makeBlockInfo(11, event.raw.block_hash, hexBytes(0x99, 32), 1'700'000'000, 1'700'000'001'000);
@@ -38,7 +38,7 @@ TEST_F(UnitTest, Events_HotStore_UndecodableRawLog_IsDurableAndCursorAdvances)
 {
     const auto paths = makeTempEventsPaths("ingest_decode_failure_durable");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     events::RawChainLog raw = makeRawLog(
         21,
@@ -96,7 +96,7 @@ TEST_F(UnitTest, Events_HotStore_DuplicateIngest_IsIdempotent)
 {
     const auto paths = makeTempEventsPaths("ingest_idempotent");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     const events::DecodedEvent event = makeDecodedEvent(31, 3, 4, 0xA2, 0xB3, events::EventType::TRANSFORMATION_ADDED, events::EventState::OBSERVED, 1'700'000'200);
     const events::ChainBlockInfo block_info = makeBlockInfo(31, event.raw.block_hash, hexBytes(0x97, 32), 1'700'000'200, 1'700'000'201'000);
@@ -116,7 +116,7 @@ TEST_F(UnitTest, Events_HotStore_SourceCursor_PersistsAcrossRestart)
 
     {
         asio::io_context store_io_context;
-        events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+        events::SQLiteHotStore store(paths.hot_db);
         const events::DecodedEvent event = makeDecodedEvent(41, 0, 1, 0xA4, 0xB4, events::EventType::CONDITION_ADDED, events::EventState::OBSERVED, 1'700'000'300);
         const events::ChainBlockInfo block_info = makeBlockInfo(41, event.raw.block_hash, hexBytes(0x96, 32), 1'700'000'300, 1'700'000'301'000);
         ASSERT_TRUE(awaitIngestBatch(store_io_context, store, CHAIN_ID, {event}, {block_info}, 42, 1'700'000'301'200));
@@ -124,7 +124,7 @@ TEST_F(UnitTest, Events_HotStore_SourceCursor_PersistsAcrossRestart)
 
     {
         asio::io_context store_io_context;
-        events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+        events::SQLiteHotStore store(paths.hot_db);
         const auto next_block = awaitLoadNextCursor(store_io_context, store, events::CursorKind::NEXT_BLOCK);
         ASSERT_TRUE(next_block.has_value());
         EXPECT_EQ(*next_block, 42u);
@@ -140,7 +140,7 @@ TEST_F(UnitTest, Events_HotStore_LocalSequenceCursor_CommitsWithDurableIngest)
 
     {
         asio::io_context store_io_context;
-        events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+        events::SQLiteHotStore store(paths.hot_db);
         const events::DecodedEvent event = makeDecodedEvent(
             42,
             0,
@@ -166,7 +166,7 @@ TEST_F(UnitTest, Events_HotStore_LocalSequenceCursor_CommitsWithDurableIngest)
 
     {
         asio::io_context restarted_io_context;
-        events::SQLiteHotStore restarted(paths.hot_db, CHAIN_ID);
+        events::SQLiteHotStore restarted(paths.hot_db);
         const auto next_seq = awaitLoadNextCursor(restarted_io_context, restarted, events::CursorKind::LOCAL_SEQUENCE);
         ASSERT_TRUE(next_seq.has_value());
         EXPECT_EQ(*next_seq, 777u);
@@ -179,7 +179,7 @@ TEST_F(UnitTest, Events_HotStore_ReorgReplacement_MarksOldRowsRemovedAndQueuesJo
 {
     const auto paths = makeTempEventsPaths("ingest_reorg_replace");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     events::DecodedEvent old_event = makeDecodedEvent(50, 0, 1, 0xAA, 0xC1, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'000'400);
@@ -220,7 +220,7 @@ TEST_F(UnitTest, Events_HotStore_RemovedRawWithoutDecodedEvent_StillInvalidatesN
 {
     const auto paths = makeTempEventsPaths("ingest_removed_raw_without_decoded");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent inserted = makeDecodedEvent(
@@ -270,7 +270,7 @@ TEST_F(UnitTest, Events_HotStore_RemovedRawWithDecodedObserved_StillPinsRawState
 {
     const auto paths = makeTempEventsPaths("ingest_removed_raw_with_decoded_observed");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent inserted = makeDecodedEvent(
@@ -326,7 +326,7 @@ TEST_F(UnitTest, Events_ChangeSeq_BumpsOnInsertAndEachTransition)
 {
     const auto paths = makeTempEventsPaths("change_seq");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     auto ev = makeDecodedEvent(60, 0, 1, 0xB0, 0xD0, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'000'500);
     auto blk = makeBlockInfo(60, ev.raw.block_hash, hexBytes(0x91,32), 1'700'000'500, 1'700'000'501'000);
     ASSERT_TRUE(awaitIngestBatch(io, store, CHAIN_ID, {ev}, {blk}, 61, 1'700'000'501'100));
@@ -345,7 +345,7 @@ TEST_F(UnitTest, Events_ChangeSeq_DistinctPerRowOnBatchFinality)
     // each row receives a DISTINCT change_seq — no two rows share the same value.
     const auto paths = makeTempEventsPaths("change_seq_distinct");
     asio::io_context io;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     // Two events in the SAME block, different log_index values.
     auto ev0 = makeDecodedEvent(70, 0, 0, 0xC0, 0xE0, events::EventType::CONNECTOR_ADDED, events::EventState::OBSERVED, 1'700'001'000);

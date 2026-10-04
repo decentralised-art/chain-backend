@@ -55,7 +55,7 @@ TEST_F(UnitTest, Events_Maintenance_ConfiguresWalJournalMode)
 {
     const auto paths = makeTempEventsPaths("maintenance_wal_mode");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     const std::string journal_mode = sqlitePragmaText(paths.hot_db, "journal_mode");
     EXPECT_EQ(journal_mode, "wal");
@@ -66,7 +66,7 @@ TEST_F(UnitTest, Events_Maintenance_RejectsLikelyNetworkFilesystemPath)
     EXPECT_THROW(
         {
             asio::io_context store_io_context;
-            events::SQLiteHotStore store("//server/share/events_hot.sqlite", CHAIN_ID);
+            events::SQLiteHotStore store("//server/share/events_hot.sqlite");
         },
         std::runtime_error);
 }
@@ -75,7 +75,7 @@ TEST_F(UnitTest, Events_Maintenance_WalCheckpointRunsAndReportsStats)
 {
     const auto paths = makeTempEventsPaths("maintenance_wal_checkpoint");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
     feed::Feed feed_obj(store_io_context, paths.feed_db, paths.feed_archive_root, 7LL*24*60*60*1000);
 
     const events::DecodedEvent event =
@@ -99,7 +99,7 @@ TEST_F(UnitTest, Events_Prune_DeletesOnlyConsumedFinalizedBelowFloor)
 {
     const auto paths = makeTempEventsPaths("prune_consumed_finalized_below_floor");
     asio::io_context store_io_context;
-    events::SQLiteHotStore store(paths.hot_db, CHAIN_ID);
+    events::SQLiteHotStore store(paths.hot_db);
 
     // --- event1: block 100, finalized first → lower change_seq (the prunable target)
     const events::DecodedEvent event1 = makeDecodedEvent(

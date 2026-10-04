@@ -386,7 +386,7 @@ struct std::formatter<dcn::server::RouteArgType> : std::formatter<std::string> {
         // Unknown
         case dcn::server::RouteArgType::Unknown:             return formatter<string>::format("Unknown", ctx);
     }
-    return formatter<string>::format("", ctx);
+    return formatter<string>::format("Unknown", ctx);
   }
 };
 
@@ -401,7 +401,7 @@ struct std::formatter<dcn::server::RouteArgRequirement> : std::formatter<std::st
         // Unknown
         case dcn::server::RouteArgRequirement::Unknown:      return formatter<string>::format("Unknown", ctx);
     }
-    return formatter<string>::format("", ctx);
+    return formatter<string>::format("Unknown", ctx);
   }
 };
 

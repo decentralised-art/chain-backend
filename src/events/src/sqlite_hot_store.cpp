@@ -81,10 +81,8 @@ namespace dcn::events
             return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
         }
     };
-    SQLiteHotStore::SQLiteHotStore(const std::filesystem::path& hot_db_path,
-                                   const std::uint64_t default_chain_id)
+    SQLiteHotStore::SQLiteHotStore(const std::filesystem::path& hot_db_path)
         : _hot_db_path(hot_db_path)
-        , _default_chain_id(default_chain_id)
     {
         if (!_hot_db_path.parent_path().empty())
         {
