@@ -1,6 +1,7 @@
 name: Build (linux-x64 Release)
 
 on:
+  pull_request:
   workflow_run:
     workflows: ["Test (linux Debug)"]
     types: [completed]
@@ -8,13 +9,14 @@ on:
 
 jobs:
   build-linux-release:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'pull_request' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
+        ref: ${{ github.event.workflow_run.head_sha || github.sha }}
         submodules: recursive
     
     - name: Install dependencies
@@ -29,7 +31,7 @@ jobs:
 
     - name: Configure and build (RelWithDebInfo)
       run: |
-        cmake -S . -B build-linux-release -DCMAKE_C_FLAGS=-m64 -DCMAKE_CXX_FLAGS=-m64 -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_INSTALL_PREFIX=install -DCMAKE_BUILD_TYPE=RelWithDebInfo 
+        cmake -S . -B build-linux-release -DCMAKE_C_FLAGS=-m64 -DCMAKE_CXX_FLAGS=-m64 -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DDECENTRALISED_ART_USE_SUBMODULE_PT=ON -DCMAKE_INSTALL_PREFIX=install -DCMAKE_BUILD_TYPE=RelWithDebInfo
         cmake --build build-linux-release --config RelWithDebInfo --target install -j 4
 
     - name: Pack install directory into tarball

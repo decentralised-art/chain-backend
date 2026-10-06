@@ -81,6 +81,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(asio)
 add_library(asio INTERFACE)
+# GCC's optimized coroutine analysis diagnoses Asio's matching frame allocator
+# and recycler as mismatched new/delete. Keep the diagnostic visible without
+# making it fatal for consumers of Asio; other warnings remain errors.
+target_compile_options(asio INTERFACE
+    "$<$<CXX_COMPILER_ID:GNU>:-Wno-error=mismatched-new-delete>")
 if(WIN32)
     target_compile_options(asio INTERFACE /wd4459)
 endif()

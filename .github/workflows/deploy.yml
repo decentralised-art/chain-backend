@@ -26,8 +26,10 @@ jobs:
       DEPLOY_USER: ${{ vars.DEPLOY_USER }}
       DEPLOY_INSTALL_DIR: ${{ vars.DEPLOY_INSTALL_DIR }}
       DEPLOY_SERVICE_NAME: ${{ vars.DEPLOY_SERVICE_NAME }}
+      DEPLOY_API_BASE_URL: ${{ vars.DEPLOY_API_BASE_URL || 'https://api.decentralised.art/chain' }}
+      DEPLOY_AUTH_ORIGIN: ${{ vars.DEPLOY_AUTH_ORIGIN || 'https://decentralised.art' }}
     
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event != 'pull_request' }}
 
     steps:
     - name: Check deployment variables
@@ -123,3 +125,26 @@ jobs:
           sudo systemctl restart "$DEPLOY_SERVICE_NAME"
           sudo systemctl status "$DEPLOY_SERVICE_NAME" --no-pager
           echo "Service restarted"
+
+    - name: Verify public sign-in challenge
+      run: |
+        if ! curl --fail --silent --show-error --retry 5 --retry-delay 2 --retry-connrefused \
+          --connect-timeout 10 --max-time 30 --get \
+          --data-urlencode "origin=$DEPLOY_AUTH_ORIGIN" \
+          "${DEPLOY_API_BASE_URL%/}/nonce/0x1212121212121212121212121212121212121212" \
+          --output challenge.json; then
+          echo "::error::The public sign-in endpoint is unavailable or rejected the configured origin. Check the proxy target and --auth-origin configuration."
+          exit 1
+        fi
+        if ! jq -e --arg origin "$DEPLOY_AUTH_ORIGIN" '
+          . as $challenge |
+          (.nonce | type == "string") and
+          (.nonce | test("^[0-9a-f]{66}$")) and
+          (.message | type == "string") and
+          (.message | startswith($origin + " wants you to sign in with your Ethereum account:\n")) and
+          (.message | contains("\nURI: " + $origin + "\n")) and
+          (.message | contains("\nNonce: " + $challenge.nonce + "\n"))
+        ' challenge.json > /dev/null; then
+          echo "::error::The public API did not return the current sign-in challenge. Check the deployed binary, proxy target and --auth-origin configuration."
+          exit 1
+        fi

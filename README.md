@@ -81,6 +81,49 @@ cmake -S . -B build -DCMAKE_INSTALL_PREFIX=install -DDECENTRALISED_ART_BUILD_TES
 <INSTALL_DIRECTORY>/bin/DecentralisedArtServer.exe
 ```
 
+### Deploying browser sign-in
+
+The Linux release is built for pull requests and after successful Linux Debug
+tests on `main`. Only the latter triggers production deployment. The release
+uses the tested commit and its pinned PT submodule.
+
+Configure the service's existing startup command with the sites that use it to
+sign in. For the public Studio and the localhost development page, add:
+
+```sh
+--auth-origin https://decentralised.art,http://localhost:5173
+```
+
+Include any other supported page origins explicitly. The API's origin is not a
+substitute for the page's origin. Keep the service's existing chain, publication
+and storage arguments. The default sign-in origin is the backend's localhost
+port, so it does not enable public Studio sign-in.
+
+For tokens to survive restarts, configure `--auth-secret-env` with a stable secret
+in the service environment, as described below. Do not put the secret in command
+arguments or repository variables.
+
+After restarting, this read-only request should return a 66-character lowercase
+hex `nonce` and an EIP-4361 `message` naming the requested origin and that nonce:
+
+```sh
+curl --fail --get \
+  --data-urlencode 'origin=https://decentralised.art' \
+  'https://api.decentralised.art/chain/nonce/0x1212121212121212121212121212121212121212'
+```
+
+Repeat with `origin=http://localhost:5173` for local Studio development. A short
+nonce without `message` means the request reached a binary that does not serve
+the current API contract. A rejection of the origin means `--auth-origin` needs
+to include that page. Check the reverse proxy target as well as the installed
+binary.
+
+Production deployment checks the public challenge before reporting success.
+For a different deployment, set repository or environment variables
+`DEPLOY_API_BASE_URL` and `DEPLOY_AUTH_ORIGIN`; their defaults are
+`https://api.decentralised.art/chain` and `https://decentralised.art`. The checked
+origin must also appear in the service's `--auth-origin` list.
+
 ### Command-line arguments
 
 Pass values as separate arguments, for example `--port 54321`; `--option=value`
