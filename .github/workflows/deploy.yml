@@ -29,7 +29,7 @@ jobs:
       DEPLOY_API_BASE_URL: ${{ vars.DEPLOY_API_BASE_URL || 'https://api.decentralised.art/chain' }}
       DEPLOY_AUTH_ORIGIN: ${{ vars.DEPLOY_AUTH_ORIGIN || 'https://decentralised.art' }}
     
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event != 'pull_request' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_run' && github.event.workflow_run.head_branch == 'main' }}
 
     steps:
     - name: Check deployment variables

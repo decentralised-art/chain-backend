@@ -83,9 +83,10 @@ cmake -S . -B build -DCMAKE_INSTALL_PREFIX=install -DDECENTRALISED_ART_BUILD_TES
 
 ### Deploying browser sign-in
 
-The Linux release is built for pull requests and after successful Linux Debug
-tests on `main`. Only the latter triggers production deployment. The release
-uses the tested commit and its pinned PT submodule.
+The Linux release is built on branch pushes, including pull request branches,
+and after successful Linux Debug tests on `main`. Only the latter triggers
+production deployment. The production release uses the tested commit and its pinned PT
+submodule.
 
 Configure the service's existing startup command with the sites that use it to
 sign in. For the public Studio and the localhost development page, add:

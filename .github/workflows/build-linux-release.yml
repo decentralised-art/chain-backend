@@ -1,7 +1,8 @@
 name: Build (linux-x64 Release)
 
 on:
-  pull_request:
+  push:
+    branches-ignore: [ main ]
   workflow_run:
     workflows: ["Test (linux Debug)"]
     types: [completed]
@@ -9,7 +10,7 @@ on:
 
 jobs:
   build-linux-release:
-    if: ${{ github.event_name == 'pull_request' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'push' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
